@@ -51,13 +51,13 @@ livecd: prep_image
 	rm -fr tmp/
 
 boot-floppy:
-	qemu-system-i386 -net nic,model=rtl8139 -soundhw pcspk -fda ics-os-floppy.img -boot a -m 64M 
+	qemu-system-i386 -net nic,model=rtl8139 -fda ics-os-floppy.img -boot a -m 64M 
 
 boot-floppy-gdb:
-	qemu-system-i386 -net nic,model=rtl8139 -soundhw pcspk -fda ics-os-floppy.img -boot a -m 64M -s -S
+	qemu-system-i386 -net nic,model=rtl8139 -fda ics-os-floppy.img -boot a -m 64M -s -S
 
 boot-floppy-vnc:
-	qemu-system-i386 -net nic,model=rtl8139 -soundhw pcspk -fda ics-os-floppy.img -boot a -m 64M -vnc :1 
+	qemu-system-i386 -net nic,model=rtl8139 -fda ics-os-floppy.img -boot a -m 64M -vnc :1 
 
 boot-debug:
 	cd kernel ;	qemu-system-i386 -s -S -kernel Kernel32.bin -fda ../ics-os-floppy.img -m 64M -append "root (hdp0p0)" 
