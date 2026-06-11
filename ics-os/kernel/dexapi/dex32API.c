@@ -177,6 +177,7 @@ void api_init(){
    api_addsystemcall(0x9E,write_char,0,0);
    api_addsystemcall(0x9F,env_getenv,0,0);
    api_addsystemcall(0xA0,env_setenv,0,0);
+   api_addsystemcall(0xA1,dex32_thread_join,0,API_REQUIRE_INTS); //join a thread of the current process
 };
 
 

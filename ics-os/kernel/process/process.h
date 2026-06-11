@@ -334,6 +334,7 @@ int      execp(char *fname,DWORD mode,char *params);
 DWORD    exit(DWORD val);
 PCB386   *findprocess(DWORD processid,int);
 PCB386   *ps_findprocess(DWORD processid);
+int      dex32_thread_join(DWORD threadid);
 int      findprocessname(const char *name);
 void     *findsemaphore(DWORD handle);
 DWORD    fork(); /*NOT WORKING YET*/

@@ -1374,11 +1374,33 @@ int wait(){
    return dexsdk_systemcall(0xC,0,0,0,0,0);     
 }
 
-/* User thread function (not yet working) */
-/* Creates and starts a thread. returns thread id (jach) */
+/* Terminates the calling thread. The kernel exit() path is
+   thread-aware: kill_process() routes PCBs flagged PS_ATTB_THREAD
+   to kill_thread(), so the ordinary exit syscall does the job. */
+void thread_exit(){
+   dexsdk_systemcall(3,0,0,0,0,0);
+   while (1);   /* not reached */
+}
+
+/* Creates and starts a thread. Returns the thread id.
+   The kernel sets the new thread's ESP to stk+stacksize-4 and its
+   EIP to f, but places no return address on the stack. We seed the
+   top-of-stack slot with the address of thread_exit, so a thread
+   function that simply returns lands in thread_exit and terminates
+   cleanly instead of jumping to a garbage address.
+   Note: the thread's stack is heap memory of this process; it is
+   reclaimed when the process exits. */
 int thread_create(void *f){
-   unsigned char *stk = (unsigned char *)malloc(10240);   
+   unsigned char *stk = (unsigned char *)malloc(10240);
+   *((unsigned int*)(stk + 10240 - 4)) = (unsigned int)thread_exit;
    return dexsdk_systemcall(0xB,(int)f,(int)stk,10240,0,0);
+}
+
+/* Waits until the given thread of the calling process terminates.
+   Returns 0 on success (or if the thread already exited), -1 if
+   tid is not a thread of this process. */
+int thread_join(int tid){
+   return dexsdk_systemcall(0xA1,tid,0,0,0,0);
 }
 
 char *getenv(char *name, char *buff){
