@@ -829,9 +829,17 @@ DWORD kill_process(DWORD processid){
 //Kill user threads
 DWORD kill_thread(PCB386 *ptr){
    DWORD flags;
+   PCB386 *parent;
    dex32_stopints(&flags);
 
    kill_children(ptr->processid); //kill the children of this thread first!!cascade kill
+
+   /*createuthread()/createthread() incremented the parent's childwait;
+     undo it here so dex32_wait() and thread_join() are not skewed by
+     threads that have already terminated.*/
+   parent = ps_findprocess(ptr->owner);
+   if (parent != (PCB386*)-1 && parent->childwait > 0)
+      parent->childwait--;
     
    //Tell the scheduler to remove this thread from the ready queue
    ps_dequeue(ptr);
@@ -873,16 +881,24 @@ DWORD exit(DWORD val){
    //close all files the process has opened
    closeallfiles(current_process->processid);
     
-   /* tell the task switcher to kill this process by setting
-      the sigterm global varaible to the current pid. If sigeterm is non-zero
-      the taskswitcher terminates the process with pid equal to sigterm*/
-   sigterm=current_process->processid;
-    
-   taskswitch();
+   /* Tell the task switcher to kill this process by setting the
+      sigterm global variable to the current pid.
 
-   //should not reach this point
-   while (1)
-      ;
+      sigterm is a single one-slot "mailbox": if several processes or
+      threads exit at nearly the same time, a later writer can overwrite
+      a not-yet-processed value and the earlier kill request is LOST.
+      The losing process then spins here forever as a zombie, and any
+      thread_join()/wait on it never returns. This became easy to
+      trigger once user threads could exit concurrently.
+
+      The fix: re-assert our pid every time we are scheduled, until the
+      taskswitcher finally kills us (we simply stop running). Every
+      dying process does the same, and the taskswitcher consumes one
+      request per pass, so all pending exits are eventually served.*/
+   while (1){
+      sigterm = current_process->processid;
+      taskswitch();
+   };
 
    return 0;
 };
@@ -1039,6 +1055,29 @@ int dex32_wait(){
    
    while (current_process->childwait >= waitval && current_process->childwait != 0)
       ;
+};
+
+/*Waits until the thread with the given id terminates. Returns 0 on
+  success (including a thread that has already exited), -1 if the id
+  does not refer to a thread owned by the calling process. Like
+  dex32_wait() above, this is a spin-wait that relies on preemption;
+  it must therefore be registered with API_REQUIRE_INTS so that the
+  timer keeps firing while we spin.*/
+int dex32_thread_join(DWORD threadid){
+   PCB386 *ptr;
+
+   ptr = ps_findprocess(threadid);
+   if (ptr == (PCB386*)-1) return 0;            //already gone: join trivially succeeds
+   if (!(ptr->status & PS_ATTB_THREAD)) return -1;       //not a thread
+   if (ptr->owner != current_process->processid) return -1; //not our thread
+
+   //spin until the thread disappears from the process table.
+   //The PCB is freed by kill_thread(), so existence of the id
+   //is the termination signal.
+   while (ps_findprocess(threadid) != (PCB386*)-1)
+      ;
+
+   return 0;
 };
 
 
