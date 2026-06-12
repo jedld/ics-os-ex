@@ -12,7 +12,7 @@ Latest floppy image: <a href='https://github.com/srg-ics-uplb/ics-os/raw/master/
 
 Test the floppy image in qemu.
 ```
-$qemu-system-i386 -fda ics-os-floppy.img
+$qemu-system-i386 -fda ics-os-demo-floppy.img
 ```
 ## Build Environment
 
@@ -59,7 +59,7 @@ See [Lab 01](https://github.com/srg-ics-uplb/ics-os/blob/master/labs/lab01/ICSOS
 to set up the build environment.
 
 ## Development and Support
-This project is used at the <a href='http://www.ics.uplb.edu.ph'>Institute of Computer Science</a>, <a href='http://www.uplb.edu.ph'>University of the Philippines Los Banos</a> for <a href='http://ics.uplb.edu.ph/courses/ugrad/cmsc/125'>CMSC 125</a>. It is maintained by the <a href='https://sites.google.com/up.edu.ph/systems-research'>Systems Research Group</a>.
+This project is used at the <a href='http://www.ics.uplb.edu.ph'>Institute of Computer Science</a>, <a href='http://www.uplb.edu.ph'>University of the Philippines Los Banos</a> for <a href='http://ics.uplb.edu.ph/courses/ugrad/cmsc/125'>CMSC 125</a>. It is maintained by the <a href='https://srg-ics-uplb.github.io'>Systems Research Group</a>.
 
 Get started by reading the <a href="https://github.com/srg-ics-uplb/ics-os/wiki/Kernel-Developer's-Guide">Kernel Developer's Guide</a>.
 
