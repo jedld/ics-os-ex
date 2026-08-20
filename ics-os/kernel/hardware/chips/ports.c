@@ -33,7 +33,7 @@ inline unsigned char inportb(unsigned int port)
 
 inline DWORD inportl(unsigned int port)
 {
-   unsigned char ret;
+   DWORD ret;
    asm volatile ("inl %%dx,%%eax":"=a" (ret):"d" (port));
    return ret;
 };

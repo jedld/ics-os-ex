@@ -3,6 +3,10 @@ Run the following commands:
 $./scripts/install-deps.sh
 $make clean
 $make vmdex
-$make floppy
-$make boot-floppy 
+$make usb
+$make boot-usb-amd64
 
+Firmware-bootable hybrid ISO (BIOS + UEFI):
+
+$make livecd
+$make boot-livecd-amd64

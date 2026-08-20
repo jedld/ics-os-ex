@@ -1,22 +1,21 @@
+include ../../sdk/app.mk
+
 CC=gcc
 ICSOS_ROOT=../..
 SDK=../../sdk
-CFLAGS=-m32 -w -nostdlib -fno-builtin -static
-#CFLAGS=
+CFLAGS=$(APP_CFLAGS)
 LIBS=$(SDK)/tccsdk.c $(SDK)/libtcc1.c $(SDK)/crt1.c 
-#LIBS=
 EXE=pak.exe
 
 $(EXE): pak.c
-	$(CC) $(CFLAGS) -opak.exe pak.c $(LIBS)
+	$(CC) $(CFLAGS) $(APP_LDFLAGS) -opak.exe pak.c $(LIBS)
 
 install: $(EXE)
+	mkdir -p $(ICSOS_ROOT)/apps
 	cp $(EXE) $(ICSOS_ROOT)/apps
 
 uninstall:
-	rm $(ICSOS_ROOT)/apps/$(EXE)
+	rm -f $(ICSOS_ROOT)/apps/$(EXE)
 
 clean:
-	rm $(EXE)
-
-
+	rm -f $(EXE)

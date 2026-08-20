@@ -43,7 +43,12 @@
 
 void WAIT400NS()
 {
-    delay(10);
+    /* ~400ns I/O delay. The previous delay(10) waited tens of milliseconds
+       per call and made IDE probe take minutes on QEMU/modern timers. */
+    inportb(0x80);
+    inportb(0x80);
+    inportb(0x80);
+    inportb(0x80);
 };
 
 //*************************************************************

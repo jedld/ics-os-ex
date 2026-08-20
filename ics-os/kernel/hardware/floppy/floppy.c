@@ -42,6 +42,8 @@ int flop_getblocksize()
 void flop_initcache()
  {
   int i;
+  if (cacheptr != 0)
+     return;
   cacheptr=(cache*)malloc(CACHESIZE*sizeof(cache));
   //initialize the cache
   for (i=0;i<CACHESIZE;i++)
@@ -57,15 +59,20 @@ void flop_initcache()
 void invalidatecache()
  {
   int i;
+  if (cacheptr == 0)
+     return;
   for (i=0;i<CACHESIZE;i++)
    {
      cacheptr[i].valid=0;
   ;};
-};
+ };
 
 void freecache(DWORD sectornumber)
  {
   int index;
+
+  if (cacheptr == 0)
+     return;
 
   for (index=0;index<CACHESIZE;index++)
   {
@@ -82,6 +89,8 @@ void freecache(DWORD sectornumber)
 int shouldflush()
  {
   int res=0,index;
+    if (cacheptr == 0)
+       return 0;
     for (index=0;index<CACHESIZE;index++)
     {
        if (cacheptr[index].valid&&cacheptr[index].dirty)
@@ -118,6 +127,8 @@ int compare_cache (const void *a, const void *b)
 int flushcache()
   {
     int res=0,index,block;
+    if (cacheptr == 0)
+       return 0;
     start_priority();
     qsort(cacheptr,CACHESIZE,sizeof(cache),compare_cache);
     for (index=0;index<CACHESIZE;index++)
@@ -173,6 +184,8 @@ int storecache(char *buf,DWORD sectornumber,int dirty)
    int index;
    int freeslot = -1;
 
+  if (cacheptr == 0)
+     return 0;
 
   for (index=0;index<CACHESIZE;index++)
    {
@@ -216,6 +229,8 @@ int getcache(char *buf,DWORD sectornumber, DWORD numblocks)
  {
    int index=0;
   int i, res = 0,ofs = 0;
+  if (cacheptr == 0)
+     return 0;
   for (i=0;i<numblocks;i++)
   {  
     res = 0;
@@ -441,7 +456,7 @@ void motoron(void)
    if (!motor) {
       mtick = -1;     /* stop motor kill countdown */
       outportb(FDC_DOR,0x1c);
-      delay(300);
+      delay(20);
       motor = TRUE;
    }
 }
@@ -904,8 +919,10 @@ floppy_desc.total_blocks = floppy_totalblocks;
 floppy_desc.get_block_size = flop_getblocksize;
 floppy_deviceid = devmgr_register((devmgr_generic*) &floppy_desc);
 
-//initialize the floppy disk
-reset();
+/* Allocate the cache even if the drive is never recalibrated. The I/O
+   manager periodically calls shouldflush()/flushcache(); a null cache
+   pointer page-faults during USB/HDD boot. Hardware reset stays in flopinit(). */
+flop_initcache();
 
 //assign the keyboard wrapper to IRQ 6
 irq_addhandler(floppy_deviceid,6,fdchandler);

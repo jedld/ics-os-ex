@@ -45,29 +45,59 @@ void mem_interpretmemory(mmap *map,int size){
    }; 
 };
 
-/*using the memory map provided by grub, create the stack of physical frames*/
+/*using the memory map provided by grub, create the stack of physical frames.
+  On modern machines the map can describe many gigabytes; a 32-bit kernel can
+  only use the first 4GB and we cap usable RAM at 256MB so the free-page stack
+  at 0x200000 cannot overrun the identity-mapped region.*/
+#define MEM_MIN_FRAME   0x00300000
+#define MEM_MAX_PHYS    0x10000000
+
 DWORD mem_detectmemory(mmap *grub_meminfo , int size ){
-   DWORD mem_size = 0 , i, i2;
+   DWORD mem_size = 0;
+   unsigned char *cursor;
+   unsigned char *end;
+
    stackbase[0]=0;
-   for (i=0;i < size / sizeof(mmap) ; i++){
-      DWORD base = grub_meminfo[i].base_addr_low;
-      DWORD base_end = base + grub_meminfo[i].length_low;
-   
-      /*If type has a value of 1 it is free otherwise we cannot use
-      this memory region*/
-      if (grub_meminfo[i].type == 1){
-         for (i2 = base; i2 < base_end; i2 += 0x1000){
-            if ((stackbase + 0x100000) < i2 ){
-               stackbase[0]++;
-               stackbase[stackbase[0]]=i2;
-            };
-         };
-         mem_size += ( base_end - base );
-      };
-   }; 
-  
-   totalpages = stackbase[0]; 
-   return mem_size;   
+   if (grub_meminfo == 0 || size <= 0)
+      return 0;
+
+   cursor = (unsigned char*)grub_meminfo;
+   end = cursor + size;
+
+   while (cursor + sizeof(mmap) <= end){
+      mmap *entry = (mmap*)cursor;
+      DWORD base, length, base_end, page;
+
+      if (entry->size == 0)
+         break;
+
+      /* Skip regions above 4GB (base_addr_high) and reserved RAM. */
+      if (entry->type == 1 && entry->base_addr_high == 0){
+         base = entry->base_addr_low;
+         length = entry->length_low;
+
+         if (base >= MEM_MAX_PHYS)
+            length = 0;
+         else if (length > MEM_MAX_PHYS - base)
+            length = MEM_MAX_PHYS - base;
+
+         if (length){
+            base_end = base + length;
+            for (page = base; page < base_end; page += 0x1000){
+               if (page >= MEM_MIN_FRAME && page + 0x1000 > page){
+                  stackbase[0]++;
+                  stackbase[stackbase[0]] = page;
+               }
+            }
+            mem_size += length;
+         }
+      }
+
+      cursor += entry->size + 4;
+   }
+
+   totalpages = stackbase[0];
+   return mem_size;
 };
 
 
@@ -856,13 +886,15 @@ void mem_init()
     pagedir1=mempop(); //obtain the first pagedirectory
 
     clearpagetable(pagedir1);
-    //map the first 1MB
+    /* Identity-map low memory as writable. GDT/IDT, the free-page stack
+       (0x200000) and the kernel image all live here; a read-only map
+       page-faults on CPUs that honor CR0.WP. */
     for (i=0;i<0xB8000;i+=0x1000)
-        maplineartophysical((DWORD*)pagedir1,i,i        /*,stackbase*/,1 );
+        maplineartophysical((DWORD*)pagedir1,i,i        /*,stackbase*/,1 | PG_WR );
     for (i=0xb8000;i<0x100000;i+=0x1000)
         maplineartophysical((DWORD*)pagedir1,i,i        /*,stackbase*/,1 | PG_USER | PG_WR );
-    for (i=0x100000;i<0x300000;i+=0x1000)
-        maplineartophysical((DWORD*)pagedir1,i,i        /*,stackbase*/,1);
+    for (i=0x100000;i<0x1000000;i+=0x1000)
+        maplineartophysical((DWORD*)pagedir1,i,i        /*,stackbase*/,1 | PG_WR );
 
     maplineartophysical((DWORD*)pagedir1,(DWORD)SYS_PAGEDIR_VIR,(DWORD)pagedir1    /*,stackbase*/,1);
     maplineartophysical((DWORD*)pagedir1,(DWORD)SYS_PAGEDIR2_VIR,

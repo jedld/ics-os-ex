@@ -80,7 +80,7 @@ DWORD iomgr_diskmgr()
                      if (shouldflush()) iomgr_flushmgr();
                      flush_counter=time();
                     };
-         
+         cpu_idle();
          continue;};
 
       

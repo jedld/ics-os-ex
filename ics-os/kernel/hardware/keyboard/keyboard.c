@@ -449,26 +449,40 @@ void keyboard_wait()
 
 char getch()
  {
-   unsigned int code,c;
-   do
+   unsigned int code;
+   int c;
+
+   /* Use for(;;) so continue restarts the wait. In a do-while,
+      continue jumps to the condition and can return a garbage key. */
+   for (;;)
    {
     keyboard_wait();
+    if (empty(&_q)) {
+       cpu_idle();
+       continue;
+    }
     c=deq(&_q,&code);
+    if (c != -1)
+       return ((char)code);
    }
-   while (c==-1);
-  
-   return ((char)code);
  };
 
 unsigned int getchw()
  {
-  unsigned int code,c;
-  do
+  unsigned int code;
+  int c;
+
+  for (;;)
    {
-    keyboard_wait();   
+    keyboard_wait();
+    if (empty(&_q)) {
+       cpu_idle();
+       continue;
+    }
     c=deq(&_q,&code);
+    if (c != -1)
+       break;
    }
-   while (c==-1);
    if (current_process->accesslevel==ACCESS_USER)
    return code;
  };

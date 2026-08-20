@@ -25,5 +25,9 @@ char *datetostr(dex32_datetime *d,char *str);
 void getdatetime(dex32_datetime*); //gets the date nd time
 void dex32_set_timer(DWORD rate);
 int time();
+void delay(DWORD w);
+/* Halt until the next interrupt. Use in idle loops so the guest
+   does not burn 100% host CPU while waiting. */
+void cpu_idle(void);
 
 #endif

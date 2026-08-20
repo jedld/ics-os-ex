@@ -113,9 +113,9 @@ void program8259(unsigned char b){
    outportb(0xA1,1);
    b1^=b;
    outportb(0x21,b1);
-   //b2^=IRQ_MOUSE;
-   //outportb(0xA1,b2);
-   outportb(0xA1, inportb(0xA1) & ~0x10);
+   /* Unmask slave-PIC IRQs used by USB, IDE and the PS/2 mouse so the
+      kernel can run on modern chipsets that still route those lines. */
+   outportb(0xA1, 0x00);
 };
 
 

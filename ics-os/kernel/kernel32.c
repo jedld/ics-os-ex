@@ -32,13 +32,13 @@
 
 /*some defines that are used for debugging purposes*/
 
-#define DEBUG_FLUSHMGR
+//#define DEBUG_FLUSHMGR
 //#define DEBUG_COFF
 //#define DDL_DEBUG
 //#define DEBUG_FORK
 #define FULLSCREENERROR
 //#define DEBUG_KSBRK
-#define DEBUG_FAT12
+//#define DEBUG_FAT12
 #define DEBUG_STARTUP
 #define DEBUG_EXTENSION
 //#define DEBUG_USER_PROCESS
@@ -94,8 +94,10 @@ extern void textcolor(unsigned char c);
 #include "hardware/keyboard/keyboard.h"
 #include "hardware/keyboard/mouse.h"
 #include "hardware/hardware.h"
+#include "hardware/chips/serial.h"
 #include "memory/kheap.h"
 #include "hardware/chips/ports.c"
+#include "hardware/chips/serial.c"
 #include "hardware/vga/dexvga.c"
 #include "stdlib/qsort.c"
 #include "hardware/floppy/floppy.h"
@@ -116,6 +118,7 @@ extern void textcolor(unsigned char c);
 #include "process/scheduler.h"
 #include "console/script.h"
 #include "vfs/vfs_aux.h"
+#include "hardware/usb/usb.h"
 #include "iomgr/iosched.h"
 
 //structure to hold the boot info
@@ -178,6 +181,7 @@ void dex_init();
 #include "process/process.c"
 #include "dexapi/dex32API.c"
 #include "hardware/ATA/ide.c"
+#include "hardware/usb/uhci.c"
 #include "vfs/vfs_aux.c"
 #include "memory/kheap.c"
 #include "memory/dexmem.c"
@@ -217,6 +221,9 @@ void main(){
    /*obtain the multiboot information structure from GRUB which contains info about memory
       and the device that booted this kernel*/
    mbhdr =(multiboot_header*)multiboothdr;
+
+   serial_init();
+   serial_puts("ICS-OS: serial console ready\n");
     
    /* Enable the keyboard IRQ,Timer IRQ and the Floppy Disk IRQ.As more devices that uses IRQs get supported, we should OR more of them here*/
    //program8259(IRQ_TIMER | IRQ_KEYBOARD | IRQ_FDC | IRQ_MOUSE | IRQ_CASCADE); 
@@ -235,11 +242,13 @@ void main(){
    if (kernel_systeminfo.boot_device == 0){  
       //floppy
       strcpy(boot_device_name,"fd0");
-   }else{ //hard disk
+   }else{ //hard disk or USB presented as a BIOS disk
       kernel_systeminfo.part[0] =    (mbhdr->boot_device >> 16) & 0xFF;
       kernel_systeminfo.part[1] =    (mbhdr->boot_device >> 8) & 0xFF;
       kernel_systeminfo.part[2] =    (mbhdr->boot_device & 0xFF);
       int n=kernel_systeminfo.boot_device - 0x80;
+      if (n < 0)
+         n = 0;
       sprintf(boot_device_name,"hdp%dp%d",n,kernel_systeminfo.part[0]);
    }
 
@@ -447,7 +456,14 @@ void dex_init(){
       the partition tables if needed.*/
    printf("Initializing IDE drivers...\n");
    ide_init();
-   printf("[OK]\n");   
+   printf("[OK]\n");
+
+   printf("Initializing USB (UHCI) mass-storage driver...\n");
+   usb_init();
+   if (usb_storage_available())
+      printf("[OK]\n");
+   else
+      printf("[none]\n");   
 
    /*Install the VGA driver*/
    printf("Loading VGA driver...");
@@ -457,9 +473,13 @@ void dex_init(){
    //initialize the I/O manager
    iomgr_init();
 
-   //initialize the floppy device
-   myblock = (devmgr_block_desc*)devmgr_devlist[floppy_deviceid];
-   myblock->init_device();
+   /* Recalibrate/seek on a missing floppy takes many seconds and is not
+      needed when the system booted from USB or a hard disk. */
+   if (strcmp(boot_device_name,"fd0") == 0) {
+      myblock = (devmgr_block_desc*)devmgr_devlist[floppy_deviceid];
+      myblock->init_device();
+   } else
+      printf("Skipping floppy recalibrate (not booting from fd0)\n");
 
    //initialize the file tables (Initialize the VFS)
    printf("Initializing the Virtual File System...");
@@ -472,7 +492,7 @@ void dex_init(){
    //Initialize the task manager - a module program that monitors processes
    //for the user's convenience, as kernel thread
    printf("Initializing the task manager...");
-   tm_pid=createkthread((void*)dex32_tm_updateinfo,"task_mgr",3500);!
+   tm_pid=createkthread((void*)dex32_tm_updateinfo,"task_mgr",3500);
 
    printf("[OK]\n");   
 
@@ -500,15 +520,43 @@ void dex_init(){
    iso9660_init();
    printf("[OK]\n");   
 
-   printf("Mounting boot device %s...", boot_device_name);
-   if (strcmp(boot_device_name,"fd0") == 0){
-      //mount the boot device
-      vfs_mount_device("fat",boot_device_name,"icsos");
-   }else{
-      //for livecd
-      vfs_mount_device("cdfs","cds0","icsos");
-   }
-   printf("[OK]\n");   
+   printf("Mounting boot device %s...\n", boot_device_name);
+   {
+      int mounted = 0;
+
+      /* Prefer a USB thumb drive when the UHCI driver found one. */
+      if (!mounted && usb_storage_available()) {
+         if (devmgr_finddevice("usb0p0") != -1)
+            mounted = (vfs_mount_device("fat","usb0p0","icsos") != -1);
+         if (!mounted && devmgr_finddevice("usb0") != -1)
+            mounted = (vfs_mount_device("fat","usb0","icsos") != -1);
+         if (mounted)
+            printf("Root filesystem is the USB mass-storage device.\n");
+      }
+
+      /* Floppy image (legacy teaching workflow). */
+      if (!mounted && strcmp(boot_device_name,"fd0") == 0) {
+         mounted = (vfs_mount_device("fat",boot_device_name,"icsos") != -1);
+      }
+
+      /* USB stick presented as a BIOS/IDE disk (qemu -hda, CSM USB boot). */
+      if (!mounted && boot_device_name[0] && strcmp(boot_device_name,"fd0") != 0) {
+         if (devmgr_finddevice(boot_device_name) != -1)
+            mounted = (vfs_mount_device("fat",boot_device_name,"icsos") != -1);
+      }
+
+      if (!mounted && devmgr_finddevice("hdp0p0") != -1)
+         mounted = (vfs_mount_device("fat","hdp0p0","icsos") != -1);
+
+      /* Live CD fallback. */
+      if (!mounted && devmgr_finddevice("cds0") != -1)
+         mounted = (vfs_mount_device("cdfs","cds0","icsos") != -1);
+
+      if (mounted)
+         printf("Root mount [OK]\n");
+      else
+         printf("Root mount [FAILED]\n");
+   }   
 
    //setup the initial executable loaders (So we could run .EXEs,.b32,coff and elfs)
    printf("Initializing first module loader(s) [EXE][COFF][ELF][DEX B32]...");

@@ -1,5 +1,7 @@
 #include "dexsdk.h"
 
+extern int main(int argc, char **argv);
+
 int _start(){
    char *s;
    int c=0;

@@ -579,23 +579,92 @@ DWORD fat_addsectorsEX(vfs_node *f,DWORD sectors /*sectors to add*/,int id)
 };
 
 
+int fat_statfs(int id, DWORD *total_bytes, DWORD *free_bytes)
+{
+   BPB bpbblock;
+   BYTE *fat;
+   DWORD fatsz, totalsectors, datasec, countofclusters;
+   DWORD rootdirsectors, i, freeclus = 0;
+   DWORD bytes_per_cluster;
+   int fat_type;
+
+   readBPB(&bpbblock, id);
+
+   /* Reject anything that does not look like a FAT boot sector. */
+   if (bpbblock.magic[0] != 0x55 || bpbblock.magic[1] != 0xAA)
+      return -1;
+   if (bpbblock.bytes_per_sector != 512)
+      return -1;
+   if (bpbblock.sectors_per_cluster == 0)
+      return -1;
+
+   fatsz = fat_sectors_per_fat(&bpbblock);
+   if (fatsz == 0 || fatsz > 4096)
+      return -1;
+
+   rootdirsectors = ((bpbblock.num_root_dir_ents * 32) +
+                    (bpbblock.bytes_per_sector - 1)) /
+                    bpbblock.bytes_per_sector;
+
+   if (bpbblock.total_sectors != 0)
+      totalsectors = bpbblock.total_sectors;
+   else
+      totalsectors = bpbblock.total_sectors_large;
+
+   if (totalsectors == 0)
+      return -1;
+
+   datasec = totalsectors - (bpbblock.num_boot_sectors +
+             (bpbblock.num_fats * fatsz) + rootdirsectors);
+   if (bpbblock.sectors_per_cluster == 0)
+      return -1;
+   countofclusters = datasec / bpbblock.sectors_per_cluster;
+   if (countofclusters < 2)
+      return -1;
+
+   fat_type = fat_get_fat_type(id, &bpbblock);
+   fat = (BYTE*)malloc(fatsz * 512);
+   if (fat == 0)
+      return -1;
+   loadfat(&bpbblock, fat, id);
+
+   if (fat_type == FAT12_FAT12) {
+      for (i = 2; i < 2 + countofclusters; i++)
+         if (obtaincluster(i, fat) == 0)
+            freeclus++;
+   } else if (fat_type == FAT12_FAT16) {
+      WORD *fat16 = (WORD*)fat;
+      for (i = 2; i < 2 + countofclusters; i++)
+         if (fat16[i] == 0)
+            freeclus++;
+   } else {
+      DWORD *fat32 = (DWORD*)fat;
+      for (i = 2; i < 2 + countofclusters; i++)
+         if ((fat32[i] & 0x0FFFFFFF) == 0)
+            freeclus++;
+   }
+
+   free(fat);
+   bytes_per_cluster = (DWORD)bpbblock.bytes_per_sector *
+                       (DWORD)bpbblock.sectors_per_cluster;
+   if (total_bytes)
+      *total_bytes = countofclusters * bytes_per_cluster;
+   if (free_bytes)
+      *free_bytes = freeclus * bytes_per_cluster;
+   return 0;
+};
+
 int fat_getfreeblocks(int id)
 {
-   BPB  *bpbblock=(BPB*)malloc(512);
-   BYTE *fat;
-   int i;
-   readBPB(bpbblock,id);
-   DWORD total=0;
-   fat=(BYTE*)malloc(bpbblock->sectors_per_fat*512);//allocate memory for FAT
-   loadfat(bpbblock,fat,id);
-   
-   for (i=0;i<bpbblock->total_sectors-3;i++)
-      if (obtaincluster(i,fat)==0) total++;
-   
-   free(bpbblock);
-   free(fat);
-   
-   return total;
+   DWORD total_bytes = 0, free_bytes = 0;
+   DWORD bpc;
+
+   if (fat_statfs(id, &total_bytes, &free_bytes) != 0)
+      return -1;
+   bpc = fat_getbytesperblock(id);
+   if (bpc == 0)
+      return -1;
+   return (int)(free_bytes / bpc);
 };
 
 DWORD fat_getbytesperblock(int id)

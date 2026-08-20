@@ -79,14 +79,16 @@ int loop;
 
  while(1)
     {
+        if (!dex32_tm_active) {
+           cpu_idle();
+           continue;
+        }
         dd_swaptomemory(taskmgrout);
         clrscr();
         textbackground(BLUE);
         textcolor(WHITE);
         printf("%-79s\n","Dex32- Realtime Monitor v 1.00");
         textbackground(BLACK);
-        //Display processes in memory
-        if (dex32_tm_active)
         show_process();
         dd_swaptohardware(taskmgrout);
         delay(refreshrate);

@@ -307,7 +307,8 @@ void fg_updateinfo(){
                      fg_setforeground(choice);
             };      
         };
-      };
+      } else
+         cpu_idle();
    };
 };
 

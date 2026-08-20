@@ -1,3 +1,5 @@
+include ../../sdk/app.mk
+
 NAME=threads
 
 SRC=$(NAME).c
@@ -6,14 +8,15 @@ EXE=$(NAME).exe
 CC=gcc
 ICSOS_ROOT=../..
 SDK=../../sdk
-CFLAGS=-m32 -w -nostdlib -fno-builtin -static
+CFLAGS=$(APP_CFLAGS)
 LIBS=$(SDK)/tccsdk.c $(SDK)/libtcc1.c $(SDK)/crt1.c
 
 $(EXE): $(SRC)
-	$(CC) $(CFLAGS) -o${EXE} $(SRC) $(LIBS)
+	$(CC) $(CFLAGS) $(APP_LDFLAGS) -o${EXE} $(SRC) $(LIBS)
 
 install: $(EXE)
+	mkdir -p $(ICSOS_ROOT)/apps
 	cp $(EXE) $(ICSOS_ROOT)/apps
 
 clean:
-	rm $(EXE)
+	rm -f $(EXE)

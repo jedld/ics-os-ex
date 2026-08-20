@@ -7,6 +7,7 @@ copy- Copy source to destination: Args: <source> <destination>
 cpuid- Displays CPU information. 
 del- Deletes a files or directory. Args: <filename/dirname>
 demo_graphics- Runs the graphics demonstration.
+df- Shows free space on block devices.
 dkill- Dirty kill a user process/thread. No cleanup is done. Args: <pid>
 echo- Displays a string. Args: <string>  
 exit- Exits a console session.

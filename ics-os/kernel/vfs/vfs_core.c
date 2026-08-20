@@ -584,7 +584,7 @@ int vfs_mount_device(const char *fsname,const char *devname,const char *location
         devid = devmgr_finddevice(devname);
         if (devid == -1) 
         {
-          printf("Unknown device name: %s\n",fsname);
+          printf("Unknown device name: %s\n",devname);
           return -1;
         }
 

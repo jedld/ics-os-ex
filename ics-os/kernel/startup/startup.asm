@@ -28,6 +28,14 @@ extern edata
 extern end
 global reset_gdtr
 
+section .multiboot
+align 4
+mb_header:
+mb_magic         dd MULTIBOOT_MAGIC                       ;magic
+mb_flags         dd MULTIBOOT_FLAGS                       ;bit 16 is set	
+mb_checksum      dd - (MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)  ;compute checksum
+mb_header_end:
+
 section .text
 
 [BITS 32]
@@ -36,14 +44,6 @@ section .text
 startup:   
 ;jmp not_multiboot
 jmp multiboot
-;Multiboot Header information
-align 4
-
-mb_header:
-mb_magic         dd MULTIBOOT_MAGIC                       ;magic
-mb_flags         dd MULTIBOOT_FLAGS                       ;bit 16 is set	
-mb_checksum      dd - (MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)  ;compute checksum
-mb_header_end:
 
 multiboot:
    ;Multi boot compliant code 
@@ -186,63 +186,42 @@ linearcode:
    mov ax,SYS_DATA_SEL 
    mov ds,ax
     
-   ;enable A20 line
+   ;enable A20 line and drop the local APIC on modern CPUs
 call enable_A20
+call disable_apic
 
    ;jump to main() in kernel32.c which is the start of the kernel
 call main
 
 
-;this procedure handles the activation of the A20 line, it uses the standard method
-;of enabling the A20 line
+; Enable A20 using the fast A20 gate (port 0x92). The classic keyboard-
+; controller sequence hangs on many modern / AMD64 chipsets that no longer
+; implement an 8042, and GRUB has already enabled A20 anyway.
 enable_A20:
-   cli
-   call    a20wait
-   mov     al,0xAD
-   out     0x64,al
-
-   call    a20wait
-   mov     al,0xD0
-   out     0x64,al
-
-   call    a20wait2
-   in      al,0x60
-   push    eax
-
-   call    a20wait
-   mov     al,0xD1
-   out     0x64,al
-
-   call    a20wait
-   pop     eax
-   or      al,2
-   out     0x60,al
-
-   call    a20wait
-   mov     al,0xAE
-   out     0x64,al
-
-   call    a20wait
+   in     al,0x92
+   test   al,2
+   jnz    .done
+   or     al,2
+   and    al,0xFE          ; do not trigger a fast reset
+   out    0x92,al
+.done:
    ret
 
-a20wait:
-.l0:	mov     ecx,65536
-.l1:	in      al,0x64
-	test    al,2
-	jz      .l2
-	loop    .l1
-	jmp     .l0
-.l2:	ret
-
-
-a20wait2:
-.l0:	mov     ecx,65536
-.l1:	in      al,0x64
-	test    al,1
-	jnz     .l2
-        loop    .l1
-	jmp     .l0
-.l2:	ret
+; Disable the local APIC so IRQs are delivered through the 8259 PIC.
+; Harmless on CPUs without APIC; required on modern AMD64 systems.
+disable_apic:
+   pusha
+   mov    eax,1
+   cpuid
+   test   edx,0x200        ; APIC feature bit
+   jz     .no_apic
+   mov    ecx,0x1B         ; IA32_APIC_BASE
+   rdmsr
+   and    eax,0xFFFFF7FF   ; clear bit 11 (APIC global enable)
+   wrmsr
+.no_apic:
+   popa
+   ret
 
 reset_gdtr:
 lgdt [gdtr]                     ;gdtr should have a valid value

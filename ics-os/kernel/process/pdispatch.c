@@ -206,6 +206,9 @@ void process_dispatcher(){
                 
       };
 
+      if (pd_head == 0)
+         cpu_idle();
+
       //check for a shutdown message
       if (getmessage(&sender, &message, &data)!=0){
          if (message == MES_SHUTDOWN){

@@ -27,7 +27,7 @@
 
 //**************************************************************
 
-long tmr_time_out = 20L;      // max command execution time in seconds
+long tmr_time_out = 2L;      // max command execution time in seconds
 
 long tmr_cmd_time_out_time;   // command timeout time - see the
                               // tmr_set_timeout() and
@@ -46,11 +46,10 @@ static long prevTime = -1;    // previous time
 long tmr_read_bios_timer( void )
 
 {
-   long curTime;
-   // loop so we get a valid value without
-   // turning interrupts off and on again
-   curTime = (time()*18)/100 ;
-   return curTime;
+   /* Use the 8253-driven tick counter, not CMOS wall-clock time().
+      time() is a unix timestamp that does not advance during a command,
+      so the old conversion never fired a timeout on modern hosts. */
+   return (long)ticks;
 }
 
 //*************************************************************
@@ -71,11 +70,9 @@ void tmr_set_timeout( void )
    if ( prevTime < 0 )
       prevTime = tmr_read_bios_timer();
 
-   // get value of BIOS timer
-   tmr_cmd_time_out_time = tmr_read_bios_timer();
-
-   // add command timeout value
-   tmr_cmd_time_out_time = tmr_cmd_time_out_time + ( tmr_time_out * 18L );
+   /* ticks runs at context_switch_rate Hz (default 100). */
+   tmr_cmd_time_out_time = tmr_read_bios_timer() +
+                           (long)context_switch_rate * tmr_time_out;
 }
 
 //*************************************************************

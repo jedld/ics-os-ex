@@ -3,14 +3,21 @@
 # written by Joseph Anthony C. Hermocilla
 #
 
+QEMU_I386=qemu-system-i386
+QEMU_X64=qemu-system-x86_64
+QEMU_MEM=64M
+QEMU_NET=-net nic,model=rtl8139 -net none
+# QEMU can load the 32-bit multiboot kernel the same way GRUB does.
+QEMU_KERNEL=-kernel kernel/Kernel32.bin
+
 vmdex:
 	make -C kernel/
 
-.PHONY: clean
+.PHONY: clean usb floppy livecd apps
 clean:
 	rm -f vmdex
-	rm -f ics-os-livecd.iso
-	rm -fr tmp/*
+	rm -f ics-os-livecd.iso ics-os-usb.img
+	rm -fr tmp/* tmp-usb
 	make -C kernel/ clean
 
 update_kernel_only: vmdex
@@ -23,16 +30,13 @@ update_kernel_only: vmdex
 
 prep_image: vmdex
 	rm -fr tmp
-	mkdir tmp
+	mkdir -p tmp/apps tmp/tcc1 tmp/lib1
 	cp -r vmdex tmp
 	scripts/gen-help.sh
-	cp  base/* tmp
-	mkdir -p tmp/apps
-	mkdir -p tmp/tcc1
-	mkdir -p tmp/lib1
-	cp apps/* tmp/apps/
-	cp sdk/* tmp/tcc1/
-	cp lib/* tmp/lib1/
+	cp base/* tmp
+	if [ -d apps ] && ls apps/* >/dev/null 2>&1; then cp apps/* tmp/apps/; fi
+	if [ -d sdk ] && ls sdk/* >/dev/null 2>&1; then cp sdk/* tmp/tcc1/; fi
+	if [ -d lib ] && ls lib/* >/dev/null 2>&1; then cp lib/* tmp/lib1/; fi
 
 floppy: prep_image
 	cp grub.img ics-os-floppy.img                #copy an image with grub
@@ -50,18 +54,67 @@ livecd: prep_image
 	grub-mkrescue -o ics-os-livecd.iso tmp/
 	rm -fr tmp/
 
+# USB thumb-drive image (FAT root filesystem, BIOS + UEFI GRUB). No root required.
+usb: prep_image
+	chmod +x scripts/mkusb.sh
+	scripts/mkusb.sh
+	rm -fr tmp/ tmp-usb
+
+apps:
+	$(MAKE) -C contrib/hello
+	$(MAKE) -C contrib/hello install || true
+
 boot-floppy:
-	qemu-system-i386 -net nic,model=rtl8139 -fda ics-os-floppy.img -boot a -m 64M 
+	$(QEMU_I386) $(QEMU_NET) -fda ics-os-floppy.img -boot a -m $(QEMU_MEM)
 
 boot-floppy-gdb:
-	qemu-system-i386 -net nic,model=rtl8139 -fda ics-os-floppy.img -boot a -m 64M -s -S
+	$(QEMU_I386) $(QEMU_NET) -fda ics-os-floppy.img -boot a -m $(QEMU_MEM) -s -S
 
 boot-floppy-vnc:
-	qemu-system-i386 -net nic,model=rtl8139 -fda ics-os-floppy.img -boot a -m 64M -vnc :1 
+	$(QEMU_I386) $(QEMU_NET) -fda ics-os-floppy.img -boot a -m $(QEMU_MEM) -vnc :1
 
 boot-debug:
-	cd kernel ;	qemu-system-i386 -s -S -kernel Kernel32.bin -fda ../ics-os-floppy.img -m 64M -append "root (hdp0p0)" 
-
+	cd kernel ;	$(QEMU_I386) -s -S -kernel Kernel32.bin -fda ../ics-os-floppy.img -m $(QEMU_MEM) -append "root (hdp0p0)"
 
 boot-livecd:
-	qemu-system-i386 -cdrom ics-os-livecd.iso -boot cd -m 64M
+	$(QEMU_I386) -cdrom ics-os-livecd.iso -boot cd -m $(QEMU_MEM)
+
+boot-livecd-amd64:
+	$(QEMU_X64) -cdrom ics-os-livecd.iso -boot cd -m $(QEMU_MEM)
+
+# Treat the USB image as a hard disk (how many BIOS/CSM firmwares expose a stick).
+boot-usb:
+	$(QEMU_I386) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_KERNEL) \
+		-drive file=ics-os-usb.img,format=raw,if=ide -boot c
+
+# Same image on a 64-bit CPU (protected-mode kernel on AMD64).
+boot-usb-amd64:
+	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_KERNEL) \
+		-drive file=ics-os-usb.img,format=raw,if=ide -boot c
+
+# Boot from a real UHCI USB mass-storage device and mount it as root.
+boot-usb-storage:
+	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_KERNEL) \
+		-drive if=none,id=stick,format=raw,file=ics-os-usb.img \
+		-device piix3-usb-uhci,id=uhci \
+		-device usb-storage,bus=uhci.0,drive=stick
+
+boot-usb-uefi:
+	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) -bios /usr/share/ovmf/OVMF.fd \
+		-drive file=ics-os-livecd.iso,format=raw,if=ide -boot c
+
+# Headless emulator smoke tests (serial console, no VGA window).
+test-usb:
+	timeout 25 $(QEMU_I386) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
+		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c
+
+test-usb-amd64:
+	timeout 25 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
+		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c
+
+test-usb-storage:
+	timeout 40 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
+		$(QEMU_KERNEL) \
+		-drive if=none,id=stick,format=raw,file=ics-os-usb.img \
+		-device piix3-usb-uhci,id=uhci \
+		-device usb-storage,bus=uhci.0,drive=stick

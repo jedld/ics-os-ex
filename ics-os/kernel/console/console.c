@@ -521,6 +521,90 @@ void console_ls(int style, int sortmethod){
     
 };
 
+static void df_find_mount(vfs_node *dir, int devid, char *out)
+{
+   vfs_node *n;
+
+   if (out[0] || dir == 0 || dir->files == 0 ||
+       dir->files == (vfs_node*)VFS_NOT_MOUNTED)
+      return;
+
+   for (n = dir->files; n != 0; n = n->next) {
+      if ((n->attb & FILE_MOUNT) && n->memid == devid) {
+         getpath(n, out);
+         return;
+      }
+      if ((n->attb & FILE_DIRECTORY) && n->files &&
+          n->files != (vfs_node*)VFS_NOT_MOUNTED)
+         df_find_mount(n, devid, out);
+      if (out[0])
+         return;
+   }
+}
+
+void console_df()
+{
+   int i;
+
+   printf("%-10s %9s %9s %9s %4s %s\n",
+          "Device", "Size(KB)", "Used(KB)", "Free(KB)", "Use%", "Mounted");
+
+   for (i = 0; i < MAXDEVICES; i++) {
+      devmgr_block_desc *blk;
+      DWORD raw_bytes = 0, total_bytes = 0, free_bytes = 0;
+      DWORD size_kb, used_kb, free_kb, pct;
+      int have_raw = 0, have_fs = 0;
+      char mount[256];
+      const char *name;
+
+      if (devmgr_devlist[i] == 0)
+         continue;
+      if (devmgr_devlist[i]->type != DEVMGR_BLOCK)
+         continue;
+
+      blk = (devmgr_block_desc*)devmgr_devlist[i];
+      name = blk->hdr.name;
+
+      if (blk->total_blocks && blk->get_block_size) {
+         DWORD nblk = (DWORD)blk->total_blocks();
+         DWORD bsz = (DWORD)blk->get_block_size();
+         raw_bytes = nblk * bsz;
+         have_raw = 1;
+      }
+
+      /* Do not poke the floppy unless it is mounted; an uninitialized
+         FDC wait hangs. CD-ROM sectors are 2048 bytes, not FAT. */
+      if (blk->get_block_size && blk->get_block_size() == 512) {
+         int skip_floppy = (name[0] == 'f' && name[1] == 'd' &&
+                            !devmgr_getlock(i));
+         if (!skip_floppy)
+            have_fs = (fat_statfs(i, &total_bytes, &free_bytes) == 0);
+      }
+
+      mount[0] = 0;
+      if (vfs_root)
+         df_find_mount(vfs_root, i, mount);
+      if (mount[0] == 0)
+         strcpy(mount, "-");
+
+      if (have_fs) {
+         size_kb = total_bytes / 1024;
+         free_kb = free_bytes / 1024;
+         used_kb = (total_bytes - free_bytes) / 1024;
+         pct = (total_bytes == 0) ? 0 : (used_kb * 100) / (size_kb ? size_kb : 1);
+         printf("%-10s %9u %9u %9u %3u%% %s\n",
+                name, size_kb, used_kb, free_kb, pct, mount);
+      } else if (have_raw) {
+         size_kb = raw_bytes / 1024;
+         printf("%-10s %9u %9s %9s %4s %s\n",
+                name, size_kb, "-", "-", "-", mount);
+      } else {
+         printf("%-10s %9s %9s %9s %4s %s\n",
+                name, "-", "-", "-", "-", mount);
+      }
+   }
+}
+
 /* ==================================================================
    console_execute(const char *str):
    * This command is used to execute a console string.
@@ -693,6 +777,9 @@ int console_execute(const char *str){
    }else
    if (strcmp(u,"help") == 0){         //-- Displays this help screen.
       console_execute("type /icsos/icsos.hlp");
+   }else
+   if (strcmp(u,"df") == 0){           //-- Shows free space on block devices.
+      console_df();
    }else
    if (strcmp(u,"umount") == 0){       //-- Unmounts a mounted device. Args: <mount point>
       char *u =strtok(0," ");

@@ -182,6 +182,12 @@ void time_handler()
    outportb(0x20,0x20); //renable the timer                
 ;};
 
+void cpu_idle(void)
+ {
+   /* Interrupts must be on so the PIT/keyboard can wake us. */
+   asm volatile ("sti; hlt");
+ };
+
 //delays the execution of a program for a specified number of milliseconds
 void delay(DWORD w)
  {
@@ -192,9 +198,8 @@ void delay(DWORD w)
    t1 = ticks+w*2;
    restoreflags(cpuflags);
       
-   while (ticks<t1);
-   
-
+   while (ticks<t1)
+      cpu_idle();
  };
 
 //sets the rate of context switch
