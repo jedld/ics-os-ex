@@ -56,13 +56,47 @@ DWORD mem_detectmemory(mmap *grub_meminfo , int size ){
    DWORD mem_size = 0;
    unsigned char *cursor;
    unsigned char *end;
+   volatile DWORD *fps = (volatile DWORD *)0x200000UL;
 
+   fps[0]=0;
+
+#ifdef __x86_64__
+   {
+      DWORD page;
+      DWORD count = 0;
+      (void)grub_meminfo;
+      (void)size;
+      /* Seed free frames up to 128MiB (QEMU default). Skip kernel stacks,
+         heap, and fixed user windows (ELF/stack/heap) that stay identity-
+         mapped — maplineartophysical2 is still 32-bit and must not touch PML4. */
+      for (page = 0x00400000; page < 0x08000000; page += 0x1000) {
+         if (page >= 0x02800000 && page < 0x02900000)
+            continue;
+         if (page >= 0x03000000 && page < 0x03400000)
+            continue;
+         /* userspace ELF load window */
+         if (page >= 0x00400000 && page < 0x00800000)
+            continue;
+         /* syscall stack / user heap / user stack */
+         if (page >= 0x09000000 && page < 0x0C000000)
+            continue;
+         count++;
+         fps[count] = page;
+         mem_size += 0x1000;
+      }
+      fps[0] = count;
+      stackbase = (DWORD *)0x200000UL;
+      totalpages = count;
+      return mem_size;
+   }
+#else
    stackbase[0]=0;
    if (grub_meminfo == 0 || size <= 0)
       return 0;
 
    cursor = (unsigned char*)grub_meminfo;
    end = cursor + size;
+#endif
 
    while (cursor + sizeof(mmap) <= end){
       mmap *entry = (mmap*)cursor;
@@ -139,6 +173,11 @@ void maplineartophysical(unsigned int *pagedir, /*the location of the page direc
                               unsigned int physical,   /*the paged aligned physical address to map to*/
 									 unsigned int attribute /*used to specify the page attributes to be applied*/
 					    ){
+#ifdef __x86_64__
+   /* First 4GiB are identity-mapped with 2MiB pages at boot. */
+   (void)pagedir; (void)linearaddr; (void)physical; (void)attribute;
+   return;
+#else
    unsigned int pagedirindex,pagetableindex,*pagetable;
    /*get the index of the page directory and the pagetable respectively*/
    pagedirindex= linearaddr >> 22;
@@ -157,6 +196,7 @@ void maplineartophysical(unsigned int *pagedir, /*the location of the page direc
    physical=(physical & 0xFFFFF000) | attribute;
    pagetable[pagetableindex]=physical;
       /*done!*/
+#endif
 };
 
 DWORD tlb_address;
@@ -169,6 +209,15 @@ int maplineartophysical2(unsigned int *pagedir, /*the location of the page direc
                               unsigned int physical,   /*the paged aligned physical address to map to*/
 									 unsigned int attribute /*used to specify the page attributes to be applied*/
 					    ){
+#ifdef __x86_64__
+   /* Boot identity-maps the low 4GiB with 4-level tables. The legacy
+      2-level walker below would corrupt PML4 — treat as already mapped. */
+   (void)pagedir;
+   (void)linearaddr;
+   (void)physical;
+   (void)attribute;
+   return 0;
+#else
    unsigned int pagedirindex,pagetableindex,*pagetable;
    DWORD pg;
    DWORD *kicker=(DWORD*)SYS_PAGEDIR2_VIR;
@@ -216,26 +265,35 @@ int maplineartophysical2(unsigned int *pagedir, /*the location of the page direc
    invtlb();
     
    /*done!*/
+   return 0;
+#endif
 };
 
 
 //quickly gives a physical address a corresponding virtual address
 //--used for modifying page tables without disabling paging
 DWORD getvirtaddress(DWORD physicaladdr){
+#ifdef __x86_64__
+   /* Boot identity-maps the first 4GiB; physical == virtual. */
+   return physicaladdr;
+#else
    DWORD *kicker=(DWORD*)SYS_PAGEDIR2_VIR; //obtain the aux pagetable
    kicker[2]=physicaladdr | 1;
-   /*if (current_process->accesslevel==ACCESS_SYS)*/
    refreshpages();
-        
    return SYS_PAGEDIR3_VIR;
-;};
+#endif
+};
 
 DWORD getvirtaddress2(DWORD physicaladdr,DWORD hdl){
+#ifdef __x86_64__
+   (void)hdl;
+   return physicaladdr;
+#else
    DWORD *kicker=(DWORD*)SYS_PAGEDIR2_VIR; //obtain the aux pagetable
    kicker[hdl]=physicaladdr | 1;
-   /*if (current_process->accesslevel==ACCESS_SYS)*/
    refreshpages();
    return SYS_PAGEDIR_VIR+hdl;
+#endif
 };
 
 
@@ -285,6 +343,10 @@ void dex32_restoreints(DWORD flags){
 
 
 DWORD getphys(DWORD vaddr,DWORD *pagedir){
+#ifdef __x86_64__
+   (void)pagedir;
+   return (vaddr & 0xFFFFF000) | 1 | PG_WR;
+#else
    DWORD dirindex=(vaddr&0xFFC00000) >> 22;
    DWORD pageindex=(vaddr&0x3FF000) >> 12;
    DWORD *pagetbl;
@@ -292,12 +354,13 @@ DWORD getphys(DWORD vaddr,DWORD *pagedir){
    DWORD *pg;
 
    pg=(DWORD*)getvirtaddress((DWORD)pagedir);
-   if (pg[dirindex]&1==0) 
+   if (pg[dirindex]&1==0)
       return 0;
    pagetbl=(DWORD*)(pg[dirindex]&0xFFFFF000);
    pg=(DWORD*)getvirtaddress((DWORD)pagetbl);
    ret=pg[pageindex];
    return ret;
+#endif
 };
 
 DWORD getpagetablephys(DWORD vaddr,DWORD *pagedir){
@@ -518,6 +581,10 @@ WORD addgdt(DWORD base,DWORD limit,BYTE attb1,BYTE attb2)
 
 void setgdt(WORD sel,DWORD base,DWORD limit,BYTE attb1,BYTE attb2)
   {
+#ifdef __x86_64__
+    (void)sel; (void)base; (void)limit; (void)attb1; (void)attb2;
+    return;
+#else
     sel=sel >> 3;
     dex_gdtbase[sel].lowaddr=base;
     dex_gdtbase[sel].lowaddr2=base >> 16;
@@ -525,12 +592,18 @@ void setgdt(WORD sel,DWORD base,DWORD limit,BYTE attb1,BYTE attb2)
     dex_gdtbase[sel].att1=attb1;
     dex_gdtbase[sel].att2=attb2 | ((limit >> 16)&0xF);
     dex_gdtbase[sel].highaddr=base >> 24;
+#endif
   };
 
 void setattb(WORD sel,BYTE attb1)
   {
+#ifdef __x86_64__
+    (void)sel; (void)attb1;
+    return;
+#else
     sel=sel >> 3;
     dex_gdtbase[sel].att1=attb1;
+#endif
   };
 
 void setcallgate(DWORD sel,DWORD funcsel,void *entry,BYTE params,BYTE access)
@@ -548,26 +621,41 @@ extern void reset_gdtr();
 
 void dex32_setbase(WORD sel,DWORD addr)
   {
+#ifdef __x86_64__
+    (void)sel; (void)addr;
+    return;
+#else
     DWORD cpuflags;
-//    storeflags(&cpuflags);
-//    stopints();
     sel=sel >> 3;
     dex_gdtbase[sel].lowaddr=addr;
     dex_gdtbase[sel].lowaddr2=addr >> 16;
     dex_gdtbase[sel].highaddr=addr >> 24;
- //   reset_gdtr();
-//    restoreflags(cpuflags);
+#endif
   };
 
 
 
 void  setinterruptvector(DWORD index,idtentry *t,unsigned char attr,
                            void (*handler)(int irq), WORD sel){
+#ifdef __x86_64__
+   uintptr addr = (uintptr)handler;
+   /* Never install task gates on x86_64 — force interrupt/trap gate. */
+   if ((attr & 0x0F) == 0x05)
+      attr = (attr & 0xF0) | 0x0E;
+   t[index].lowphy  = (WORD)(addr & 0xFFFF);
+   t[index].selector = sel;
+   t[index].ist = 0;
+   t[index].attr = attr;
+   t[index].midphy = (WORD)((addr >> 16) & 0xFFFF);
+   t[index].highphy = (DWORD)((addr >> 32) & 0xFFFFFFFF);
+   t[index].reserved = 0;
+#else
    t[index].lowphy=(WORD)handler; //set the low word
    t[index].highphy=((DWORD)handler >> 16);	//set the high word
    t[index].selector=sel;
    t[index].reserved=0;
    t[index].attr=attr;
+#endif
 };
 
 DWORD obtainpage()
@@ -833,6 +921,18 @@ void *dex32_commit(DWORD virtualaddr,DWORD pages,DWORD *pagedir,DWORD pattb)
      DWORD *pg;
      DWORD flags;
      
+#ifdef __x86_64__
+     /* Low 4GiB is identity-mapped; user windows are reserved out of the
+        freelist. Do not allocate frames or rewrite page tables. */
+     (void)pagedir;
+     (void)pattb;
+     (void)i;
+     (void)temp;
+     (void)temp2;
+     (void)pg;
+     (void)flags;
+     return ret;
+#else
      storeflags(&flags);
      stopints();
 
@@ -872,6 +972,7 @@ void *dex32_commit(DWORD virtualaddr,DWORD pages,DWORD *pagedir,DWORD pattb)
      restoreflags(flags);
      
      return ret;
+#endif
     };
 
 void dex32copyblock(DWORD vdest,DWORD vsource,DWORD pages,DWORD *pagedir)
@@ -891,6 +992,12 @@ void dex32copyblock(DWORD vdest,DWORD vsource,DWORD pages,DWORD *pagedir)
 
 void mem_init()
 {
+#ifdef __x86_64__
+    extern u64 boot_pml4[];
+    /* Long mode already has an identity map via boot_pml4; keep CR3. */
+    pagedir1 = (DWORD *)(uintptr)boot_pml4;
+    (void)pagedir1;
+#else
     DWORD i;
     char temp[255];
     pagedir1=mempop(); //obtain the first pagedirectory
@@ -915,6 +1022,7 @@ void mem_init()
 
     setpagedir(pagedir1);
     enablepaging();
+#endif
 };
 
 /*This function registers the memory amanger to the device manager so that it's

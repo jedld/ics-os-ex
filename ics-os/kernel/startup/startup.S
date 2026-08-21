@@ -1,192 +1,212 @@
-/* ICS-OS kernel entry — GNU as / TinyCC AT&T syntax. Multiboot + GDT. */
+/* Multiboot2 + long-mode bring-up for ICS-OS (x86_64). */
 .section .multiboot, "a"
+.align 8
+mb2_header_start:
+    .long 0xE85250D6            /* magic */
+    .long 0                     /* arch: i386 */
+    .long mb2_header_end - mb2_header_start
+    .long -(0xE85250D6 + 0 + (mb2_header_end - mb2_header_start))
+    /* end tag */
+    .word 0
+    .word 0
+    .long 8
+mb2_header_end:
+
+/* Also keep Multiboot1 for QEMU -kernel compatibility on some paths */
 .align 4
-mb_header:
+mb1_header:
     .long 0x1BADB002
     .long 0x00000003
     .long -(0x1BADB002 + 0x00000003)
 
-.text
-.globl startup
-.globl reset_gdtr
-.globl multiboothdr
-.extern main
-
-.equ NULL_SEL,        0
-.equ LINEAR_SEL,      0x08
-.equ SYS_CODE_SEL2,   0x10
-.equ SYS_STACK_SEL,   0x18
-.equ SYS_DATA_SEL,    0x20
-.equ TEXT_VIDEO_SEL,  0x28
-.equ KERNEL_MEM_SEL,  0x30
-.equ SYS_CODE_SEL,    0x38
-
-.equ gdt,  0x01000
-.equ gdt1, 0x01008
-.equ gdt2, 0x01010
-.equ gdt3, 0x01018
-.equ gdt4, 0x01020
-.equ gdt5, 0x01028
-.equ gdt6, 0x01030
-.equ gdt7, 0x01038
-
-startup:
-    jmp multiboot
-
-multiboot:
-    movl %ebx, multiboothdr
-    movb $'.', 0xb8000
-
-    movw $0, gdt
-    movw $0, gdt+2
-    movl $0, gdt+4
-
-    movw $0xFFFF, gdt1
-    movw $0, gdt1+2
-    movb $0, gdt1+4
-    movb $0x92, gdt1+5
-    movb $0xCF, gdt1+6
-    movb $0, gdt1+7
-
-    xorl %ebx, %ebx
-    movl $0, %ebx
-    movl %ebx, %eax
-
-    movw $0xFFFF, gdt2
-    movw %ax, gdt2+2
-    shrl $16, %eax
-    movb %al, gdt2+4
-    movb $0x9A, gdt2+5
-    movb $0xCF, gdt2+6
-    movb %ah, gdt2+7
-
-    movl $0x80000, %eax
-    movw %ax, gdt3+2
-    shrl $16, %eax
-    movb %al, gdt3+4
-    movw $0xFFFF, gdt3
-    movb $0x92, gdt3+5
-    movb $0xCF, gdt3+6
-    movb %ah, gdt3+7
-
-    movl $0, %eax
-    movw %ax, gdt4+2
-    shrl $16, %eax
-    movb %al, gdt4+4
-    movw $0xFFFF, gdt4
-    movb $0x92, gdt4+5
-    movb $0xCF, gdt4+6
-    movb %ah, gdt4+7
-
-    movb $'.', 0xb8002
-    cli
-    lgdt gdtr
-    ljmp $SYS_CODE_SEL2, $not_multiboot
-
-not_multiboot:
-    movb $'.', 0xb8004
-    movw $LINEAR_SEL, %ax
-    movw %ax, %es
-    movw %ax, %ss
-    movw %ax, %ds
-    movw %ax, %gs
-    movw %ax, %fs
-
-    movl $0, %eax
-    movw $0xFFFF, %es:gdt7
-    movw %ax, %es:gdt7+2
-    shrl $16, %eax
-    movb %al, %es:gdt7+4
-    movb $0x9A, %es:gdt7+5
-    movb $0xCF, %es:gdt7+6
-    movb %ah, %es:gdt7+7
-
-    movl $0, %eax
-    movw %ax, %es:gdt3+2
-    shrl $16, %eax
-    movb %al, %es:gdt3+4
-    movw $0xFFFF, %es:gdt3
-    movb $0x92, %es:gdt3+5
-    movb $0xCF, %es:gdt3+6
-    movb %ah, %es:gdt3+7
-
-    movl $0, %eax
-    movw %ax, %es:gdt4+2
-    shrl $16, %eax
-    movb %al, %es:gdt4+4
-    movw $0xFFFF, %es:gdt4
-    movb $0x92, %es:gdt4+5
-    movb $0xCF, %es:gdt4+6
-    movb %ah, %es:gdt4+7
-
-    movl $0x0B8000, %eax
-    movw %ax, %es:gdt5+2
-    shrl $16, %eax
-    movb %al, %es:gdt5+4
-    movw $0xFFFF, %es:gdt5
-    movb $0x92, %es:gdt5+5
-    movb $0xCF, %es:gdt5+6
-    movb %ah, %es:gdt5+7
-
-    movl $0x01000000, %eax
-    movw $0x0244, %es:gdt6
-    movw %ax, %es:gdt6+2
-    shrl $16, %eax
-    movb %al, %es:gdt6+4
-    movb $0x92, %es:gdt6+5
-    movb $0xCF, %es:gdt6+6
-    movb %ah, %es:gdt6+7
-
-    movb $'.', 0xb8006
-
-    movl %cr0, %eax
-    orb $1, %al
-    movl %eax, %cr0
-    ljmp $SYS_CODE_SEL, $linearcode
-
-linearcode:
-    xorl %eax, %eax
-    movw $SYS_STACK_SEL, %ax
-    movw %ax, %ss
-    movl $0x9FFFE, %esp
-    xorl %eax, %eax
-    movw $SYS_DATA_SEL, %ax
-    movw %ax, %ds
-    call enable_A20
-    call disable_apic
-    call main
-
-enable_A20:
-    inb $0x92, %al
-    testb $2, %al
-    jnz .a20_done
-    orb $2, %al
-    andb $0xFE, %al
-    outb %al, $0x92
-.a20_done:
-    ret
-
-disable_apic:
-    pushal
-    movl $1, %eax
-    cpuid
-    testl $0x200, %edx
-    jz .no_apic
-    movl $0x1B, %ecx
-    rdmsr
-    andl $0xFFFFF7FF, %eax
-    wrmsr
-.no_apic:
-    popal
-    ret
-
-reset_gdtr:
-    lgdt gdtr
-    ret
+.section .bss
+.align 4096
+.globl boot_pml4
+boot_pml4:
+    .skip 4096
+.globl boot_pdpt
+boot_pdpt:
+    .skip 4096
+.globl boot_pd0
+boot_pd0:
+    .skip 4096
+.globl boot_pd1
+boot_pd1:
+    .skip 4096
+.globl boot_pd2
+boot_pd2:
+    .skip 4096
+.globl boot_pd3
+boot_pd3:
+    .skip 4096
+.align 16
+boot_stack:
+    .skip 65536
+boot_stack_top:
 
 .data
+.globl multiboothdr
 multiboothdr:
+    .quad 0
+.globl multiboot_magic
+multiboot_magic:
     .long 0
-gdtr:
-    .word 2047
-    .long 0x01000
+.align 16
+gdt64:
+    .quad 0                         /* 0: null */
+    .quad 0x00AF9A000000FFFF        /* 8: kernel code 64 */
+    .quad 0x00CF92000000FFFF        /* 16: kernel data */
+    .quad 0x00AFFA000000FFFF        /* 24: user code 64 */
+    .quad 0x00CFF2000000FFFF        /* 32: user data */
+    .quad 0                         /* 40: TSS low (filled later) */
+    .quad 0                         /* 48: TSS high */
+gdt64_end:
+
+gdtr32:
+    .word gdt64_end - gdt64 - 1
+    .long gdt64
+
+.align 16
+.globl gdtr64
+gdtr64:
+    .word gdt64_end - gdt64 - 1
+    .quad gdt64
+
+.code32
+.text
+.globl startup
+.extern main
+.extern long_mode_entry
+
+.equ KERNEL_CS64, 0x08
+.equ KERNEL_DS,   0x10
+
+startup:
+    /* Preserve Multiboot EAX/EBX before any clobber (serial uses %al!). */
+    movl %eax, 0x9000
+    movl %ebx, 0x9004
+    /* Early serial 'S' so we know entry ran */
+    movw $0x3F8, %dx
+    movb $'S', %al
+    outb %al, %dx
+    jmp multiboot_entry
+
+multiboot_entry:
+    movl 0x9000, %eax
+    movl 0x9004, %ebx
+    movl %eax, multiboot_magic
+    movl %ebx, multiboothdr
+    movb $'1', 0xb8000
+    movb $0x0F, 0xb8001
+
+    /* Build identity map: 0-4GiB with 2MiB pages */
+    /* PML4[0] -> PDPT */
+    movl $boot_pdpt, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pml4
+
+    /* PDPT[0..3] -> PD0..PD3 */
+    movl $boot_pd0, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt
+    movl $boot_pd1, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt + 8
+    movl $boot_pd2, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt + 16
+    movl $boot_pd3, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt + 24
+
+    /* Fill each PD with 512 x 2MiB pages (present|write|PS) */
+    movl $boot_pd0, %edi
+    xorl %ebx, %ebx                 /* physical base */
+    movl $4, %ecx                   /* 4 page directories */
+1:
+    pushl %ecx
+    movl $512, %ecx
+2:
+    movl %ebx, %eax
+    orl  $0x83, %eax                /* P|RW|PS */
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $8, %edi
+    addl $0x200000, %ebx
+    loop 2b
+    popl %ecx
+    loop 1b
+
+    movb $'2', 0xb8002
+    movb $0x0F, 0xb8003
+
+    /* Load early GDT (still 32-bit protected) */
+    lgdt gdtr32
+
+    /* Enable PAE */
+    movl %cr4, %eax
+    orl  $(1 << 5), %eax            /* PAE */
+    orl  $(1 << 7), %eax            /* PGE */
+    movl %eax, %cr4
+
+    /* Load CR3 with PML4 */
+    movl $boot_pml4, %eax
+    movl %eax, %cr3
+
+    /* Enable LME in EFER */
+    movl $0xC0000080, %ecx
+    rdmsr
+    orl  $(1 << 8), %eax            /* LME */
+    wrmsr
+
+    /* Enable paging (+ protected mode already on from GRUB) */
+    movl %cr0, %eax
+    orl  $0x80000001, %eax          /* PG | PE */
+    movl %eax, %cr0
+
+    movb $'3', 0xb8004
+    movb $0x0F, 0xb8005
+
+    ljmp $KERNEL_CS64, $long_mode_start
+
+.code64
+.globl long_mode_start
+long_mode_start:
+    movw $KERNEL_DS, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movw %ax, %fs
+    movw %ax, %gs
+
+    lgdt gdtr64
+
+    movq $boot_stack_top, %rsp
+    xorq %rbp, %rbp
+
+    /* Enable SSE / FXSAVE */
+    movq %cr0, %rax
+    andq $~0x4, %rax                /* clear EM */
+    orq  $0x2, %rax                 /* set MP */
+    movq %rax, %cr0
+    movq %cr4, %rax
+    orq  $(1 << 9), %rax            /* OSFXSR */
+    orq  $(1 << 10), %rax           /* OSXMMEXCPT */
+    movq %rax, %cr4
+
+    movb $'4', 0xb8006
+    movb $0x0F, 0xb8007
+
+    /* Do NOT disable LAPIC — leave enabled for SMP later */
+
+    call main
+
+.hang:
+    cli
+    hlt
+    jmp .hang
+
+.globl reset_gdtr
+reset_gdtr:
+    lgdt gdtr64
+    ret

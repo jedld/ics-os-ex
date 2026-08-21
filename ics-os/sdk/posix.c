@@ -16,8 +16,8 @@
 #include <time.h>
 #include <stdarg.h>
 
-extern unsigned int dexsdk_systemcall(int function_number,int p1,int p2,
-                  int p3,int p4,int p5);
+extern unsigned int dexsdk_systemcall(int function_number,long p1,long p2,
+                  long p3,long p4,long p5);
 extern void *malloc(size_t size);
 extern void free(void *ptr);
 extern void *memset(void *d, int c, size_t n);

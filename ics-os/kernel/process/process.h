@@ -27,8 +27,10 @@
 #define _PROCESS_H
 
 #include "../dextypes.h"
+#include "../types.h"
 #include "../vfs/vfs_core.h"
 #include "../console/dex_DDL.h"
+#include "../cpu/context.h"
 
 //access levels used in accesslevel field of PCB                                
 #define ACCESS_SYS 0
@@ -72,9 +74,19 @@
 #define SYSPID_SCHED    1
 
 //defines the location of the stacks used by some of the kernel modules
+#ifdef __x86_64__
+/* Low fixed addresses (0x1xFFF0) collide with the free-page stack at 0x200000. */
+extern DWORD dispatcher_stack_loc;
+extern DWORD sched_stack_loc;
+extern DWORD pagefault_stack_loc;
+#define SCHED_STACK_LOC      sched_stack_loc
+#define DISPATCHER_STACK_LOC dispatcher_stack_loc
+#define PAGEFAULT_STACK_LOC  pagefault_stack_loc
+#else
 #define SCHED_STACK_LOC      0x1AFFF0
 #define DISPATCHER_STACK_LOC 0x1FFFF0
 #define PAGEFAULT_STACK_LOC  0x1DFFF0
+#endif
 
 //defines the stack size for system calls of user process
 #define SYSCALL_STACK 0xFFFF
@@ -161,10 +173,12 @@ typedef struct _FPUregs {
 typedef struct _PCB386 {
    /*regs must be at the beginning of the PCB since the 
      TSS directly points to the beginning of this structure*/
-   saveregs regs;      /* TSS data, also for placing initial values for EAX,EBX etc.
-                       A very hardware specific data structure for the Intel x86 family*/
+   saveregs regs;      /* TSS data (legacy); still used to stash EIP/ESP init values */
 
-   FPUregs regs2;      //stores the FPU registers, for Processors with FPU's
+   FPUregs regs2;      //stores the FPU registers (legacy fnsave layout)
+
+   cpu_context ctx;    /* software context switch state (x86_64) */
+   fpu_state fpu;      /* fxsave area */
 
    DWORD size, version; //the size and version of the PCB386 structure is placed here
                         //this is for extensibility purposes
@@ -247,6 +261,10 @@ typedef struct _PCB386 {
 
    void *signaltable;              //Reserved for the signal table *NOT YET IMPLEMENTED*
 
+   /* SMP: -1 = any CPU / not running; else cpu id. */
+   int cpu_affinity;
+   volatile int on_cpu;
+
 }PCB386;
 
 
@@ -289,9 +307,15 @@ extern DWORD sched_sysmes[3]; //[0] = pid, [1] = mes, [2] = data
 
 extern PCB386  *schedp, 
                *plast, 
-               *current_process, 
                *next_process, 
                curp;
+
+/* Per-CPU current process (x86_64 SMP). */
+#include "../cpu/smp.h"
+static inline PCB386 **ps_cur_slot(void) {
+   return (PCB386 **)&(smp_this_cpu()->current);
+}
+#define current_process (*ps_cur_slot())
 
 extern PCB386  kernelPCB, 
                schedpPCB;
@@ -374,6 +398,10 @@ void     systemcall();
 void     process_init();
 void     ps_shutdown();
 void     copyprocessmemory(process_mem *memptr,process_mem **destmemptr);
+void     ps_switchto(PCB386 *process);
+void     ps_set_affinity(int pid, int cpu);
+void     fpu_init_default(fpu_state *s);
+void     schedule_from_timer(void);
 inline   void taskswitch();
 void     show_process_stat(int pid);
 

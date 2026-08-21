@@ -183,28 +183,30 @@ void api_init(){
 };
 
 
-DWORD api_syscall(DWORD fxn,DWORD val,DWORD val2,
-                     DWORD val3,DWORD val4,DWORD val5){
+api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,
+                     api_arg_t val3, api_arg_t val4, api_arg_t val5){
    char temp[255];
-   DWORD retval = 0; //the return value of a systemcall is placed here
-   DWORD (*syscall_function)(DWORD p1,DWORD p2, DWORD p3, DWORD p4, DWORD p5);
+   api_arg_t retval = 0; //the return value of a systemcall is placed here
+   api_arg_t (*syscall_function)(api_arg_t p1, api_arg_t p2, api_arg_t p3,
+                                 api_arg_t p4, api_arg_t p5);
    //cursyscall[] is used for debugging purposes, it stores the last two different
    //system calls that was called and sets op_success if the system
    //call finished without crashing or causing a fault, false oherwise
    if (fxn!=current_process->cursyscall[1]){
       current_process->cursyscall[0]=current_process->cursyscall[1];
-      current_process->cursyscall[1]=fxn;
+      current_process->cursyscall[1]=(DWORD)fxn;
    };
   
    //place a marker to indicate if a systemcall has successfully completed
    current_process->op_success=0;
   
    if (fxn >= API_MAXSYSCALLS) 
-      retval = -1;
+      retval = (api_arg_t)-1;
    else{ 
       if (api_syscalltable[fxn].function_ptr != 0){
          //access systemcall table and validate system call
-         syscall_function = api_syscalltable[fxn].function_ptr;
+         syscall_function = (api_arg_t (*)(api_arg_t,api_arg_t,api_arg_t,api_arg_t,api_arg_t))
+                            api_syscalltable[fxn].function_ptr;
            
          //This system calls require interrupts to be enabled
          if (api_syscalltable[fxn].flags&API_REQUIRE_INTS){
@@ -220,8 +222,8 @@ DWORD api_syscall(DWORD fxn,DWORD val,DWORD val2,
             retval = syscall_function(val, val2, val3, val4, val5);
          }
       }else{
-         printf("dex32_api: An unknown systemcall(0x%X) was called\n",fxn);
-         retval = -1;
+         printf("dex32_api: An unknown systemcall(0x%X) was called\n",(DWORD)fxn);
+         retval = (api_arg_t)-1;
       };
     
       current_process->op_success=1;

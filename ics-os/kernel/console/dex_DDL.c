@@ -183,10 +183,7 @@ void Dex32UpdateCursor(DEX32_DDL_INFO *dev, int y, int x){
 
 //Emulates an ANSI compatible display subsystem
 void Dex32PutC(DEX32_DDL_INFO *dev, char c){
-   /* Mirror only the visible console. Off-screen DDLs (task manager)
-      were flooding COM1 and stalling every printf/I/O path. */
-   if (c!='\t' && dev->active)
-      serial_putc(c);
+   /* Serial mirror lives in putcEX to avoid double COM1 output. */
    if (c=='\t'){
       int i;
       for (i=0;i<3;i++)

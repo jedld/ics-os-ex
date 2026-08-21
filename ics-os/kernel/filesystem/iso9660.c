@@ -26,6 +26,7 @@
    #include "../vfs/vfs_core.h"
    #include "../devmgr/dex32_devmgr.h"
    #include "../iomgr/iosched.h"
+   #include "../process/process.h"
    #include "iso9660.h"
    
    
@@ -44,7 +45,8 @@
                 sectors = (dirinfo->length_le / 2048);
         
         handle=dex32_requestIO(id,IO_READ,dirinfo->first_sector_le ,sectors,*buffer);
-        while (!dex32_IOcomplete(handle));
+        while (!dex32_IOcomplete(handle))
+           taskswitch();
         dex32_closeIO(handle);    
         
         return dirinfo->length_le;
@@ -54,38 +56,41 @@
    int iso9660_mountroot(vfs_node *node,int id)
    {
       DWORD handle;
-      iso9660_volumedescriptor vol_ptr;
-      iso9660_volumedescriptor current_vd; //stores the volume descriptor that will be used
+      /* Always read into a full 2048-byte sector buffer — never a smaller
+         on-stack struct (PIO writes the whole ATAPI block). */
+      static BYTE sector_buf[2048] __attribute__((aligned(16)));
+      iso9660_volumedescriptor current_vd;
       int vol_num = 1;
-      //attempt to read the volume descriptors and make an I/O request to the IO manager
       
       printf("reading primary volume descriptor..\n");
-      handle=dex32_requestIO(id,IO_READ,16,1,&vol_ptr);
-      while (!dex32_IOcomplete(handle));
+      handle=dex32_requestIO(id,IO_READ,16,1,sector_buf);
+      while (!dex32_IOcomplete(handle))
+         taskswitch();
       dex32_closeIO(handle);       
-      memcpy(&current_vd , &vol_ptr, sizeof(iso9660_volumedescriptor));
+      memcpy(&current_vd , sector_buf, sizeof(iso9660_volumedescriptor));
       
       //Check for a joliet volume descriptor
       
       do {
       printf("reading secondary volume descriptor..\n");
       
-      handle=dex32_requestIO(id,IO_READ,16+vol_num,1,&vol_ptr);
-      while (!dex32_IOcomplete(handle));
+      handle=dex32_requestIO(id,IO_READ,16+vol_num,1,sector_buf);
+      while (!dex32_IOcomplete(handle))
+         taskswitch();
       dex32_closeIO(handle);      
       
-      if ( iso9660_isjoliet(&vol_ptr) )
+      if ( iso9660_isjoliet((iso9660_volumedescriptor*)sector_buf) )
         {
            printf("Joliet Extension SVD detected\n");     
-           memcpy(&current_vd,&vol_ptr,sizeof(iso9660_volumedescriptor));
+           memcpy(&current_vd,sector_buf,sizeof(iso9660_volumedescriptor));
            break;     
         };
-      if (vol_ptr.ident == 3)
+      if (sector_buf[0] == 3)
         {
            printf("Volume Partition Descriptor detected\n");      
         };    
       vol_num++;
-      } while (vol_ptr.ident<255&& (vol_num<8) );
+      } while (sector_buf[0]<255&& (vol_num<8) );
       
       printf("Interpreting volume descriptor..\n");
       //validate data
@@ -131,7 +136,12 @@
            }
       else
            {
-                printf("invalid primary volume descriptor!.\n");      
+                printf("invalid primary volume descriptor!.\n");
+                printf("  ident=%d sig=%c%c%c%c%c ver=%d\n",
+                       (int)current_vd.ident,
+                       current_vd.descriptors[0], current_vd.descriptors[1],
+                       current_vd.descriptors[2], current_vd.descriptors[3],
+                       current_vd.descriptors[4], (int)current_vd.descriptors[5]);
                 return -1; //return with error, tell the VFS not to mount
            };
            
@@ -139,15 +149,28 @@
    };  
    
 
-   char *iso9660_convertname(const char *identifier, char *targ)
+   char *iso9660_convertname(const char *identifier, char *targ, int length)
    {
       int i;
-      for (i=0;identifier[i]!=';';i++)
-         {
-           targ[i] = identifier[i];
-         };
+      if (length > 255) length = 255;
+      for (i = 0; i < length; i++) {
+         char c = identifier[i];
+         if (c == ';') /* ISO version separator */
+            break;
+         if (c == 0)
+            break;
+         /* Present ISO9660 names in lowercase for Unix-style paths. */
+         if (c >= 'A' && c <= 'Z')
+            c = c - 'A' + 'a';
+         targ[i] = c;
+      }
+      targ[i] = 0;
+      /* Strip trailing dots from "NAME." Rock Ridge-less ISO names */
+      while (i > 0 && targ[i - 1] == '.') {
+         i--;
          targ[i] = 0;
-         return targ;
+      }
+      return targ;
    };
    
    /*unicode to ascii converter*/
@@ -189,7 +212,8 @@ int iso9660_openfile(vfs_node *f,char *buffer,int start,int end,int id)
     
    
     handle = dex32_requestIO(id,IO_READ, firstblock + startblock, totalblocks, data_buffer);
-    while (!dex32_IOcomplete(handle));
+    while (!dex32_IOcomplete(handle))
+       taskswitch();
     dex32_closeIO(handle);       
 
     memcpy(buffer, data_buffer + startadj, end - start +1);
@@ -269,7 +293,7 @@ int iso9660_mountdirectory(vfs_node *directory, int id)
             if (mountpoint->misc_flag)  //Joliet Extensions?? 
             iso9660_iso_unicodetoascii(dir->ident,node->name,dir->ident_length); 
               else
-            iso9660_convertname(dir->ident,node->name);
+            iso9660_convertname(dir->ident,node->name,dir->ident_length);
             
             node->memid = devid;
             node->fsid = iso9660_myid;
@@ -286,8 +310,8 @@ int iso9660_mountdirectory(vfs_node *directory, int id)
                 node->files = VFS_NOT_MOUNTED;
                };
             
-            size+= dir->size;
-            dirptr =(void*)( (DWORD) dirptr + dir->size);
+            size += dir->size;
+            dirptr = dirptr + dir->size;
             
       };
       

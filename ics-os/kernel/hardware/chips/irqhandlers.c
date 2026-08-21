@@ -30,9 +30,13 @@
 #define IRQ_FDC 64
 #define IRQ_MOUSE 16  //added by jach
 
-typedef struct _idtr {
+typedef struct __attribute__((packed)) _idtr {
    WORD limit;
+#ifdef __x86_64__
+   u64 location;
+#else
    idtentry *location;
+#endif
 }idtr;
 
 /*Used by the irqwrappers to determine the device drivers
@@ -57,6 +61,7 @@ unsigned int ticks=0;
 */
 
 extern void timerwrapper(void);
+extern void reschedwrapper(void);
 extern void loadregisters(void);
 extern void kbdwrapper(void);
 extern void mousewrapper(void);
@@ -255,7 +260,8 @@ void enable_taskswitching(){
    if (!ts_enabled){
       storeflags(&flags);
       stopints();
-      setinterruptvector(0x20,dex_idtbase,0x85,0,SCHED_TSS);
+      /* Software context switch: timer uses interrupt gate, not TSS task gate. */
+      setinterruptvector(0x20,dex_idtbase,0x8E,timerwrapper,SYS_CODE_SEL);
       ts_enabled=1;
       refreshpages();
       restoreflags(flags);
@@ -365,8 +371,8 @@ void setdefaulthandlers(){
    irq_init();
        
    /************************* Install the IRQ handlers ***************************/    
-   //install timer handler
-   setinterruptvector(0x20,dex_idtbase,0x85,0,SCHED_TSS);
+   //install timer handler (interrupt gate — software scheduling)
+   setinterruptvector(0x20,dex_idtbase,0x8E,timerwrapper,SYS_CODE_SEL);
    
    setinterruptvector(0x21,dex_idtbase,0x8E,
                         irq1wrapper,SYS_CODE_SEL);
@@ -460,8 +466,16 @@ void setdefaulthandlers(){
    setinterruptvector(0x31,dex_idtbase,0x8E,
                         syscallwrapper,SYS_CODE_SEL);
 
-   intloc.limit=2047;
-   intloc.location=dex_idtbase;
+   /* SMP reschedule IPI (vector 0xFC) */
+   setinterruptvector(0xFC,dex_idtbase,0x8E,
+                        reschedwrapper,SYS_CODE_SEL);
+
+   /* LAPIC timer (BSP + APs); PIT remains on 0x20 */
+   setinterruptvector(0x41,dex_idtbase,0x8E,
+                        timerwrapper,SYS_CODE_SEL);
+
+   intloc.limit=4095;
+   intloc.location=(u64)(uintptr)dex_idtbase;
    loadregisters();     //load the idtr register with data, defined in kernel/startup/asmlib.asm
 };
 

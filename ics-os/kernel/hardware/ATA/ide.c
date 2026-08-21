@@ -398,8 +398,11 @@ int ide_cdromreadsectors(int interface,int dev,DWORD lba,DWORD sectors, char *bu
    atapi_packet.blocks[0] = (sectors & 0x0000FF00) >> 8;
    atapi_packet.blocks[1] = (sectors & 0xFF);
    
-   if (reg_packet(dev,12, SYS_DATA_SEL,&atapi_packet,0,2048,
-          SYS_DATA_SEL,buffer)!=0) {printf("read failure!\n");return -1;};
+   if (reg_packet(dev,12, SYS_DATA_SEL,&atapi_packet,0,(long)sectors * 2048,
+          SYS_DATA_SEL,(unsigned int)(uintptr)buffer)!=0) {
+      printf("read failure!\n");
+      return -1;
+   };
    
    return 1;
 };

@@ -1,23 +1,25 @@
 CC=gcc
-CFLAGS=-std=gnu89 -fno-stack-protector -fgnu89-inline -m32 -w -nostdlib \
+CFLAGS=-std=gnu89 -fno-stack-protector -fgnu89-inline -m64 -mcmodel=large -w -nostdlib \
 	-fno-builtin -ffreestanding -fno-pie -fno-pic \
-	-fno-asynchronous-unwind-tables -mno-mmx -mno-sse -mno-sse2 \
-	-msoft-float -fno-strict-aliasing -fcommon -c -g
-ASM=nasm
-ASMFLAGS=-f elf32
-LDFLAGS=-m elf_i386 -T lscript.ld --build-id=none -z max-page-size=0x1000 -z noexecstack -nostdlib
+	-fno-asynchronous-unwind-tables \
+	-mno-red-zone -msse -msse2 \
+	-fno-strict-aliasing -fcommon -c -g -I.
+ASM=gcc
+ASMFLAGS=$(CFLAGS)
+LDFLAGS=-m elf_x86_64 -T lscript64.ld --build-id=none -z max-page-size=0x1000 -z noexecstack -nostdlib
 
 bzImage: all
-	objcopy --only-keep-debug Kernel32.bin Kernel32.sym
-	objcopy --strip-debug Kernel32.bin
-	gzip -c -9 Kernel32.bin >  vmdex
+	objcopy --only-keep-debug Kernel64.bin Kernel64.sym
+	objcopy --strip-debug Kernel64.bin
+	# Prefer uncompressed ELF64 for Multiboot2 (gzip optional)
+	cp Kernel64.bin vmdex
 	cp vmdex ..
+	cp Kernel64.bin Kernel32.bin || true
 
-all: obj Kernel32.bin
+all: obj Kernel64.bin
 
 obj: scheduler.o fat.o iso9660.o devfs.o iomgr.o blkcache.o devmgr_error.o kernel32.o \
-		startup.o asmlib.o irqwrap.o 
-	#strip --strip-debug *.o
+		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o
 		
 kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		hardware/chips/serial.c hardware/ATA/ide.c \
@@ -29,7 +31,7 @@ kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		console/console.c
 	$(CC) $(CFLAGS) -o kernel32.o kernel32.c 
 	
-scheduler.o:
+scheduler.o: process/scheduler.c
 	$(CC) $(CFLAGS) -o scheduler.o process/scheduler.c
 
 fat.o: filesystem/fat12.c filesystem/fat12.h
@@ -58,13 +60,26 @@ asmlib.o: startup/asmlib.S
 
 irqwrap.o: irqwrap.S
 	$(CC) $(CFLAGS) -o irqwrap.o irqwrap.S
+
+context.o: cpu/context.S
+	$(CC) $(CFLAGS) -o context.o cpu/context.S
+
+ap_trampoline.o: cpu/ap_trampoline.S
+	$(CC) $(CFLAGS) -o ap_trampoline.o cpu/ap_trampoline.S
+
+lapic.o: cpu/lapic.c cpu/lapic.h
+	$(CC) $(CFLAGS) -o lapic.o cpu/lapic.c
+
+smp.o: cpu/smp.c cpu/smp.h
+	$(CC) $(CFLAGS) -o smp.o cpu/smp.c
 	
-Kernel32.bin: startup.o asmlib.o kernel32.o scheduler.o iomgr.o blkcache.o fat.o iso9660.o \
+Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
+		scheduler.o iomgr.o blkcache.o fat.o iso9660.o \
 		devfs.o irqwrap.o devmgr_error.o
 	ld $(LDFLAGS) -Map mapfile.txt
 
 clean:
 	rm -f *.o
-	rm -f Kernel32.bin
-	rm -f Kernel32.sym
+	rm -f Kernel64.bin Kernel32.bin
+	rm -f Kernel64.sym Kernel32.sym
 	rm -f vmdex

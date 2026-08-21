@@ -80,6 +80,7 @@ typedef struct __attribute__((packed)) _iso9660_volumedescriptor {
         BYTE reserved4[2];
         BYTE reserved5[512];
         BYTE reserved6[653];
+        BYTE pad_to_sector[2]; /* ISO sector is 2048; keep struct that size */
    }  iso9660_volumedescriptor;
 
 typedef struct __attribute__((packed)) _iso9660_path_table {
@@ -111,7 +112,7 @@ typedef struct __attribute__((packed)) _iso9660_directory {
    /*******************Prototype definition here*******************************/   
    int iso9660_loaddirectory(iso9660_directory *dirinfo, void **buffer,int id);
    int iso9660_mountroot(vfs_node *node,int id);
-   char *iso9660_convertname(const char *identifier, char *targ);
+   char *iso9660_convertname(const char *identifier, char *targ, int length);
    char *iso9660_iso_unicodetoascii(WORD *unicodestr,char *targ,int length);
    int iso9660_getbytesperblock();
    int iso9660_openfile(vfs_node *f,char *buffer,int start,int end,int id);

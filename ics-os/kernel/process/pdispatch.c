@@ -194,9 +194,11 @@ void process_dispatcher(){
             #endif
          }else{               //a NEW_MODULE. Perform a createprocess(),implicitly called in module loaders     
 
+            printf("dispatcher: loading %s\n", pd_head->name);
             pd_head->dispatched=0;  //not yet dispatched
             pd_head->processid = dex32_loader(pd_head->name, pd_head->image, pd_head->loadaddress,
                                     pd_head->mode, pd_head->parameter, pd_head->workdir, parent);
+            printf("dispatcher: pid=%d\n", (int)pd_head->processid);
             pd_head->dispatched=1;  //ok a process has been created
 
             ptr=pd_head;

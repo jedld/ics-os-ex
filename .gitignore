@@ -7,9 +7,13 @@ ics-os-usb.img
 ics-os-livecd.iso
 vmdex
 ics-os/vmdex
+ics-os/vmdex-raw
 ics-os/kernel/Kernel32.bin
 ics-os/kernel/Kernel32.sym
+ics-os/kernel/Kernel64.bin
+ics-os/kernel/Kernel64.sym
 ics-os/kernel/*.o
+ics-os/kernel/cpu/*.o
 ics-os/tmp/
 ics-os/tmp-usb/
 ics-os/contrib/**/*.exe

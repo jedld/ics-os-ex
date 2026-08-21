@@ -35,13 +35,14 @@ int errno;
 FILE *stdout = (FILE*)1, *stdin =(FILE*)2, *stderr=(FILE*)1;
 
 /*executes a dex32 systemcall (int 0x30) , implementation almost similar to linux*/
-unsigned int dexsdk_systemcall(int function_number,int p1,int p2,
-                  int p3,int p4,int p5){
+unsigned int dexsdk_systemcall(int function_number, long p1, long p2,
+                  long p3, long p4, long p5){
    unsigned int return_value;
    __asm__ volatile ("int $0x30" \
          : "=a" (return_value) \
          : "0" ((long)(function_number)),"b" ((long)(p1)),"c" ((long)(p2)), \
-         "d" ((long)(p3)),"S" ((long)(p4)),"D" ((long)(p5)) ); \
+         "d" ((long)(p3)),"S" ((long)(p4)),"D" ((long)(p5)) \
+         : "memory" ); \
    return return_value;
 };
 
@@ -54,11 +55,11 @@ void exit (int status){
 };
 
 void getparameters(char *buf){
-   dexsdk_systemcall(0x50,(int)buf,0,0,0,0);
+   dexsdk_systemcall(0x50,(long)buf,0,0,0,0);
 };
 
 void charputc(char c){
-   dexsdk_systemcall(6,c,0,0,0,0);
+   dexsdk_systemcall(6,(long)(unsigned char)c,0,0,0,0);
 };  
 
 /*this strtok is still not thread safe, so be careful!*/

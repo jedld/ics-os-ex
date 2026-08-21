@@ -25,10 +25,29 @@
 */
 
 
-/*This constants define the selector values used by DEX,
-  Unlike real-mode, protected mode uses selectors instead of segments. Selectors
-  point to a table (the GDT) which contains information like the base of the segment
-  and protection bits (See the an Intel 386/486/Pentium manuel for details on these*/
+/*This constants define the selector values used by DEX */
+#ifdef __x86_64__
+#define LINEAR_SEL     0x10
+#define SYS_CODE_SEL   0x08
+#define SYS_DATA_SEL   0x10
+#define SYS_STACK_SEL  0x10
+#define SYS_TSS        0x28
+#define SCHED_TSS      0x28
+#define USER_CODE      (0x18+3)
+#define USER_DATA      (0x20+3)
+#define USER_STACK     (0x20+3)
+#define USER_TSS       0x28
+#define SYS_SCHED_SEL  0x08
+#define SYS_ERROR_TSS  0x28
+#define PF_TSS         0x28
+#define APM_CS32       0x08
+#define APM_CS16       0x08
+#define APM_DS         0x10
+#define DEX_SYSCALL    0x08
+#define KEYB_TSS       0x28
+#define MOUSE_TSS      0x28
+#define MACHINE_X86_64
+#else
 #define LINEAR_SEL 8
 #define SYS_CODE_SEL 56
 #define SYS_DATA_SEL 0x20
@@ -48,9 +67,8 @@
 #define DEX_SYSCALL 0xD8
 #define KEYB_TSS    0xE0
 #define MOUSE_TSS    0xE8
-
-
 #define MACHINE_INTEL386
+#endif
 
 //******defines known page attributes********
 #define PG_PRESENT 1
@@ -87,19 +105,45 @@ typedef struct __attribute__((packed)) _CALLGATE
   } CALLGATE;
 
 //this structure defines an entry in the IDT table
-typedef struct _IDTentry
-  {
-    WORD lowphy ;  // the low word
-    WORD selector; // the selelctor
-	 BYTE reserved; // the reserved byte
-	 BYTE attr;     // the attribute byte
-    WORD highphy;  // the high word
-  } idtentry;
+#ifdef __x86_64__
+typedef struct __attribute__((packed)) _IDTentry {
+    WORD lowphy;
+    WORD selector;
+    BYTE ist;
+    BYTE attr;
+    WORD midphy;
+    DWORD highphy;
+    DWORD reserved;
+} idtentry;
+#else
+typedef struct _IDTentry {
+    WORD lowphy ;
+    WORD selector;
+    BYTE reserved;
+    BYTE attr;
+    WORD highphy;
+} idtentry;
+#endif
 
 DWORD totalgdtentries=10;
 
 /*====================The DEX Memory Map==========================================*/
 
+#ifdef __x86_64__
+/* Identity-mapped long mode: keep kernel heap inside physical RAM. */
+char *kbaseheap=(char*)0x03000000;
+char *kmodeproc=(char*)0x05000000,
+     *kmodeproc_next=(char*)0x05000000;
+char *lmodeproc=(char*)0x06000000,
+     *lmodeproc_next= (char*)0x06000000;
+char *knext=          (char*)0x03000000;
+char *userstackloc=   (char*)0x0B000000;
+char *userheap=       (char*)0x0A000000;
+char *syscallstack=   (char*)0x09000000;
+char *linux_userspace=(char*)0x08000000;
+char *sharedmemloc=   (char*)0x07000000;
+char *userspace=      (char*)0x00400000;
+#else
 char *kbaseheap=(char*)0xC0000000;          //marks the location of the kernel heap
 char *kmodeproc=(char*)0xD0000000,
      *kmodeproc_next=(char*)0xD0000000;     //marks the location of the kernel mode
@@ -115,6 +159,7 @@ char *syscallstack=   (char*)0x90000000;    //marks the base of the system call 
 char *linux_userspace=(char*)0x80000000;    //marks the base where linux executables like to go
 char *sharedmemloc=   (char*)0x70000000;    //marks the location of the user shared memory area
 char *userspace=      (char*)0x00400000;    //marks the location of the user base address
+#endif
 DWORD *stackbase=    (DWORD*)0x00200000;    //marks the location of the stack pages
 DWORD *kernelbase=   (DWORD*)0x00100000;    //marks the location of the kernel
 idtentry *dex_idtbase=(idtentry*)0x2000;    //marks the location of the IDT

@@ -176,10 +176,20 @@ void time_handler()
    ticks++;
    time_incrementtime();
    
-   fdctimer(); //Enables the floppy disk driver to shut down
-               //the drive motor after a certain period of time
-               //see floppy.c for details
-   outportb(0x20,0x20); //renable the timer                
+   /* Floppy motor timeout and PIC EOI are BSP-only. APs use the LAPIC. */
+   {
+      extern int smp_cpu_id(void);
+      if (smp_cpu_id() == 0) {
+         fdctimer();
+         outportb(0x20,0x20);
+      }
+   }
+   {
+      extern void lapic_eoi(void);
+      extern volatile unsigned int *lapic_mmio;
+      if (lapic_mmio)
+         lapic_eoi();
+   }
 ;};
 
 void cpu_idle(void)

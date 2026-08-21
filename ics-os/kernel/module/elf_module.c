@@ -72,10 +72,45 @@ typedef unsigned int Elf32_Word;
 #define EM_M32 1
 #define EM_SPARC 2
 #define EM_386 3
-#define EM_68K 4
-#define EM_88K 5
-#define EM_860 7
-#define EM_MIPS 8
+#define EM_X86_64 62
+
+#define ELFCLASS32 1
+#define ELFCLASS64 2
+
+typedef unsigned long long Elf64_Addr;
+typedef unsigned short Elf64_Half;
+typedef unsigned long long Elf64_Off;
+typedef int Elf64_Sword;
+typedef unsigned int Elf64_Word;
+typedef unsigned long long Elf64_Xword;
+
+typedef struct {
+  unsigned char e_ident[EI_NIDENT];
+  Elf64_Half e_type;
+  Elf64_Half e_machine;
+  Elf64_Word e_version;
+  Elf64_Addr e_entry;
+  Elf64_Off e_phoff;
+  Elf64_Off e_shoff;
+  Elf64_Word e_flags;
+  Elf64_Half e_ehsize;
+  Elf64_Half e_phentsize;
+  Elf64_Half e_phnum;
+  Elf64_Half e_shentsize;
+  Elf64_Half e_shnum;
+  Elf64_Half e_shstrndx;
+} Elf64_Ehdr;
+
+typedef struct {
+  Elf64_Word p_type;
+  Elf64_Word p_flags;
+  Elf64_Off p_offset;
+  Elf64_Addr p_vaddr;
+  Elf64_Addr p_paddr;
+  Elf64_Xword p_filesz;
+  Elf64_Xword p_memsz;
+  Elf64_Xword p_align;
+} Elf64_Phdr;
 
 //the ELF magic values
 #define ELFMAG0 0x7f
@@ -311,6 +346,47 @@ int elf_loadmodule(char *module_name,char *elf_image,
        elfheader->e_ident[2]==ELFMAG2 &&
        elfheader->e_ident[3]==ELFMAG3)
     {
+#ifdef __x86_64__
+      /* Prefer ELF64 on long-mode kernel */
+      if (elfheader->e_ident[4] == ELFCLASS64) {
+         Elf64_Ehdr *eh64 = (Elf64_Ehdr *)elf_image;
+         Elf64_Phdr *ph64;
+         int phi;
+         printf("elf64: parsing %s\n", module_name);
+         if (eh64->e_machine != EM_X86_64) {
+            printf("elf: unsupported e_machine %d\n", eh64->e_machine);
+            return 0;
+         }
+         entrypoint = (void *)(uintptr)eh64->e_entry;
+         ph64 = (Elf64_Phdr *)(elf_image + eh64->e_phoff);
+         pagedir = pagedir1;
+         if (mode == ELF_USERO || mode == ELF_SYSO || eh64->e_type == ET_EXEC) {
+            stackloc=(DWORD*)dex32_commitblock((DWORD)(uintptr)userstackloc-ELF_STACK_COMMIT,
+                       ELF_STACK_COMMIT,&pages,
+                       pagedir,PG_WR | PG_USER);
+            addmemusage(&memptr,stackloc,pages);
+            stackloc = (DWORD*)((uintptr)userstackloc - 8);
+            dex32_commitblock((DWORD)(uintptr)userheap, ELF_HEAP_COMMIT, &pages,
+                        pagedir, PG_WR | PG_USER );
+            addmemusage(&memptr,userheap,pages);
+         }
+         for (phi = 0; phi < eh64->e_phnum; phi++) {
+            if (ph64[phi].p_type == PT_LOAD) {
+               char *dst = (char *)(uintptr)ph64[phi].p_vaddr;
+               dex32_commitblock((DWORD)(uintptr)dst, (int)ph64[phi].p_memsz, &pages,
+                                 pagedir, PG_WR | PG_USER);
+               memcpy(dst, elf_image + ph64[phi].p_offset, (unsigned long)ph64[phi].p_filesz);
+               if (ph64[phi].p_memsz > ph64[phi].p_filesz)
+                  memset(dst + ph64[phi].p_filesz, 0,
+                         (unsigned long)(ph64[phi].p_memsz - ph64[phi].p_filesz));
+            }
+         }
+         printf("elf64: loaded %s entry=0x%X\n", module_name, (DWORD)(uintptr)entrypoint);
+         ret = createprocess(entrypoint, module_name, pagedir, memptr, stackloc,
+                             ELF_STACK_COMMIT, SYSCALL_STACK, 0, p, workdir, parent);
+         return ret;
+      }
+#endif
         //obtain the program's entry point
         entrypoint=(void*)(elfheader->e_entry);
         sectionh=(Elf32_Shdr*)(elf_image+elfheader->e_shoff);

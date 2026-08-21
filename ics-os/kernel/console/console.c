@@ -282,30 +282,14 @@ int user_execp(char *fname, DWORD mode, char *params){
           from_cache ? " [cached]" : " [mmap]");
    {
          char temp[255];
-         int hdl;
-         #ifdef DEBUG_USER_PROCESS
-         printf("execp(): adding module..\n");
-         #endif
 
-        
-         //Calls addmodule() from kernel/process/pdispatch.c 
-         hdl= addmodule(fname, buf, userspace, mode, params, showpath(temp), getprocessid());
-        
-         #ifdef DEBUG_USER_PROCESS
-         printf("execp(): done.\n");
-         #endif
+         /* Load synchronously from the caller. The historic process_dispatcher
+            kthread path can starve under software scheduling while the console
+            spins on pd_ok(). */
+         id = dex32_loader(fname, buf, userspace, mode, params,
+                           showpath(temp), current_process);
 
-         taskswitch();     //inform the CPU scheduler, hopefully to schedule process_dispatcher()
-
-         #ifdef DEBUG_USER_PROCESS
-         printf("execp(): parent waiting for child to finish\n");
-         #endif
-    
-         //loop until the new process has been dispatched    
-         while (!(id = pd_ok(hdl)))
-            taskswitch();
-
-         if ((int)id == -1){
+         if (!id || (int)id == -1){
             printf("execp: failed to start %s\n", fname);
             if (!from_cache){
                free(buf);
@@ -314,13 +298,13 @@ int user_execp(char *fname, DWORD mode, char *params){
             }
             return 0;
          }
+
+         printf("execp: started pid=%d, waiting\n", (int)id);
          
          fg_setmykeyboard(id);
 
          //wait for the child process to finish
          dex32_waitpid(id,0);
-
-         //dex32_wait();
 
          fg_setmykeyboard(getprocessid());
          if (!from_cache){

@@ -30,12 +30,13 @@ cat > "$STAGE_DIR/boot/grub/grub.cfg" << 'EOF'
 serial --unit=0 --speed=115200
 terminal_input serial console
 terminal_output serial console
-set timeout=2
+set timeout=0
 set default=0
 
 menuentry 'ICS Operating System (USB)' {
     search --file --set=root /vmdex
-    multiboot /vmdex
+    echo 'Loading ICS-OS (multiboot2)...'
+    multiboot2 /vmdex
     boot
 }
 EOF

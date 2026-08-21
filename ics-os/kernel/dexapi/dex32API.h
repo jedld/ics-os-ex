@@ -40,6 +40,13 @@ typedef struct _api_systemcall{
    void *function_ptr;
 }api_systemcall;
 
+/* Args must be pointer-width so user buffers survive on x86_64. */
+#ifdef __x86_64__
+typedef unsigned long api_arg_t;
+#else
+typedef DWORD api_arg_t;
+#endif
+
 //The system call table
 api_systemcall api_syscalltable[API_MAXSYSCALLS];
 
@@ -47,7 +54,7 @@ int api_addsystemcall(DWORD function_number, void *function_ptr,
                         DWORD access_check, DWORD flags);
 void api_init();
 int api_removesystemcall(DWORD function_number);
-DWORD api_syscall(DWORD fxn,DWORD val,DWORD val2,
-                   DWORD val3,DWORD val4,DWORD val5);
+api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,
+                   api_arg_t val3, api_arg_t val4, api_arg_t val5);
 
 #endif

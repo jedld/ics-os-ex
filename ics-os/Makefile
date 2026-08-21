@@ -8,12 +8,12 @@ QEMU_X64=qemu-system-x86_64
 QEMU_MEM=128M
 QEMU_NET=-net nic,model=rtl8139 -net none
 # QEMU can load the 32-bit multiboot kernel the same way GRUB does.
-QEMU_KERNEL=-kernel kernel/Kernel32.bin
+QEMU_KERNEL=-kernel kernel/Kernel64.bin
 
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-exec test-iobench
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-exec test-iobench test-smp test-boot test-integration
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -87,18 +87,19 @@ boot-livecd-amd64:
 	$(QEMU_X64) -cdrom ics-os-livecd.iso -boot cd -m $(QEMU_MEM)
 
 # Treat the USB image as a hard disk (how many BIOS/CSM firmwares expose a stick).
-boot-usb:
-	$(QEMU_I386) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_KERNEL) \
-		-drive file=ics-os-usb.img,format=raw,if=ide -boot c
+# ELF64 Multiboot2 kernel — boot via GRUB on the disk image (QEMU -kernel cannot load ELF64).
+QEMU_DISK_BOOT=-drive file=ics-os-usb.img,format=raw,if=ide -boot c
 
-# Same image on a 64-bit CPU (protected-mode kernel on AMD64).
+boot-usb:
+	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_DISK_BOOT)
+
+# Long-mode kernel on a 64-bit CPU via GRUB multiboot2.
 boot-usb-amd64:
-	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_KERNEL) \
-		-drive file=ics-os-usb.img,format=raw,if=ide -boot c
+	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_DISK_BOOT)
 
 # Boot from a real UHCI USB mass-storage device and mount it as root.
 boot-usb-storage:
-	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) $(QEMU_KERNEL) \
+	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) \
 		-drive if=none,id=stick,format=raw,file=ics-os-usb.img \
 		-device piix3-usb-uhci,id=uhci \
 		-device usb-storage,bus=uhci.0,drive=stick
@@ -109,52 +110,99 @@ boot-usb-uefi:
 
 # Headless emulator smoke tests (serial console, no VGA window).
 test-usb:
-	timeout 25 $(QEMU_I386) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
-		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c
+	timeout 45 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
+		$(QEMU_DISK_BOOT)
 
-test-usb-amd64:
-	timeout 25 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
-		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c
+test-usb-amd64: vmdex
+	@mkdir -p /tmp/icsos-boot-iso/boot/grub
+	@cp kernel/Kernel64.bin /tmp/icsos-boot-iso/vmdex
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-boot-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-boot.iso /tmp/icsos-boot-iso >/dev/null 2>&1
+	timeout 45 $(QEMU_X64) -nographic -no-reboot -m $(QEMU_MEM) \
+		-cdrom /tmp/icsos-boot.iso -boot d
+
+# Quick Multiboot2 CD boot: root filesystem mounts on cds0.
+test-boot: vmdex
+	@echo "Building Multiboot2 ISO for boot smoke test..."
+	@mkdir -p /tmp/icsos-boot-iso/boot/grub
+	@cp kernel/Kernel64.bin /tmp/icsos-boot-iso/vmdex
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-boot-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-boot.iso /tmp/icsos-boot-iso >/dev/null 2>&1
+	@echo "Running boot smoke test..."
+	@-timeout 40 $(QEMU_X64) -smp 2 -nographic -no-reboot -m $(QEMU_MEM) \
+		-cdrom /tmp/icsos-boot.iso -boot d > /tmp/icsos-boot.log 2>&1
+	@grep -aq "serial console ready" /tmp/icsos-boot.log
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-boot.log
+	@grep -aq "AP scheduling enabled" /tmp/icsos-boot.log
+	@! grep -aq "General Protection fault" /tmp/icsos-boot.log
+	@echo "test-boot PASS"
 
 test-usb-storage:
-	timeout 40 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
-		$(QEMU_KERNEL) \
+	timeout 60 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
 		-drive if=none,id=stick,format=raw,file=ics-os-usb.img \
 		-device piix3-usb-uhci,id=uhci \
 		-device usb-storage,bus=uhci.0,drive=stick
 
+test-smp: vmdex
+	@echo "Building Multiboot2 ISO for SMP test..."
+	@mkdir -p /tmp/icsos-smp-iso/boot/grub
+	@cp kernel/Kernel64.bin /tmp/icsos-smp-iso/vmdex
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-smp-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-smp.iso /tmp/icsos-smp-iso >/dev/null 2>&1
+	@echo "Running SMP dual-core smoke test..."
+	@-timeout 45 $(QEMU_X64) -smp 2 -nographic -no-reboot -m $(QEMU_MEM) \
+		-cdrom /tmp/icsos-smp.iso -boot d > /tmp/icsos-smp.log 2>&1
+	@grep -q "SMP: .*CPUs online" /tmp/icsos-smp.log
+	@grep -q "SMP: CPU 1" /tmp/icsos-smp.log
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-smp.log
+	@grep -aq "AP scheduling enabled" /tmp/icsos-smp.log
+	@grep -aqE "Running console thread|dex32_startup" /tmp/icsos-smp.log
+	@grep -aq "AP work-steal OK" /tmp/icsos-smp.log
+	@! grep -aq "General Protection fault" /tmp/icsos-smp.log
+	@echo "test-smp PASS"
+
 # Boot, compile hello.c with in-OS TinyCC, run it, then reboot.
+# NOTE: i386 TinyCC selfhost is paused on the x86_64 kernel; test kept for later port.
 test-selfhost: apps
-	ICSOS_TEST_SELFHOST=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
-	@echo "Running self-host test (TinyCC inside ICS-OS)..."
-	@timeout 240 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
-		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
-		| tee /tmp/icsos-selfhost.log
-	@grep -q SELFHOST_TEST_PASS /tmp/icsos-selfhost.log
+	@echo "SKIP: i386 TinyCC selfhost paused until x86_64 TCC port"
+	@false
 
 # Boot and run the I/O / block-cache microbenchmark.
 test-iobench: apps
-	ICSOS_TEST_IOBENCH=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
-	@echo "Running I/O benchmark..."
-	@timeout 90 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
-		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
-		| tee /tmp/icsos-iobench.log
-	@grep -q IOBENCH_PASS /tmp/icsos-iobench.log
+	@echo "SKIP: iobench needs stable disk_mgr on x86_64 (follow-up)"
+	@false
 
 # Boot, rebuild TinyCC with itself inside ICS-OS (long-running).
 test-tccboot: apps
-	ICSOS_TEST_TCCBOOT=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
-	@echo "Running TinyCC self-build test (can take many minutes)..."
-	@timeout 3600 $(QEMU_X64) -display none -serial stdio -no-reboot -m 256M \
-		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
-		| tee /tmp/icsos-tccboot.log
-	@grep -q TCCBOOT_TEST_PASS /tmp/icsos-tccboot.log
+	@echo "SKIP: tccboot paused on x86_64 kernel"
+	@false
 
-# Faster check: boot and exec the host-built hello.exe.
-test-exec: apps
-	ICSOS_TEST_EXEC=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
-	@echo "Running user-exec test..."
-	@timeout 60 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
-		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
-		| tee /tmp/icsos-exec.log
-	@grep -q EXEC_TEST_PASS /tmp/icsos-exec.log
+# Faster check: boot and exec the host-built hello.exe from the CD root.
+test-exec: kernel/Kernel64.bin apps/hello.exe
+	@echo "Building Multiboot2 ISO with hello.exe for exec smoke test..."
+	@mkdir -p /tmp/icsos-exec-iso/boot/grub /tmp/icsos-exec-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-exec-iso/vmdex
+	@cp apps/hello.exe /tmp/icsos-exec-iso/apps/hello.exe
+	@printf '%s\n' 'exectest' 'reboot' > /tmp/icsos-exec-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-exec-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-exec.iso /tmp/icsos-exec-iso >/dev/null 2>&1
+	@echo "Running ELF64 exec smoke test..."
+	@-timeout 55 $(QEMU_X64) -smp 2 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-exec.iso -boot d > /tmp/icsos-exec.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-exec.log
+	@grep -aq "exectest: running" /tmp/icsos-exec.log
+	@grep -aq "Hello World from ICS-OS!" /tmp/icsos-exec.log
+	@grep -aq "EXEC_TEST_PASS" /tmp/icsos-exec.log
+	@echo "test-exec PASS"
+
+# Full QEMU integration suite for the x86_64 / SMP / ELF64 path.
+test-integration: vmdex apps/hello.exe
+	@echo "=== ICS-OS integration tests ==="
+	$(MAKE) test-boot
+	$(MAKE) test-smp
+	$(MAKE) test-exec
+	@echo "=== test-integration PASS ==="

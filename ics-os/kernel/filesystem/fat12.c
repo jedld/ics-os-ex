@@ -946,7 +946,11 @@ DWORD sectors /*sectors to add*/,int id)
 #endif
    
    
-    fat_type = fat_get_fat_type(id,bpbblock);         
+    fat_type = fat_get_fat_type(id,bpbblock);
+    if (fat_type < 0)
+       return -1;
+    if (!bpbblock || !fat_sectors_per_fat(bpbblock))
+       return -1;
 
     fat=(BYTE*)malloc(fat_sectors_per_fat(bpbblock)*512);
     if (!fat) return -1;
@@ -1996,6 +2000,8 @@ int loadfile12EX2(fatdirentry *dir,BPB *bpbblock,char *buf,int se,int start,int 
             
             //obtain number of root directory sectors as illustrated in the
             //FAT documentation
+            if (!bpbblock.bytes_per_sector)
+                 return -1;
             rootdirsectors = ((bpbblock.num_root_dir_ents * 32) + (bpbblock.bytes_per_sector - 1 )) /
                                bpbblock.bytes_per_sector;
             
@@ -2011,6 +2017,9 @@ int loadfile12EX2(fatdirentry *dir,BPB *bpbblock,char *buf,int se,int start,int 
                         
             datasec = totalsectors - (bpbblock.num_boot_sectors + 
                       (bpbblock.num_fats * fatsz) + rootdirsectors);
+
+            if (!bpbblock.sectors_per_cluster || !bpbblock.bytes_per_sector)
+                 return -1;
                       
             countofclusters = datasec / bpbblock.sectors_per_cluster;
             

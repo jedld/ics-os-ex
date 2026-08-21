@@ -66,7 +66,8 @@ char *scr_debug = (char*)0xb8000;
 int op_success;
 
 //points to the location of the multiboot header defined in startup.asm
-extern int multiboothdr; 
+extern unsigned long multiboothdr;
+extern unsigned int multiboot_magic; 
 
 //defined in asmlib.asm
 extern void textcolor(unsigned char c);
@@ -135,6 +136,8 @@ DEX32_DDL_INFO *consoleDDL;
 
 //forward declarations.needed in process.c so must be here first 
 void dex_init();
+extern void smp_enable_scheduling(void);
+extern int cpu_count;
 
 /*I know there are some disadvantages to directly including files
   in the source code instead of using object files, but it simplifies
@@ -218,13 +221,67 @@ multiboot_header *mbhdr = 0;
 //here we go!
 void main(){
    char temp[255];
+   static multiboot_header mb1_compat;
     
-   /*obtain the multiboot information structure from GRUB which contains info about memory
-      and the device that booted this kernel*/
-   mbhdr =(multiboot_header*)multiboothdr;
+   /* Multiboot1 or Multiboot2 info from GRUB */
+   mbhdr = 0;
+   memory_map = 0;
+   map_length = 0;
 
    serial_init();
-   serial_puts("ICS-OS: serial console ready\n");
+   serial_puts("ICS-OS: serial console ready (x86_64)\n");
+
+   /* Prefer values stashed at 0x9000 by the 32-bit trampoline. */
+   {
+      unsigned int magic32 = *(volatile unsigned int *)0x9000;
+      unsigned int info32 = *(volatile unsigned int *)0x9004;
+      if (magic32 == MULTIBOOT2_MAGIC || magic32 == MULTIBOOT1_MAGIC) {
+         multiboot_magic = magic32;
+         multiboothdr = info32;
+      }
+   }
+
+   if (multiboot_magic == MULTIBOOT2_MAGIC) {
+      mb2_info *info = (mb2_info *)(uintptr)multiboothdr;
+      mb2_tag *tag = (mb2_tag *)((char *)info + 8);
+      memset(&mb1_compat, 0, sizeof(mb1_compat));
+      mb1_compat.boot_device = 0xE0000000; /* default CD for Multiboot2/ISO */
+      while (tag->type != 0) {
+         if (tag->type == 5) { /* BIOS boot device */
+            DWORD *p = (DWORD *)((char *)tag + 8);
+            /* Multiboot2: p[0]=biosdev, p[1]=partition, p[2]=sub_partition.
+               Pack like Multiboot1: drive in top byte. */
+            mb1_compat.boot_device = (p[0] << 24)
+                                  | ((p[1] & 0xFF) << 16)
+                                  | ((p[2] & 0xFF) << 8);
+         }
+         /* mmap tag (6) uses a different entry layout — use fallback below */
+         tag = (mb2_tag *)(((uintptr)tag + tag->size + 7) & ~7ULL);
+      }
+      mbhdr = &mb1_compat;
+      memory_map = 0;
+      map_length = 0;
+   } else {
+      mbhdr = (multiboot_header *)(uintptr)multiboothdr;
+      if (mbhdr) {
+         memory_map = (mmap *)(uintptr)mbhdr->mmap_addr;
+         map_length = mbhdr->mmap_length;
+      }
+   }
+
+   if (!memory_map || map_length == 0) {
+      /* Fallback: invent a simple free region so mem_detectmemory works */
+      static mmap fallback[1];
+      fallback[0].size = sizeof(mmap) - 4;
+      fallback[0].base_addr_low = 0x00300000;
+      fallback[0].base_addr_high = 0;
+      fallback[0].length_low = 0x0D000000;
+      fallback[0].length_high = 0;
+      fallback[0].type = 1;
+      memory_map = fallback;
+      map_length = sizeof(fallback);
+      serial_puts("ICS-OS: using fallback memory map\n");
+   }
     
    /* Enable the keyboard IRQ,Timer IRQ and the Floppy Disk IRQ.As more devices that uses IRQs get supported, we should OR more of them here*/
    //program8259(IRQ_TIMER | IRQ_KEYBOARD | IRQ_FDC | IRQ_MOUSE | IRQ_CASCADE); 
@@ -239,10 +296,17 @@ void main(){
 
     //obtain the device which booted this operating system         
    kernel_systeminfo.boot_device = mbhdr->boot_device >> 24;
+   {
+      char msg[96];
+      sprintf(msg, "ICS-OS: multiboot_magic=0x%x boot_device=0x%x\n",
+              multiboot_magic, (unsigned)mbhdr->boot_device);
+      serial_puts(msg);
+   }
 
-   if (kernel_systeminfo.boot_device == 0){  
-      //floppy
-      strcpy(boot_device_name,"fd0");
+   /* Floppy (BIOS 0) is unreliable under Multiboot2/QEMU ISO; prefer CD.
+      Real Multiboot1 floppy boots can still force fd0 via an explicit image. */
+   if (kernel_systeminfo.boot_device == 0 || kernel_systeminfo.boot_device >= 0xE0){
+      strcpy(boot_device_name,"cds0");
    }else{ //hard disk or USB presented as a BIOS disk
       kernel_systeminfo.part[0] =    (mbhdr->boot_device >> 16) & 0xFF;
       kernel_systeminfo.part[1] =    (mbhdr->boot_device >> 8) & 0xFF;
@@ -252,10 +316,14 @@ void main(){
          n = 0;
       sprintf(boot_device_name,"hdp%dp%d",n,kernel_systeminfo.part[0]);
    }
+   {
+      char msg[64];
+      sprintf(msg, "ICS-OS: boot_device_name=%s\n", boot_device_name);
+      serial_puts(msg);
+   }
 
    //obtain information about the memory configuration
-   memory_map = mbhdr->mmap_addr;
-   map_length = mbhdr->mmap_length;
+   /* memory_map / map_length already set above */
         
    
    /*
@@ -266,6 +334,13 @@ void main(){
     See dexmem.c for details*/
     
    memamount = mem_detectmemory(memory_map, map_length);
+   {
+      char buf[80];
+      /* crude: print totalpages via printf after console exists — use serial for now */
+      extern DWORD totalpages;
+      serial_puts("ICS-OS: mem detect done\n");
+      printf("Memory: %d KB, free pages=%d\n", memamount/1024, totalpages);
+   }
 
     
    /*The mem_init() function first sets up the page table/directories which
@@ -370,12 +445,41 @@ void dex32_startup(){
    installmouse();
    init_mouse();
    printf("[OK]\n");
+
+   /* x86_64: LAPIC probe early; AP bring-up after process manager is ready. */
+   {
+      extern void lapic_init(void);
+      extern void smp_init(void);
+      printf("Initializing LAPIC/SMP...");
+      lapic_init();
+      smp_init();
+      printf("[OK]\n");
+   }
    
    //Initialize the process manager and the initial
    //processes
    printf("Initializing the process manager...");
    process_init();    //defined in process.c
    printf("[OK]\n");
+
+   /* Start APs after process manager exists, but park them until root is mounted.
+      (LAPIC timer on APs is deferred until smp_enable_scheduling.) */
+   {
+      extern void smp_start_aps(void);
+      DWORD flags;
+      storeflags(&flags);
+      stopints();
+      printf("Starting application processors...");
+      smp_start_aps();
+      printf("[OK]\n");
+      restoreflags(flags);
+   }
+
+   /* BSP keeps PIT/LAPIC timer for scheduling; enable after AP probe. */
+   {
+      extern void lapic_timer_init(unsigned int hz);
+      lapic_timer_init(context_switch_rate);
+   }
 
    //process manager is ready, pass execution to the taskswitcher
    taskswitcher();      //defined in process.h
@@ -447,10 +551,14 @@ void dex_init(){
    getmonthname(date.month,temp);
    printf("[OK]\n");   
 
-   //Install the built-in floppy disk driver
-   printf("Installing floppy driver...");
-   floppy_install("fd0"); 
-   printf("[OK]\n");   
+   //Install the built-in floppy disk driver (only when booting from floppy)
+   if (strcmp(boot_device_name,"fd0") == 0) {
+      printf("Installing floppy driver...");
+      floppy_install("fd0"); 
+      printf("[OK]\n");
+   } else {
+      printf("Skipping floppy driver (boot device is %s)\n", boot_device_name);
+   }
     
    /*Install the IDE, ATA-2/4 compliant driver in order to be able to
       use CD-ROMS and harddisks. This will also create logical drives from
@@ -479,9 +587,7 @@ void dex_init(){
    if (strcmp(boot_device_name,"fd0") == 0) {
       myblock = (devmgr_block_desc*)devmgr_devlist[floppy_deviceid];
       myblock->init_device();
-   } else
-      printf("Skipping floppy recalibrate (not booting from fd0)\n");
-
+   }
    //initialize the file tables (Initialize the VFS)
    printf("Initializing the Virtual File System...");
    vfs_init();
@@ -535,13 +641,10 @@ void dex_init(){
             printf("Root filesystem is the USB mass-storage device.\n");
       }
 
-      /* Floppy image (legacy teaching workflow). */
-      if (!mounted && strcmp(boot_device_name,"fd0") == 0) {
-         mounted = (vfs_mount_device("fat",boot_device_name,"icsos") != -1);
-      }
-
-      /* USB stick presented as a BIOS/IDE disk (qemu -hda, CSM USB boot). */
-      if (!mounted && boot_device_name[0] && strcmp(boot_device_name,"fd0") != 0) {
+      /* USB stick / hard disk presented as BIOS IDE (not CD). */
+      if (!mounted && boot_device_name[0]
+          && strcmp(boot_device_name,"fd0") != 0
+          && strcmp(boot_device_name,"cds0") != 0) {
          if (devmgr_finddevice(boot_device_name) != -1)
             mounted = (vfs_mount_device("fat",boot_device_name,"icsos") != -1);
       }
@@ -549,15 +652,33 @@ void dex_init(){
       if (!mounted && devmgr_finddevice("hdp0p0") != -1)
          mounted = (vfs_mount_device("fat","hdp0p0","icsos") != -1);
 
-      /* Live CD fallback. */
-      if (!mounted && devmgr_finddevice("cds0") != -1)
-         mounted = (vfs_mount_device("cdfs","cds0","icsos") != -1);
+      /* Live CD / Multiboot2 ISO (cdfs) — prefer when boot device is CD. */
+      if (!mounted && (strcmp(boot_device_name,"cds0") == 0
+                       || devmgr_finddevice("cds0") != -1)) {
+         if (devmgr_finddevice("cds0") != -1) {
+            mounted = (vfs_mount_device("cdfs","cds0","icsos") != -1);
+            if (mounted)
+               printf("Root filesystem is the CD-ROM (cdfs).\n");
+         }
+      }
 
-      if (mounted)
-         printf("Root mount [OK]\n");
+      /* Floppy image (legacy) — only if named fd0 and device exists. */
+      if (!mounted && strcmp(boot_device_name,"fd0") == 0
+          && devmgr_finddevice("fd0") != -1) {
+         mounted = (vfs_mount_device("fat",boot_device_name,"icsos") != -1);
+      }
+
+      if (!mounted)
+         printf("Warning: no root filesystem mounted (continuing).\n");
       else
-         printf("Root mount [FAILED]\n");
-   }   
+         printf("Root mount [OK]\n");
+
+      /* Unpark APs after root mount; console remains BSP-pinned. */
+      if (mounted && cpu_count > 1) {
+         smp_enable_scheduling();
+         printf("SMP: %d CPUs online; AP scheduling enabled\n", cpu_count);
+      }
+   }
 
    //setup the initial executable loaders (So we could run .EXEs,.b32,coff and elfs)
    printf("Initializing first module loader(s) [EXE][COFF][ELF][DEX B32]...");
@@ -572,6 +693,7 @@ void dex_init(){
     
    //create the foreground manager
    fg_pid = createkthread((void*)fg_updateinfo,"fg_mgr",20000);
+   ps_set_affinity(fg_pid, 0); /* console DDL / VGA — BSP only */
     
    if (baremode) 
       console_first++;
@@ -579,6 +701,13 @@ void dex_init(){
     
    //Create a new console instance
    consolepid = console_new();
+   ps_set_affinity(consolepid, 0);
+
+   /* After console exists, prove AP can run a pinned migratable kthread. */
+   if (cpu_count > 1) {
+      extern void smp_start_ap_work_smoke(void);
+      smp_start_ap_work_smoke();
+   }
 
 
    /*beep the computer just in case a screen problem occured, at least

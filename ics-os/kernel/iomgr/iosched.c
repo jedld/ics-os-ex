@@ -120,12 +120,14 @@ DWORD iomgr_diskmgr()
                  {
                   lastjob=ptr->lowblock;
                   ptr->status=IO_COMPLETE;
-                  /* Warm the block cache so subsequent FAT/exec reads hit. */
-                  if (myblock->putcache)
-                     myblock->putcache(ptr->buf, ptr->lowblock, ptr->num_of_blocks);
-                  else
-                     blkcache_put(ptr->deviceid, ptr->lowblock,
-                                  ptr->num_of_blocks, ptr->buf);
+                  /* Cache 512-byte devices only. Skip CD names (cdp0/cds0). */
+                  if (myblock->hdr.name[0] != 'c' || myblock->hdr.name[1] != 'd') {
+                     if (myblock->putcache)
+                        myblock->putcache(ptr->buf, ptr->lowblock, ptr->num_of_blocks);
+                     else
+                        blkcache_put(ptr->deviceid, ptr->lowblock,
+                                     ptr->num_of_blocks, ptr->buf);
+                  }
                  } 
                        else
                  {

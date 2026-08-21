@@ -8,7 +8,9 @@ Thus, this project aims to develop a simple yet operational instructional operat
 
 ICS-OS remains a 32-bit protected-mode kernel. It boots on 64-bit (AMD64) PCs in legacy/compatibility mode via GRUB, including from a USB thumb drive that is then mounted as the root filesystem.
 
-This tree (`ics-os-ex`) extends the instructional base with **in-OS TinyCC self-hosting**, a **POSIX-ish user libc**, **FAT32/IDE/USB I/O performance work**, and **ELF executable loading** suitable for compiling programs inside the OS.
+This tree (`ics-os-ex`) extends the instructional base with an **x86-64 long-mode kernel**, **software context switching**, **LAPIC/SMP**, **in-OS TinyCC** (i386 selfhost paused on 64-bit), a **POSIX-ish user libc**, **FAT32/IDE/USB I/O performance work**, and **ELF executable loading**.
+
+See [ics-os/docs/smp-longmode.md](ics-os/docs/smp-longmode.md) for the long-mode / SMP design notes.
 
 ## Downloads
 
@@ -53,13 +55,18 @@ $ make boot-usb-storage
 Headless smoke tests (serial console, no VGA window):
 
 ```
-$ make test-usb-amd64
-$ make test-usb-storage
-$ make test-exec          # load host-built hello.exe
-$ make test-selfhost      # in-OS TinyCC compile + run
+$ make test-boot          # Multiboot2 CD: serial + Root mount [OK]
+$ make test-smp           # QEMU -smp 2, LAPIC AP bring-up + work-steal
+$ make test-exec          # load host-built hello.exe (ELF64 CRT)
+$ make test-integration   # runs test-boot + test-smp + test-exec
+# or: ./scripts/run-integration-tests.sh
+# make test-selfhost      # paused: needs x86_64 TinyCC port
 $ make test-iobench       # file I/O / block-cache microbenchmark
 ```
 
+Agent/contributor notes: see [AGENTS.md](AGENTS.md).
+
+The kernel is **ELF64** and boots via GRUB `multiboot2` on the USB image (QEMU `-kernel` cannot load this image).
 Write `ics-os-usb.img` to a physical thumb drive (BIOS/CSM firmware can boot it as a disk; the kernel also has a UHCI USB mass-storage driver):
 
 ```
@@ -118,26 +125,20 @@ to set up the build environment.
 
 ## Current enhancements (ics-os-ex)
 
+### x86-64 long mode and SMP
+
+- Kernel builds as **ELF64** (`-m64`, `lscript64.ld`) and enters long mode from a Multiboot2 32-bit stub.
+- **Software context switch** + `fxsave` (no hardware TSS task switching).
+- **Priority round-robin** scheduler with a spinlock-protected ready queue.
+- **LAPIC** init/timer/EOI and **AP bring-up** (`make test-smp` with `-smp 2`).
+
 ### In-OS TinyCC and self-hosting
 
-- Vendored **TinyCC 0.9.27** (i386) under `ics-os/contrib/tcc/`, host-built as `apps/tcc.exe`.
+- Vendored **TinyCC 0.9.27** (i386) under `ics-os/contrib/tcc/` — **selfhost paused** on the x86_64 kernel until an x86_64 TCC port.
 - POSIX-oriented user headers in `ics-os/sdk/include/` plus `posix.c`, `setjmp.c`, and the existing DexSDK.
-- Console commands:
-  - `selfhost` — compile `min.c` / tiny `hello` with in-OS tcc and run them (`SELFHOST_TEST_PASS`).
-  - `exectest` — smoke-test ELF loading of host-built `hello.exe`.
-  - `cc` / `kbuild` / `tccboot` — compile user programs, rebuild the kernel image, or rebuild TinyCC inside the OS.
-  - `iobench` — sequential file-read / block-cache benchmark (`IOBENCH_PASS`).
-- Staging script `scripts/stage-selfhost.sh` copies compiler sources, SDK headers, and kernel sources onto the USB image for in-OS work.
-- Larger ramdisk (`autoexec.bat`) for build scratch space under `/ramdisk`.
-
-Typical in-OS flow after `make usb` / `make boot-usb-amd64`:
-
-```
-exectest
-selfhost
-iobench
-tccboot          # long-running TinyCC self-rebuild (optional)
-```
+- Host apps build as **ELF64** (`sdk/app.mk`).
+- Console commands: `selfhost`, `exectest`, `iobench`, `cc`, `kbuild`, `tccboot` (selfhost/tccboot need 64-bit TCC).
+- Staging script `scripts/stage-selfhost.sh` copies compiler sources, SDK headers, and kernel sources onto the USB image.
 
 ### I/O performance
 

@@ -215,8 +215,8 @@ int getx();
 int gety();
 void gotoxy(int x,int y);
 int printf(const char *fmt, ...);
-unsigned int dexsdk_systemcall(int function_number,int p1,int p2,
-                  int p3,int p4,int p5);
+unsigned int dexsdk_systemcall(int function_number,long p1,long p2,
+                  long p3,long p4,long p5);
 void *malloc(size_t size);
 void *memmove (void *dst, const void *src,unsigned int count);
 void *memset (void *dst,int val,unsigned int count);

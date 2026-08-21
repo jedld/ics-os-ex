@@ -13,6 +13,8 @@
 
 
 #define MB_FLAGS_CMDLINE 4
+#define MULTIBOOT1_MAGIC 0x2BADB002
+#define MULTIBOOT2_MAGIC 0x36D76289
 
 typedef struct _multiboot_header {
     DWORD flags;
@@ -46,7 +48,27 @@ DWORD   length_high;
 DWORD   type;
 } mmap;
 
+/* Multiboot2 tags (simplified) */
+typedef struct __attribute__((packed)) {
+    DWORD total_size;
+    DWORD reserved;
+} mb2_info;
+
+typedef struct __attribute__((packed)) {
+    DWORD type;
+    DWORD size;
+} mb2_tag;
+
+typedef struct __attribute__((packed)) {
+    DWORD type;
+    DWORD size;
+    DWORD entry_size;
+    DWORD entry_version;
+} mb2_mmap_tag;
+
 DWORD map_length = 0;
 mmap *memory_map;
+extern unsigned int multiboot_magic;
+extern unsigned long multiboothdr;
 
 #endif

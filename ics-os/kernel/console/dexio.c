@@ -122,6 +122,10 @@ void putc(char x)
 
 void putcEX(char x)
  {
+  /* Always mirror user/kernel putc to serial so nographic boots see output
+     even when the process DDL is not the active console. */
+  extern void serial_putc(char c);
+  if (x && x!='\t') serial_putc(x);
   #ifdef USE_CONSOLEDDL
   Dex32PutC(Dex32GetProcessDevice(),x);
   #else

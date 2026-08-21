@@ -83,7 +83,6 @@ int ps_notimeincrement = 0;
 //pointers to initial processes in the kernel
 PCB386   *schedp;                         //pointer to scheduler process
 PCB386   *plast;                          //pointer to last process
-PCB386   *current_process=0;              //pointer to current process
 PCB386   *next_process=0;                 //pointer to next process
 PCB386   curp;                            //???
 
@@ -95,6 +94,18 @@ PCB386   pfPCB;                           //page fault PCB
 PCB386   pfPCB_copy;                      //copy of page fault PCB
 PCB386   keyPCB;                          //keyboard PCB
 PCB386   mousePCB;                        //mouse PCB                   
+/* current_process is a macro over smp_this_cpu()->current */
+
+#ifdef __x86_64__
+/* Keep kernel stacks out of BSS near 0x200000 (free-page freelist). */
+#define KSTACK_DISPATCHER_BASE  0x02800000UL
+#define KSTACK_SCHED_BASE       0x02810000UL
+#define KSTACK_PF_BASE          0x02820000UL
+#define KSTACK_SIZE             0x10000UL
+DWORD dispatcher_stack_loc;
+DWORD sched_stack_loc;
+DWORD pagefault_stack_loc;
+#endif
 
 FPUregs ps_fpustate, ps_kernelfpustate;
 
@@ -144,6 +155,7 @@ DWORD createthread(void *ptr, void *stack, DWORD stacksize){
     
    PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));
    memset(temp,0,sizeof(PCB386));
+   fpu_init_default(&temp->fpu);
 
    totalprocesses++;
     
@@ -211,6 +223,7 @@ DWORD createuthread(void *ptr, void *stack, DWORD stacksize){
     
    PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));
    memset(temp,0,sizeof(PCB386));
+   fpu_init_default(&temp->fpu);
 
    totalprocesses++;
     
@@ -375,6 +388,7 @@ DWORD createprocess(
 
    PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));      //allocate the PCB for the process
    memset(temp,0,sizeof(PCB386));                     //Initialize by zeroing it out
+   fpu_init_default(&temp->fpu);
    temp->before=current_process;                      //add it after the current process 
    strcpy(temp->name,name);                           //set the name of the process
    totalprocesses++;                                  //increase the total number of processes in the system
@@ -410,12 +424,12 @@ DWORD createprocess(
    temp->pagedirloc  = pagedir;  //set the memory page dir
     
    /*Set up the CPU registers*/
-   memset(temp,0,sizeof(saveregs));
-   temp->regs.EIP    = (DWORD)ptr;                    //set EIP to the code section (executable code)
-   temp->regs.ESP    = (DWORD)stack;                  //set the stack for the process
-   temp->stackptr    = (void*)temp->regs.ESP;
-   temp->regs.CR3    = (DWORD)pagedir;
-   temp->regs.ES     = USER_DATA;                     //set the segment registers to memory area for user processes
+   memset(&temp->regs,0,sizeof(saveregs));
+   temp->regs.EIP    = (DWORD)(uintptr)ptr;
+   temp->regs.ESP    = (DWORD)(uintptr)stack;
+   temp->stackptr    = (void*)(uintptr)stack;
+   temp->regs.CR3    = (DWORD)(uintptr)pagedir;
+   temp->regs.ES     = USER_DATA;
    temp->regs.SS     = USER_DATA;
    temp->regs.CS     = USER_CODE;
    temp->regs.DS     = USER_DATA;
@@ -423,6 +437,20 @@ DWORD createprocess(
    temp->regs.GS     = USER_DATA;
    temp->regs.SS0    = SYS_STACK_SEL;
    temp->syscallsize=syscallsize;
+
+   /* Software context (run in kernel CS for now; full ring3 later). */
+   {
+      uintptr top = (uintptr)stack;
+      top &= ~(uintptr)15;
+      top -= 8; /* SysV entry RSP ≡ 8 (mod 16) */
+      temp->ctx.rip = (u64)(uintptr)ptr;
+      temp->ctx.rsp = (u64)top;
+      temp->ctx.rflags = 0x202;
+      temp->ctx.cs = SYS_CODE_SEL;
+      temp->ctx.ss = SYS_DATA_SEL;
+      temp->ctx.cr3 = (u64)(uintptr)pagedir;
+      temp->regs.ESP = (DWORD)top;
+   }
    
    //set up the program parameters (command line arguments)
    if (params!=0){
@@ -437,14 +465,18 @@ DWORD createprocess(
    dex32_stopints(&flags);  
 
    //allocate memory for the system call stack
-   dex32_commitblock((DWORD)syscallstack,syscallsize,&pages,pagedir,PG_WR);
+   dex32_commitblock((DWORD)(uintptr)syscallstack,syscallsize,&pages,pagedir,PG_WR);
    addmemusage(&(temp->meminfo),syscallstack,pages);
    //set up the initial stack pointer
-   temp->regs.ESP0=(syscallstack+syscallsize-4);
+   temp->regs.ESP0=(DWORD)((uintptr)syscallstack+syscallsize-4);
    //  temp->regs.ESP0=0x9FFFE;
-   temp->regs.EFLAGS=0x200;
+   temp->regs.EFLAGS=0x202;
    temp->semhandle=0;
+   /* User processes stay on the BSP until waitpid/exit migration is fully hardened. */
+   temp->cpu_affinity = 0;
+   temp->on_cpu = -1;
 
+#ifndef __x86_64__
    //some functions that a character device uses
    disablepaging();
    dex32_copy_pagedirU(pagedir,pagedir1);
@@ -464,6 +496,9 @@ DWORD createprocess(
                         (DWORD)pg[SYS_PAGEDIR_VIR >> 22]&0xFFFFF000,1);
     
    maplineartophysical2((DWORD*)pg, (DWORD)SYS_KERPDIR_VIR,(DWORD)pagedir1    /*,stackbase*/,1);
+#else
+   (void)pg;
+#endif
 
    //add the process to the list of processes
    ps_enqueue(temp);
@@ -606,48 +641,63 @@ int getmessage(DWORD *source, DWORD *mes, DWORD *data){
 */
 DWORD createkthread(void *ptr,char *name,DWORD stacksize){
  
-   PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));         //allocate PCB for the thread
+   PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));
    DWORD cpuflags;
+   void *stackbase;
     
-   memset(temp,0,sizeof(PCB386));                        //Initialize the PCB
-   temp->before=current_process;                         //Point the 'before' to the parent 
-   strcpy(temp->name,name);                              //Set the name of the thread
-   totalprocesses++;                                     //Increment the total number of processes
+   memset(temp,0,sizeof(PCB386));
+   temp->before=current_process;
+   strcpy(temp->name,name);
+   totalprocesses++;
    temp->size        = sizeof(PCB386);
-   temp->processid   = nextprocessid++;                  //Set the thread id
-   temp->accesslevel = ACCESS_SYS;                       //Set the access level to kernel. This is a kernel thread.
-   temp->owner       = getprocessid();                   //The owner of this thread is the current process
-   temp->status      |= PS_ATTB_THREAD;                  //Indicate that this PCB is for a thread
-   temp->knext       = knext;                            //Set the the top of the heap of this thread to same as kernel
-   temp->pagedirloc  = pagedir1;                         //Set the pagedir for this thread to the first page directory
-   temp->workdir     = current_process->workdir;         //Set the working directory of this thread to same as owner
+   temp->processid   = nextprocessid++;
+   temp->accesslevel = ACCESS_SYS;
+   temp->owner       = getprocessid();
+   temp->status      |= PS_ATTB_THREAD;
+   temp->knext       = knext;
+   temp->pagedirloc  = pagedir1;
+   temp->workdir     = current_process->workdir;
 
-   //set up the initial values of the CPU registers for this thread
-   memset(temp,0,sizeof(saveregs));                      //This works because "regs" is the first field in the structure
-   temp->regs.EIP    = (DWORD)ptr;                       //Set the function to be executed by this thread
-   temp->stackptr    = malloc(stacksize);                   //Set up the stack for this thread
-   temp->regs.ESP    = (DWORD)(temp->stackptr+stacksize-4);
-   temp->stackptr    = (void*)temp->regs.ESP;
-   temp->regs.CR3    = (DWORD)pagedir1;                  //Use the same memory as the kernel
-   temp->regs.ES     = SYS_DATA_SEL;                     //Set the segment registers to appropriate selectors for kernel memory area.
-   temp->regs.SS     = SYS_STACK_SEL;                    //this basically tells us that this is a kernel thread
-   temp->regs.CS     = SYS_CODE_SEL;
-   temp->regs.DS     = SYS_DATA_SEL;
-   temp->regs.FS     = SYS_DATA_SEL;
-   temp->regs.GS     = SYS_DATA_SEL;
-   temp->regs.EFLAGS = 0x200;
+   stackbase = malloc(stacksize);
+   if (!stackbase) {
+      free(temp);
+      return 0;
+   }
+   {
+      uintptr top = (uintptr)stackbase + stacksize;
+      top &= ~(uintptr)15; /* 16-byte align */
+      top -= 8;            /* SysV: entry RSP ≡ 8 (mod 16) */
+      memset(&temp->regs,0,sizeof(saveregs));
+      temp->regs.EIP    = (DWORD)(uintptr)ptr;
+      temp->regs.ESP    = (DWORD)top;
+      temp->stackptr    = stackbase;
+      temp->regs.CR3    = (DWORD)(uintptr)pagedir1;
+      temp->regs.ES     = SYS_DATA_SEL;
+      temp->regs.SS     = SYS_STACK_SEL;
+      temp->regs.CS     = SYS_CODE_SEL;
+      temp->regs.DS     = SYS_DATA_SEL;
+      temp->regs.FS     = SYS_DATA_SEL;
+      temp->regs.GS     = SYS_DATA_SEL;
+      temp->regs.EFLAGS = 0x202;
 
-   temp->arrivaltime = getprecisetime();                 //Store the arrival/creation time of this thread 
-   temp->stdin       = current_process->stdin;           //set the stdin
+      /* Seed software context immediately (x86_64). */
+      temp->ctx.rip = (u64)(uintptr)ptr;
+      temp->ctx.rsp = (u64)top;
+      temp->ctx.rflags = 0x202;
+      temp->ctx.cs = SYS_CODE_SEL;
+      temp->ctx.ss = SYS_DATA_SEL;
+      temp->ctx.cr3 = (u64)(uintptr)pagedir1;
+      fpu_init_default(&temp->fpu);
+   }
 
-   /*Try to enter the critical section */
-   sync_entercrit(&processmgr_busy);                     //Access to the process list must synched that's why its in the critical section
+   temp->arrivaltime = getprecisetime();
+   temp->stdin       = current_process->stdin;
+   temp->cpu_affinity = -1;
+   temp->on_cpu = -1;
+
+   sync_entercrit(&processmgr_busy);
    dex32_stopints(&cpuflags);
-    
-   //add to the process list
-   ps_enqueue(temp);                                     //Add the thread to the process list for scheduling
-
-   //Exit the critical section
+   ps_enqueue(temp);
    dex32_restoreints(cpuflags);
    sync_leavecrit(&processmgr_busy);
     
@@ -877,7 +927,7 @@ DWORD kill_children(DWORD processid){
 //called when a process wishes to terminate itself
 DWORD exit(DWORD val){
    DWORD flags;
-
+   (void)val;
    //close all files the process has opened
    closeallfiles(current_process->processid);
     
@@ -1084,9 +1134,14 @@ int dex32_thread_join(DWORD threadid){
 //wait for a given process given its id
 int dex32_waitpid(int pid,int status){
    (void)status;
-   while (ps_findprocess(pid) != -1)
-      taskswitch();
-   return 0;
+   while (1) {
+      PCB386 *p = ps_findprocess(pid);
+      if (p == (PCB386*)-1)
+         return 0;
+      /* Prefer an explicit switch to the child. Generic RR may starve
+         newly created user processes under software scheduling. */
+      ps_switchto(p);
+   }
 };
 
 
@@ -1275,41 +1330,155 @@ void halt(){
       ;
 };
 
+/* Valid FXSAVE image — all-zero fxrstor #GPs. */
+void fpu_init_default(fpu_state *s){
+   memset(s, 0, sizeof(*s));
+   *(u16*)(s->fx + 0) = 0x037F;   /* FCW */
+   *(u32*)(s->fx + 24) = 0x1F80;  /* MXCSR */
+}
+
+void ps_set_affinity(int pid, int cpu){
+   PCB386 *p = ps_findprocess(pid);
+   if (p != (PCB386*)-1)
+      p->cpu_affinity = cpu;
+}
 
 //Context switching, dispatcher
-//switched to another process using the TSS switching method
-// 1/25/2004: Also added the capability to save the FPU registers to prevent
-//            applications that use the FPU from doing unexpected things
+// Software context switch (replaces hardware TSS far-jumps).
 void ps_switchto(PCB386 *process){
+   PCB386 *prev = current_process;
+   int me = smp_cpu_id();
+   extern void lapic_send_ipi(u32 apic_id, u32 vector);
 
-   //set the state of the floating point unit from the PCB of the
-   //process to switch to
-   memcpy(&ps_fpustate,&process->regs2,sizeof(FPUregs));
-   asm volatile ("frstor ps_fpustate");
+   if (!process)
+      return;
 
-   //switch to a user process
-   if (process->accesslevel == ACCESS_USER){
-      dex32_setbase(USER_TSS, process);
-      switchuserprocess();                            //defined in kernel/startup/asmlib.asm
-      setattb(USER_TSS,0xE9);                         //run a user process
-   }else{//switch to a kernel mode process
-      dex32_setbase(SYS_TSS, process);
-      switchprocess();                                //defined in kernel/startup/asmlib.asm
-      setattb(SYS_TSS,0x89);                          //run a kernel process
-   };
+   /* Do not run a task still live on another CPU — wait for it to be released. */
+   if (process != prev) {
+      int spins = 0;
+      while (process->on_cpu >= 0 && process->on_cpu != me) {
+         int other = process->on_cpu;
+         if (other >= 0 && other < cpu_count && cpus[other].online)
+            lapic_send_ipi(cpus[other].apic_id, IPI_RESCHEDULE);
+         __asm__ __volatile__("pause");
+         if (++spins > 1000000)
+            break;
+      }
+      process->on_cpu = me;
+   }
 
-   //save the state of the floating point unit
-   asm volatile ("fnsave ps_fpustate");
+   if (prev && prev != process) {
+      fpu_save(&prev->fpu);
+   }
 
-   memcpy(&process->regs2, &ps_fpustate, sizeof(FPUregs));
+   /* Seed context from legacy TSS fields on first run. */
+   if (process->ctx.rip == 0 && process->regs.EIP != 0) {
+      memset(&process->ctx, 0, sizeof(process->ctx));
+      process->ctx.rip = (u64)process->regs.EIP;
+      process->ctx.rsp = (u64)process->regs.ESP;
+      process->ctx.rflags = process->regs.EFLAGS ? process->regs.EFLAGS : 0x202;
+      process->ctx.cs = SYS_CODE_SEL;
+      process->ctx.ss = SYS_DATA_SEL;
+      if (process->pagedirloc)
+         process->ctx.cr3 = (u64)(uintptr)process->pagedirloc;
+      else {
+         extern DWORD *pagedir1;
+         process->ctx.cr3 = (u64)(uintptr)pagedir1;
+      }
+   }
+
+   current_process = process;
+   fpu_restore(&process->fpu);
+
+   if (prev && prev != process)
+      context_switch(&prev->ctx, &process->ctx, &prev->on_cpu);
+   else
+      context_load(&process->ctx);
 };
 
-/*Calls the timer interrupt which calls the taskswitcher*/
+/*Calls the scheduler voluntarily*/
 inline void taskswitch(){
-   //Tell the taskswitcher not to increment the time
-   ps_notimeincrement = 1; 
-   asm volatile ("int $0x20");
+   ps_notimeincrement = 1;
+   schedule_from_timer();
 };
+
+/* Invoked from the timer IRQ wrapper after time_handler(). */
+void schedule_from_timer(void){
+   PCB386 *readyprocess;
+   devmgr_scheduler_extension *cursched;
+   static PCB386 *zombie_free;
+
+   if (sigwait || !current_process)
+      return;
+
+#ifdef __x86_64__
+   {
+      extern volatile int smp_sched_enabled;
+      if (smp_cpu_id() != 0 && !smp_sched_enabled)
+         return;
+   }
+#endif
+
+   /* Finish deferred free from a prior self-exit (safe once off that stack).
+      Only the BSP frees zombies to avoid a cross-CPU free race. */
+   if (zombie_free && smp_cpu_id() == 0) {
+      PCB386 *z = zombie_free;
+      zombie_free = 0;
+      if (z->parameters) free(z->parameters);
+      if (z->stdout) free(z->stdout);
+      free(z);
+   }
+
+   cursched = (devmgr_scheduler_extension*)extension_table[CURRENT_SCHEDULER].iface;
+   if (!cursched || !cursched->scheduler)
+      return;
+
+   /* Reap exit/kill before choosing the next task. */
+   if (sigterm) {
+      DWORD victim = sigterm;
+      sigterm = 0;
+      if (current_process->processid == victim) {
+         PCB386 *dying = current_process;
+         PCB386 *parent;
+         /* Prefer resuming the parent (typical waitpid waiter). */
+         parent = ps_findprocess(dying->owner);
+         if (parent != (PCB386*)-1 && parent != dying
+             && (parent->cpu_affinity < 0 || parent->cpu_affinity == smp_cpu_id()))
+            readyprocess = parent;
+         else {
+            readyprocess = (PCB386*)smp_this_cpu()->idle;
+            if (!readyprocess)
+               readyprocess = (PCB386*)bridges_link((devmgr_generic*)cursched, &cursched->scheduler,
+                                                   current_process,0,0,0,0,0);
+            if (!readyprocess || readyprocess == dying)
+               readyprocess = &sPCB;
+         }
+
+         closeallfiles(dying->processid);
+         if (parent != (PCB386*)-1)
+            parent->childwait = 0;
+         dying->on_cpu = -1;
+         ps_dequeue(dying);
+         zombie_free = dying; /* free after we leave this stack */
+         current_process = readyprocess;
+         readyprocess->on_cpu = smp_cpu_id();
+         fpu_restore(&readyprocess->fpu);
+         context_load(&readyprocess->ctx); /* does not return */
+         return;
+      }
+      kill_process(victim);
+      if (!current_process)
+         return;
+   }
+
+   readyprocess = (PCB386*)bridges_link((devmgr_generic*)cursched, &cursched->scheduler,
+                                          current_process,0,0,0,0,0);
+   if (!readyprocess || readyprocess == current_process)
+      return;
+
+   current_process->totalcputime++;
+   ps_switchto(readyprocess);
+}
 
 //The taskswitcher() is basically the program that runs all the time, aka CPU scheduler.
 //It selects the process to execute on the CPU. The selection of the 
@@ -1595,7 +1764,12 @@ void systemcall(){
 void process_init(){
    char tmp[255];
    PCB386 *kernel;
-    
+
+#ifdef __x86_64__
+   dispatcher_stack_loc = (DWORD)(KSTACK_DISPATCHER_BASE + KSTACK_SIZE);
+   sched_stack_loc = (DWORD)(KSTACK_SCHED_BASE + KSTACK_SIZE);
+   pagefault_stack_loc = (DWORD)(KSTACK_PF_BASE + KSTACK_SIZE);
+#endif
     
    //initialize the FPU
    asm volatile ("fninit");
@@ -1614,13 +1788,17 @@ void process_init(){
    kernel->knext=knext;                                  //top of the heap
    kernel->outdev=consoleDDL;                            //the console defined in kernel32.c, output of kernel goes here
    kernel->pagedirloc=pagedir1;                          //set page directory to the first location
+   kernel->cpu_affinity = 0;                             /* BSP-only */
+   kernel->on_cpu = 0;
 
    //initialize the current FPU state
    memcpy(&kernel->regs2,&ps_kernelfpustate,sizeof(ps_kernelfpustate));
+   fpu_init_default(&kernel->fpu);
     
    memset(&kernel->regs,0,sizeof(saveregs));             //initialize the execution context 
    kernel->regs.EIP=(DWORD)dex_init;                     //dex_init() in kernel32.c
-   kernel->regs.ESP= DISPATCHER_STACK_LOC;               //set the values of the registers for kernel mode process selector
+   /* SysV entry: RSP ≡ 8 (mod 16). context_load does push;ret so leave RSP as final. */
+   kernel->regs.ESP= DISPATCHER_STACK_LOC - 8;
    kernel->regs.CR3=pagedir1;
    kernel->regs.ES=SYS_DATA_SEL;
    kernel->regs.SS=SYS_STACK_SEL;
@@ -1630,7 +1808,13 @@ void process_init(){
    kernel->regs.GS=SYS_DATA_SEL;
    kernel->regs.ESP0= DISPATCHER_STACK_LOC;
    kernel->regs.SS0= SYS_DATA_SEL;
-   kernel->regs.EFLAGS=0x200;
+   kernel->regs.EFLAGS=0x202;
+   kernel->ctx.rip = (u64)(uintptr)dex_init;
+   kernel->ctx.rsp = (u64)(DISPATCHER_STACK_LOC - 8);
+   kernel->ctx.rflags = 0x202;
+   kernel->ctx.cs = SYS_CODE_SEL;
+   kernel->ctx.ss = SYS_DATA_SEL;
+   kernel->ctx.cr3 = (u64)(uintptr)pagedir1;
    memcpy(&kernelPCB,kernel,sizeof(PCB386));             //create a copy of the kernel PCB
    setgdt(SYS_TSS,&kernelPCB.regs,103,0x89,0);
 
