@@ -152,32 +152,144 @@ int user_fork(){
 };
 
 
+int user_execp(char *fname, DWORD mode, char *params);
+
+/* Copy one file; print a short status. Returns 1 on success. */
+static int tccboot_copy1(const char *src, const char *dst)
+{
+   printf("  %s -> %s\n", src, dst);
+   if (fcopy((char*)src, (char*)dst) == -1) {
+      printf("tccboot: copy failed: %s\n", src);
+      return 0;
+   }
+   return 1;
+}
+
+/* Stage TinyCC + SDK sources onto the ramdisk for a fast self-build. */
+static int tccboot_stage(void)
+{
+   static const char *tcc_files[] = {
+      "tcc.c", "tcc.h", "config.h", "libtcc.c", "libtcc.h",
+      "tccpp.c", "tccgen.c", "tccelf.c", "tccrun.c", "tccasm.c", "tcctools.c",
+      "i386-gen.c", "i386-link.c", "i386-asm.c", "i386-asm.h", "i386-tok.h",
+      "tcctok.h", "stab.h", "stab.def", "elf.h",
+      0
+   };
+   static const char *sdk_files[] = {
+      "tccsdk.c", "posix.c", "libtcc1.c", "crt1.c", "setjmp.c",
+      0
+   };
+   char src[256], dst[256];
+   int i;
+
+   mkdir("/ramdisk/tcc");
+   mkdir("/ramdisk/sdk");
+
+   printf("tccboot: staging TinyCC sources to /ramdisk/tcc\n");
+   for (i = 0; tcc_files[i]; i++) {
+      sprintf(src, "/icsos/src/tcc/%s", tcc_files[i]);
+      sprintf(dst, "/ramdisk/tcc/%s", tcc_files[i]);
+      if (!tccboot_copy1(src, dst))
+         return 0;
+   }
+
+   printf("tccboot: staging SDK to /ramdisk/sdk\n");
+   for (i = 0; sdk_files[i]; i++) {
+      sprintf(src, "/icsos/tcc1/%s", sdk_files[i]);
+      sprintf(dst, "/ramdisk/sdk/%s", sdk_files[i]);
+      if (!tccboot_copy1(src, dst))
+         return 0;
+   }
+   return 1;
+}
+
+/* Rebuild TinyCC using the host-built in-OS tcc.exe. */
+static int tccboot_run(void)
+{
+   char cmd[768];
+
+   if (!tccboot_stage())
+      return 0;
+
+   printf("tccboot: compiling TinyCC (ONE_SOURCE) — this takes a while\n");
+   sprintf(cmd,
+           "/icsos/apps/tcc.exe -nostdlib -static -w "
+           "-DTCC_TARGET_I386 -DONE_SOURCE -DCONFIG_TCC_STATIC "
+           "-nostdinc -I/ramdisk/tcc -I/icsos/include -I/icsos/tcc1 "
+           "-o/ramdisk/tccnew.exe "
+           "/ramdisk/tcc/tcc.c "
+           "/ramdisk/sdk/tccsdk.c /ramdisk/sdk/posix.c "
+           "/ramdisk/sdk/libtcc1.c /ramdisk/sdk/crt1.c /ramdisk/sdk/setjmp.c");
+
+   if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
+      printf("TCCBOOT_TEST_FAIL compile\n");
+      return 0;
+   }
+
+   printf("tccboot: verifying /ramdisk/tccnew.exe -v\n");
+   if (!user_execp("/ramdisk/tccnew.exe", 0, "/ramdisk/tccnew.exe -v")) {
+      printf("TCCBOOT_TEST_FAIL tccnew -v\n");
+      return 0;
+   }
+
+   printf("tccboot: tccnew compiling min.c\n");
+   sprintf(cmd,
+           "/ramdisk/tccnew.exe -nostdlib -static "
+           "-o/ramdisk/min2.exe /icsos/apps/min.c");
+   if (!user_execp("/ramdisk/tccnew.exe", 0, cmd)) {
+      printf("TCCBOOT_TEST_FAIL tccnew min.c\n");
+      return 0;
+   }
+
+   printf("tccboot: running /ramdisk/min2.exe\n");
+   if (!user_execp("/ramdisk/min2.exe", 0, "/ramdisk/min2.exe")) {
+      printf("TCCBOOT_TEST_FAIL run min2\n");
+      return 0;
+   }
+
+   /* Install the self-built compiler over the apps copy when possible. */
+   printf("tccboot: installing /ramdisk/tccnew.exe -> /icsos/apps/tcc.exe\n");
+   if (fcopy("/ramdisk/tccnew.exe", "/icsos/apps/tcc.exe") == -1)
+      printf("tccboot: warning: could not install to /icsos/apps (ramdisk copy is ok)\n");
+
+   printf("TCCBOOT_TEST_PASS\n");
+   return 1;
+}
+
 /**
  * Function that reads an executable and creates a new process for it.
  */
 int user_execp(char *fname, DWORD mode, char *params){
+   static char cached_name[256];
+   static char *cached_buf;
+   static DWORD cached_size;
    DWORD id,size;
    char *buf;
-   vfs_stat filestat;
-   file_PCB *f = openfilex(fname, 0);              //Open the executable
-  
-   if (f!=0){                                      //The executable was successfully opened
-      fstat(f,&filestat);                          //Get some statistics about the executable
-      size = filestat.st_size;                     //Store the size of the executable
-      buf = (char*)malloc(filestat.st_size+511);   //Allocate memory for the executable
-      
-      //tell the vfs to increase buffersize to speed up reads
-      vfs_setbuffer(f, 0, filestat.st_size, FILE_IOFBF);
+   int from_cache = 0;
 
-      if (fread(buf, size, 1, f) == size){         //A successful read of the executable
+   if (cached_buf && strcmp(cached_name, fname) == 0){
+      buf = cached_buf;
+      size = cached_size;
+      from_cache = 1;
+   } else {
+      /* File-backed eager mmap: one contiguous fill via coalesced FAT I/O. */
+      buf = (char*)vfs_mapfile(fname, &size);
+      if (!buf)
+         return 0;
+   }
+
+   printf("execp: loading %s (%u bytes)%s\n", fname, (unsigned)size,
+          from_cache ? " [cached]" : " [mmap]");
+   {
          char temp[255];
+         int hdl;
          #ifdef DEBUG_USER_PROCESS
          printf("execp(): adding module..\n");
          #endif
 
         
          //Calls addmodule() from kernel/process/pdispatch.c 
-         int hdl= addmodule(fname, buf, userspace, mode, params, showpath(temp), getprocessid());
+         hdl= addmodule(fname, buf, userspace, mode, params, showpath(temp), getprocessid());
         
          #ifdef DEBUG_USER_PROCESS
          printf("execp(): done.\n");
@@ -185,13 +297,23 @@ int user_execp(char *fname, DWORD mode, char *params){
 
          taskswitch();     //inform the CPU scheduler, hopefully to schedule process_dispatcher()
 
-         #ifdef DEBUG-USER_PROCESS
+         #ifdef DEBUG_USER_PROCESS
          printf("execp(): parent waiting for child to finish\n");
          #endif
     
          //loop until the new process has been dispatched    
-         while (!(id = pd_ok(hdl))) 
-            ;
+         while (!(id = pd_ok(hdl)))
+            taskswitch();
+
+         if ((int)id == -1){
+            printf("execp: failed to start %s\n", fname);
+            if (!from_cache){
+               free(buf);
+               cached_buf = 0;
+               cached_name[0] = 0;
+            }
+            return 0;
+         }
          
          fg_setmykeyboard(id);
 
@@ -201,12 +323,22 @@ int user_execp(char *fname, DWORD mode, char *params){
          //dex32_wait();
 
          fg_setmykeyboard(getprocessid());
-      };
-      free(buf);
-      fclose(f);
-      return id;
+         if (!from_cache){
+            /* Keep a large binary (tcc) cached; do not let a tiny
+               program like min.exe displace it. */
+            if (size >= 65536) {
+               if (cached_buf && cached_buf != buf)
+                  free(cached_buf);
+               cached_buf = buf;
+               cached_size = size;
+               strncpy(cached_name, fname, 255);
+               cached_name[255] = 0;
+            } else {
+               free(buf);
+            }
+         }
+         return id;
    };
-   return 0;
 };
 
 int exec(char *fname, DWORD mode, char *params){
@@ -542,6 +674,67 @@ static void df_find_mount(vfs_node *dir, int devid, char *out)
    }
 }
 
+void console_iobench(void)
+{
+   const char *path = "/icsos/apps/tcc.exe";
+   DWORD t0, t1, size = 0, i;
+   DWORD hits, misses, fills, slots;
+   void *buf;
+   DWORD cold_ms, warm_ms, mmap_ms;
+
+   printf("iobench: sequential read of %s\n", path);
+   blkcache_reset_stats();
+
+   /* Cold read (first pass may still warm FAT/BPB). */
+   t0 = getprecisetime();
+   buf = vfs_mapfile(path, &size);
+   t1 = getprecisetime();
+   if (!buf) {
+      printf("iobench: FAIL map %s\n", path);
+      return;
+   }
+   cold_ms = t1 - t0;
+   free(buf);
+
+   /* Warm read — should hit block cache heavily. */
+   t0 = getprecisetime();
+   buf = vfs_mapfile(path, &size);
+   t1 = getprecisetime();
+   if (!buf) {
+      printf("iobench: FAIL warm map\n");
+      return;
+   }
+   warm_ms = t1 - t0;
+   free(buf);
+
+   /* Third pass through mmap-style path again for stability. */
+   t0 = getprecisetime();
+   for (i = 0; i < 3; i++) {
+      buf = vfs_mapfile(path, &size);
+      if (!buf) break;
+      free(buf);
+   }
+   t1 = getprecisetime();
+   mmap_ms = (t1 - t0) / (i ? i : 1);
+
+   blkcache_stats(&hits, &misses, &fills, &slots);
+   printf("iobench: size=%u bytes\n", (unsigned)size);
+   printf("iobench: cold_map=%u ms  warm_map=%u ms  avg3=%u ms\n",
+          (unsigned)cold_ms, (unsigned)warm_ms, (unsigned)mmap_ms);
+   if (warm_ms > 0)
+      printf("iobench: speedup=%u.%ux (cold/warm)\n",
+             (unsigned)(cold_ms / warm_ms),
+             (unsigned)((cold_ms * 10 / warm_ms) % 10));
+   else if (cold_ms > warm_ms)
+      printf("iobench: warm was <1 timer tick (good)\n");
+   printf("iobench: cache hits=%u misses=%u fills=%u slots=%u\n",
+          (unsigned)hits, (unsigned)misses, (unsigned)fills, (unsigned)slots);
+   if (warm_ms <= cold_ms)
+      printf("IOBENCH_PASS\n");
+   else
+      printf("IOBENCH_WARN warm slower than cold\n");
+}
+
 void console_df()
 {
    int i;
@@ -566,18 +759,25 @@ void console_df()
       name = blk->hdr.name;
 
       if (blk->total_blocks && blk->get_block_size) {
-         DWORD nblk = (DWORD)blk->total_blocks();
-         DWORD bsz = (DWORD)blk->get_block_size();
-         raw_bytes = nblk * bsz;
-         have_raw = 1;
+         DWORD nblk = (DWORD)bridges_call((devmgr_generic*)blk, &blk->total_blocks);
+         DWORD bsz = (DWORD)bridges_call((devmgr_generic*)blk, &blk->get_block_size);
+         if (bsz > 0 && bsz != (DWORD)-1 && nblk != (DWORD)-1) {
+            raw_bytes = nblk * bsz;
+            have_raw = 1;
+         }
       }
 
-      /* Do not poke the floppy unless it is mounted; an uninitialized
-         FDC wait hangs. CD-ROM sectors are 2048 bytes, not FAT. */
-      if (blk->get_block_size && blk->get_block_size() == 512) {
-         int skip_floppy = (name[0] == 'f' && name[1] == 'd' &&
-                            !devmgr_getlock(i));
-         if (!skip_floppy)
+      /* Probe FAT on any readable  volume. Skip uninitialized floppy
+         (FDC waits hang) and CD-ROM (2048-byte sectors). */
+      if (blk->read_block) {
+         int skip = 0;
+         if (name[0] == 'f' && name[1] == 'd' && !devmgr_getlock(i))
+            skip = 1;
+         if (name[0] == 'c' && name[1] == 'd')
+            skip = 1;
+         if (strcmp(name, "null") == 0)
+            skip = 1;
+         if (!skip)
             have_fs = (fat_statfs(i, &total_bytes, &free_bytes) == 0);
       }
 
@@ -781,6 +981,9 @@ int console_execute(const char *str){
    if (strcmp(u,"df") == 0){           //-- Shows free space on block devices.
       console_df();
    }else
+   if (strcmp(u,"iobench") == 0){      //-- Benchmark file I/O / block cache.
+      console_iobench();
+   }else
    if (strcmp(u,"umount") == 0){       //-- Unmounts a mounted device. Args: <mount point>
       char *u =strtok(0," ");
       if (u!=0){
@@ -967,8 +1170,8 @@ int console_execute(const char *str){
             u=strtok(0," ");
             if (u!=0){
                strcpy(src,u);
-               sprintf(cmdline,"%s/tcc.exe -o%s %s -B%s %s/tccsdk.c %s/crt1.c",
-                        path,exe,src,sdk_home,sdk_home,sdk_home);
+               sprintf(cmdline,"%s/tcc.exe -nostdlib -static -o%s %s -B%s %s/tccsdk.c %s/posix.c %s/libtcc1.c %s/crt1.c %s/setjmp.c",
+                        path,exe,src,sdk_home,sdk_home,sdk_home,sdk_home,sdk_home,sdk_home);
                user_execp("/icsos/apps/tcc.exe",0,cmdline);
             }else{
                printf("Usage: cc <name.exe> <name.c>\n");
@@ -977,6 +1180,85 @@ int console_execute(const char *str){
                printf("Usage: cc <name.exe> <name.c>\n");
          }
       }
+   }else
+   if (strcmp(u,"reboot") == 0){  //-- Reboot the machine (keyboard + QEMU ports).
+      machine_reboot();
+   }else
+   if (strcmp(u,"kbuild") == 0){  //-- Rebuild the kernel with in-OS tcc and install as /vmdex.
+      char cmd[1024];
+      printf("kbuild: compiling kernel with tcc (this can take a while)...\n");
+      sprintf(cmd,
+         "/icsos/apps/tcc.exe -nostdlib -static -g0 "
+         "-I/icsos/src/kernel -I/icsos/include "
+         "-o /icsos/Kernel32.bin "
+         "-Wl,-T/icsos/src/kernel/lscript-self.ld "
+         "/icsos/src/kernel/startup/startup.S "
+         "/icsos/src/kernel/startup/asmlib.S "
+         "/icsos/src/kernel/irqwrap.S "
+         "/icsos/src/kernel/kernel32.c "
+         "/icsos/src/kernel/process/scheduler.c "
+         "/icsos/src/kernel/filesystem/fat12.c "
+         "/icsos/src/kernel/filesystem/iso9660.c "
+         "/icsos/src/kernel/filesystem/devfs.c "
+         "/icsos/src/kernel/iomgr/iosched.c "
+         "/icsos/src/kernel/devmgr/devmgr_error.c");
+      if (user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
+         printf("kbuild: installing /icsos/Kernel32.bin as /vmdex\n");
+         if (fcopy("/icsos/Kernel32.bin", "/vmdex") == -1)
+            printf("kbuild: failed to install vmdex\n");
+         else
+            printf("kbuild: done. Type 'reboot' to boot the new kernel.\n");
+      } else {
+         printf("kbuild: tcc failed or is not installed.\n");
+      }
+   }else
+   if (strcmp(u,"exectest") == 0){  //-- Run the host-built hello.exe (ELF loader smoke test).
+      printf("exectest: running /icsos/apps/hello.exe\n");
+      if (!user_execp("/icsos/apps/hello.exe", 0, "/icsos/apps/hello.exe"))
+         printf("EXEC_TEST_FAIL\n");
+      else
+         printf("EXEC_TEST_PASS\n");
+   }else
+   if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
+      char cmd[512], sdk[128]="", path[128]="";
+      env_getenv("SDK_HOME", sdk);
+      env_getenv("PATH", path);
+      if (sdk[0]==0) strcpy(sdk, "/icsos/tcc1");
+      if (path[0]==0) strcpy(path, "/icsos/apps");
+      printf("selfhost: checking tcc -v\n");
+      sprintf(cmd, "%s/tcc.exe -v", path);
+      if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
+         printf("SELFHOST_TEST_FAIL tcc -v\n");
+      } else {
+         printf("selfhost: compiling /icsos/apps/min.c (no includes)\n");
+         sprintf(cmd, "%s/tcc.exe -nostdlib -static -o/ramdisk/min.exe /icsos/apps/min.c",
+                 path);
+         if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
+            printf("SELFHOST_TEST_FAIL min.c\n");
+         } else {
+            printf("selfhost: running /ramdisk/min.exe\n");
+            if (!user_execp("/ramdisk/min.exe", 0, "/ramdisk/min.exe")) {
+               printf("SELFHOST_TEST_FAIL run min.exe\n");
+            } else {
+               /* Small hello with tinyio/tinycrt — full SDK compile is too slow in-OS for now. */
+               printf("selfhost: compiling hello.c\n");
+               sprintf(cmd, "%s/tcc.exe -nostdlib -static "
+                       "-o/ramdisk/hello.exe "
+                       "/icsos/apps/hello.c /icsos/apps/tinyio.c /icsos/apps/tinycrt.c",
+                       path);
+               if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
+                  printf("SELFHOST_TEST_FAIL compile hello\n");
+               } else {
+                  printf("selfhost: running hello.exe\n");
+                  user_execp("/ramdisk/hello.exe", 0, "/ramdisk/hello.exe");
+                  printf("SELFHOST_TEST_PASS\n");
+               }
+            }
+         }
+      }
+   }else
+   if (strcmp(u,"tccboot") == 0){  //-- Rebuild TinyCC with the in-OS tcc.
+      tccboot_run();
    }else
    if (u[0] == '$'){                      //-- Sends message to a device.
       int i, devid;

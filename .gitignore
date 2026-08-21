@@ -6,8 +6,11 @@ ics-os-floppy.img
 ics-os-usb.img
 ics-os-livecd.iso
 vmdex
+ics-os/vmdex
 ics-os/kernel/Kernel32.bin
 ics-os/kernel/Kernel32.sym
 ics-os/kernel/*.o
 ics-os/tmp/
 ics-os/tmp-usb/
+ics-os/contrib/**/*.exe
+ics-os/contrib/tcc/tcc.exe

@@ -28,6 +28,10 @@
 #ifndef FAT_H
 #define FAT_H
 
+/* VFAT long names are required so in-OS tcc can open kernel sources
+   whose 8.3 names would otherwise be mangled (scheduler.c, lscript-self.ld). */
+#define FAT12_LFNSUPPORT
+
 #include "../vfs/vfs_core.h"
 
 typedef unsigned char	uint8_t;	/* or #include <stdint.h> */
@@ -234,7 +238,7 @@ DWORD get_sector_fromcluster(DWORD cluster,BPB *bpbblock,int func,BYTE *fat,int 
 void writecluster(int cluster,int value,BYTE *fat,int);
 int obtain_next_cluster(int cluster,void *fat,int fat_type,BPB *bpbblock,int id);
 int obtaincluster(int cluster,BYTE *fat);
-int obtainfreecluster(BYTE *fat,int maxentries);
+int obtainfreecluster(BYTE *fat,int fat_type,int maxentries);
 int writefile12(fatdirentry *dir,BPB *bpbblock,char *fname,char *buf);
 int fillsectorinfo(fatdirentry *dir,BPB *bpbblock,DWORD *sectinfo,int id);
 int readfile12(fatdirentry *dir,BPB *bpbblock,char *buf,DWORD cluster);

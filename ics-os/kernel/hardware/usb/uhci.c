@@ -514,20 +514,27 @@ static int usb_scsi_capacity(DWORD *blocks, DWORD *bsize)
 static int usb_scsi_rw(int write, DWORD lba, DWORD nblocks, char *buf)
 {
     BYTE cdb[16];
-    DWORD i;
+    DWORD done = 0;
     DWORD bsize = usb_drive.block_size ? usb_drive.block_size : 512;
+    /* BOT/UHCI TD budget: transfer up to 32KB per SCSI command
+       (classic USB MSC optimal chunk). */
+    DWORD max_per_cmd = 64;
 
-    for (i = 0; i < nblocks; i++) {
+    while (done < nblocks) {
+        DWORD n = nblocks - done;
+        if (n > max_per_cmd) n = max_per_cmd;
         memset(cdb, 0, sizeof(cdb));
         cdb[0] = write ? SCSI_WRITE10 : SCSI_READ10;
-        cdb[2] = (BYTE)((lba + i) >> 24);
-        cdb[3] = (BYTE)((lba + i) >> 16);
-        cdb[4] = (BYTE)((lba + i) >> 8);
-        cdb[5] = (BYTE)(lba + i);
-        cdb[8] = 1;
+        cdb[2] = (BYTE)((lba + done) >> 24);
+        cdb[3] = (BYTE)((lba + done) >> 16);
+        cdb[4] = (BYTE)((lba + done) >> 8);
+        cdb[5] = (BYTE)(lba + done);
+        cdb[7] = (BYTE)(n >> 8);
+        cdb[8] = (BYTE)(n & 0xFF);
         if (!usb_msc_bot(cdb, 10, write ? 0 : 1,
-                         (BYTE*)(buf + i * bsize), bsize))
+                         (BYTE*)(buf + done * bsize), n * bsize))
             return 0;
+        done += n;
     }
     return 1;
 }
@@ -554,6 +561,20 @@ static int usb_total_blocks(void)
 static int usb_get_block_size(void)
 {
     return (int)(usb_drive.block_size ? usb_drive.block_size : 512);
+}
+
+static int usb_part_total_blocks(void)
+{
+    int i;
+    int device_context = devmgr_getcontext();
+    for (i = 0; i < usb_part_count; i++) {
+        if (usb_parts[i].mydeviceid == device_context) {
+            if (usb_parts[i].endlba > usb_parts[i].startlba)
+                return (int)(usb_parts[i].endlba - usb_parts[i].startlba);
+            return 0;
+        }
+    }
+    return 0;
 }
 
 static int usb_read_block_partition(int block, char *blockbuff, DWORD numblocks)
@@ -630,6 +651,7 @@ static void usb_register_partitions(int parent_id)
         part.read_block = usb_read_block_partition;
         part.write_block = usb_write_block_partition;
         part.get_block_size = usb_get_block_size;
+        part.total_blocks = usb_part_total_blocks;
         devid = devmgr_register((devmgr_generic*)&part);
         usb_parts[usb_part_count].mydeviceid = devid;
         usb_parts[usb_part_count].parent_deviceid = parent_id;

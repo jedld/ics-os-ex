@@ -236,6 +236,7 @@ int vfs_unmount(vfs_node *node);
 int     vfs_unmount_device(const char *location);
 int vfs_directread(char *buf,int itemsize,int noitems,file_PCB* fhandle);
 int vfs_directwrite(char *buf, int itemsize, int n, file_PCB* fhandle);
+void *vfs_mapfile(const char *path, DWORD *out_size);
 int vfs_readchar(file_PCB *handle, char *character);
 int vfs_writechar(file_PCB *handle, char character);
 int vfs_flushbuffer(file_PCB *handle);

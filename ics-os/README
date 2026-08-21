@@ -2,3 +2,13 @@ ICS-OS is an educational operating system based on Dex-OS (http://sourceforge.ne
 
 (c) Institute of Computer Science, University of the Philippines Los Banos
 
+## ics-os-ex extensions
+
+This checkout adds experimental self-hosting and I/O work on top of instructional ICS-OS:
+
+- **TinyCC in-OS** (`contrib/tcc/`, `apps/tcc.exe`) with POSIX helpers in `sdk/`
+- Console tests: `selfhost`, `exectest`, `iobench`, `tccboot`, `cc`, `kbuild`
+- Faster FAT/IDE/USB reads: coalesced extents, block cache, BPB cache, mmap-style exec load
+- Staging: `scripts/stage-selfhost.sh` (sources + SDK onto the USB image)
+
+Top-level documentation: see `../README.md`.

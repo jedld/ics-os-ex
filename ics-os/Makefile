@@ -5,7 +5,7 @@
 
 QEMU_I386=qemu-system-i386
 QEMU_X64=qemu-system-x86_64
-QEMU_MEM=64M
+QEMU_MEM=128M
 QEMU_NET=-net nic,model=rtl8139 -net none
 # QEMU can load the 32-bit multiboot kernel the same way GRUB does.
 QEMU_KERNEL=-kernel kernel/Kernel32.bin
@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel32.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-exec test-iobench
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -35,8 +35,10 @@ prep_image: vmdex
 	scripts/gen-help.sh
 	cp base/* tmp
 	if [ -d apps ] && ls apps/* >/dev/null 2>&1; then cp apps/* tmp/apps/; fi
-	if [ -d sdk ] && ls sdk/* >/dev/null 2>&1; then cp sdk/* tmp/tcc1/; fi
+	find sdk -maxdepth 1 -type f -exec cp {} tmp/tcc1/ \;
 	if [ -d lib ] && ls lib/* >/dev/null 2>&1; then cp lib/* tmp/lib1/; fi
+	chmod +x scripts/stage-selfhost.sh
+	scripts/stage-selfhost.sh tmp
 
 floppy: prep_image
 	cp grub.img ics-os-floppy.img                #copy an image with grub
@@ -55,14 +57,16 @@ livecd: prep_image
 	rm -fr tmp/
 
 # USB thumb-drive image (FAT root filesystem, BIOS + UEFI GRUB). No root required.
-usb: prep_image
+usb: apps prep_image
 	chmod +x scripts/mkusb.sh
-	scripts/mkusb.sh
+	ICSOS_USB_SIZE_MB=$${ICSOS_USB_SIZE_MB:-128} scripts/mkusb.sh
 	rm -fr tmp/ tmp-usb
 
 apps:
-	$(MAKE) -C contrib/hello
-	$(MAKE) -C contrib/hello install || true
+	-$(MAKE) -C contrib/hello
+	-$(MAKE) -C contrib/hello install
+	$(MAKE) -C contrib/tcc
+	$(MAKE) -C contrib/tcc install
 
 boot-floppy:
 	$(QEMU_I386) $(QEMU_NET) -fda ics-os-floppy.img -boot a -m $(QEMU_MEM)
@@ -118,3 +122,39 @@ test-usb-storage:
 		-drive if=none,id=stick,format=raw,file=ics-os-usb.img \
 		-device piix3-usb-uhci,id=uhci \
 		-device usb-storage,bus=uhci.0,drive=stick
+
+# Boot, compile hello.c with in-OS TinyCC, run it, then reboot.
+test-selfhost: apps
+	ICSOS_TEST_SELFHOST=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
+	@echo "Running self-host test (TinyCC inside ICS-OS)..."
+	@timeout 240 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
+		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
+		| tee /tmp/icsos-selfhost.log
+	@grep -q SELFHOST_TEST_PASS /tmp/icsos-selfhost.log
+
+# Boot and run the I/O / block-cache microbenchmark.
+test-iobench: apps
+	ICSOS_TEST_IOBENCH=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
+	@echo "Running I/O benchmark..."
+	@timeout 90 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
+		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
+		| tee /tmp/icsos-iobench.log
+	@grep -q IOBENCH_PASS /tmp/icsos-iobench.log
+
+# Boot, rebuild TinyCC with itself inside ICS-OS (long-running).
+test-tccboot: apps
+	ICSOS_TEST_TCCBOOT=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
+	@echo "Running TinyCC self-build test (can take many minutes)..."
+	@timeout 3600 $(QEMU_X64) -display none -serial stdio -no-reboot -m 256M \
+		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
+		| tee /tmp/icsos-tccboot.log
+	@grep -q TCCBOOT_TEST_PASS /tmp/icsos-tccboot.log
+
+# Faster check: boot and exec the host-built hello.exe.
+test-exec: apps
+	ICSOS_TEST_EXEC=1 ICSOS_USB_SIZE_MB=128 $(MAKE) usb
+	@echo "Running user-exec test..."
+	@timeout 60 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
+		$(QEMU_KERNEL) -drive file=ics-os-usb.img,format=raw,if=ide -boot c \
+		| tee /tmp/icsos-exec.log
+	@grep -q EXEC_TEST_PASS /tmp/icsos-exec.log

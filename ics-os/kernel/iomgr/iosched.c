@@ -6,6 +6,7 @@
 
 #include "../devmgr/dex32_devmgr.h"
 #include "iosched.h"
+#include "blkcache.h"
 #include "../stdlib/time.h"
 
 //The registers that the io scheduler uses
@@ -31,6 +32,7 @@ DWORD iomgr_init()
    cur=0;
    memset(&IOrequest_busy,0,sizeof(sync_sharedvar));
    
+   blkcache_init();
    
    strcpy(iomgr.hdr.name,"default_iomgr");
    strcpy(iomgr.hdr.description,"DEX default I/O scheduler and manager");
@@ -118,6 +120,12 @@ DWORD iomgr_diskmgr()
                  {
                   lastjob=ptr->lowblock;
                   ptr->status=IO_COMPLETE;
+                  /* Warm the block cache so subsequent FAT/exec reads hit. */
+                  if (myblock->putcache)
+                     myblock->putcache(ptr->buf, ptr->lowblock, ptr->num_of_blocks);
+                  else
+                     blkcache_put(ptr->deviceid, ptr->lowblock,
+                                  ptr->num_of_blocks, ptr->buf);
                  } 
                        else
                  {
@@ -300,6 +308,22 @@ DWORD dex32_requestIO(int deviceid,int type,DWORD block,DWORD numblocks, void *b
         #ifdef DEBUG_IOREADWRITE2
         printf(")r\n");
         #endif
+        restoreflags(flags);
+        sync_leavecrit(&IOrequest_busy);
+        return (DWORD)ptr->rID;
+      };
+
+     /* Device-agnostic cache for drivers that do not register getcache. */
+     if (type==IO_READ && myblock->getcache==0 &&
+         blkcache_get(deviceid, block, numblocks, buf))
+      {
+        ptr=(IOrequest*)malloc(sizeof(IOrequest));
+        ptr->rID=(DWORD)ptr;
+        ptr->type = type;
+        ptr->lowblock = block;
+        ptr->num_of_blocks = numblocks;
+        ptr->status = IO_COMPLETE;
+        ptr->buf=buf;
         restoreflags(flags);
         sync_leavecrit(&IOrequest_busy);
         return (DWORD)ptr->rID;

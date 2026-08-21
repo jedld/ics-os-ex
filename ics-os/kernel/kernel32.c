@@ -113,6 +113,7 @@ extern void textcolor(unsigned char c);
 #include "process/environment.h"
 #include "console/foreground.h"
 #include "console/console.h"
+#include "iomgr/blkcache.h"
 #include "stdlib/stdlib.h"
 #include "devmgr/bridges.h"
 #include "process/scheduler.h"

@@ -10,11 +10,14 @@ demo_graphics- Runs the graphics demonstration.
 df- Shows free space on block devices.
 dkill- Dirty kill a user process/thread. No cleanup is done. Args: <pid>
 echo- Displays a string. Args: <string>  
+exectest- Run the host-built hello.exe (ELF loader smoke test).
 exit- Exits a console session.
 fgman-  Foreground manager
 files- Shows list of currently open files.
 find- Finds a file.
 help- Displays this help screen.
+iobench- Benchmark file I/O / block cache.
+kbuild- Rebuild the kernel with in-OS tcc and install as /vmdex.
 kill- Kills a thread/process. Performs cleanup.  Args: <thread name>
 libinfo- Shows library information.
 loadmod- Loads a shared library (.dll or .so). Args: <module filename> 
@@ -35,12 +38,15 @@ pcut- Creates a path alias. Args: <alias:> [path]
 procinfo- Show process information. Args: <pid>
 procs- List the running processes. "ps" can also be used.
 pwd- Shows the current working directory.
+reboot- Reboot the machine (keyboard + QEMU ports).
 rempcut- Removes a path alias. Args: <alias:>
 ren- Renames a file. Args: <oldname> <newname>
 rmdir- Removes a directory and all its subdirectories. Args: <dirname>
 run- Executes a batch file or script. Args: <script>
+selfhost- Compile a test program with in-OS tcc and run it.
 set- Sets an environment variable. Args: <key>=<value>
 shutdown- Shuts down the system.
+tccboot- Rebuild TinyCC with the in-OS tcc.
 time- Displays date and time.
 type- Displays the contents of a file. Args: <filename> [-p]
 umount- Unmounts a mounted device. Args: <mount point>

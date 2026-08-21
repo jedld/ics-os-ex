@@ -8,6 +8,8 @@ Thus, this project aims to develop a simple yet operational instructional operat
 
 ICS-OS remains a 32-bit protected-mode kernel. It boots on 64-bit (AMD64) PCs in legacy/compatibility mode via GRUB, including from a USB thumb drive that is then mounted as the root filesystem.
 
+This tree (`ics-os-ex`) extends the instructional base with **in-OS TinyCC self-hosting**, a **POSIX-ish user libc**, **FAT32/IDE/USB I/O performance work**, and **ELF executable loading** suitable for compiling programs inside the OS.
+
 ## Downloads
 
 Latest floppy image: <a href='https://github.com/srg-ics-uplb/ics-os/raw/master/ics-os/ics-os-floppy.img'>ics-os-floppy.img</a>
@@ -53,6 +55,9 @@ Headless smoke tests (serial console, no VGA window):
 ```
 $ make test-usb-amd64
 $ make test-usb-storage
+$ make test-exec          # load host-built hello.exe
+$ make test-selfhost      # in-OS TinyCC compile + run
+$ make test-iobench       # file I/O / block-cache microbenchmark
 ```
 
 Write `ics-os-usb.img` to a physical thumb drive (BIOS/CSM firmware can boot it as a disk; the kernel also has a UHCI USB mass-storage driver):
@@ -110,6 +115,55 @@ you can perform the edits outside the container(in another terminal) and the cha
 
 See [Lab 01](https://github.com/srg-ics-uplb/ics-os/blob/master/labs/lab01/ICSOS_Lab01.pdf) for a more complete discussion of how
 to set up the build environment.
+
+## Current enhancements (ics-os-ex)
+
+### In-OS TinyCC and self-hosting
+
+- Vendored **TinyCC 0.9.27** (i386) under `ics-os/contrib/tcc/`, host-built as `apps/tcc.exe`.
+- POSIX-oriented user headers in `ics-os/sdk/include/` plus `posix.c`, `setjmp.c`, and the existing DexSDK.
+- Console commands:
+  - `selfhost` — compile `min.c` / tiny `hello` with in-OS tcc and run them (`SELFHOST_TEST_PASS`).
+  - `exectest` — smoke-test ELF loading of host-built `hello.exe`.
+  - `cc` / `kbuild` / `tccboot` — compile user programs, rebuild the kernel image, or rebuild TinyCC inside the OS.
+  - `iobench` — sequential file-read / block-cache benchmark (`IOBENCH_PASS`).
+- Staging script `scripts/stage-selfhost.sh` copies compiler sources, SDK headers, and kernel sources onto the USB image for in-OS work.
+- Larger ramdisk (`autoexec.bat`) for build scratch space under `/ramdisk`.
+
+Typical in-OS flow after `make usb` / `make boot-usb-amd64`:
+
+```
+exectest
+selfhost
+iobench
+tccboot          # long-running TinyCC self-rebuild (optional)
+```
+
+### I/O performance
+
+Sequential reads of large files (e.g. the ~210 KB `tcc.exe`) are much faster than the previous per-cluster wait path:
+
+| Pass | ~210 KB `tcc.exe` map |
+|------|------------------------|
+| Cold | ~98 ms |
+| Warm (block cache) | &lt;1 ms |
+
+Techniques used:
+
+- **FAT extent coalescing** — contiguous cluster runs become multi-sector IDE/USB requests (up to 64 sectors).
+- **Generic block cache** (`kernel/iomgr/blkcache.c`, 512 KiB) shared via the I/O manager.
+- **BPB caching** — avoid re-reading the boot sector on every open.
+- **Eager file map** — `vfs_mapfile()` / `user_execp` `[mmap]` path for loading executables; POSIX `mmap` with an fd fills through the same reader.
+- **USB MSC** — multi-block SCSI READ10/WRITE10 instead of one sector per command.
+- **FAT32 create/alloc fixes** — correct free-cluster scan and directory slot lookup so in-OS compilers can write outputs.
+
+### Other kernel / userland notes
+
+- ELF user processes with larger heap/stack; kernel identity map retained in user page directories for syscalls.
+- Headless-friendly exception dumps (serial) without keyboard pause.
+- LFN support enabled for long source filenames on FAT.
+
+See also `ics-os/contrib/tcc/README.icsos` and `ics-os/base/icsos.hlp`.
 
 ## Development and Support
 This project is used at the <a href='http://www.ics.uplb.edu.ph'>Institute of Computer Science</a>, <a href='http://www.uplb.edu.ph'>University of the Philippines Los Banos</a> for <a href='http://ics.uplb.edu.ph/courses/ugrad/cmsc/125'>CMSC 125</a>. It is maintained by the <a href='https://srg-ics-uplb.github.io'>Systems Research Group</a>.

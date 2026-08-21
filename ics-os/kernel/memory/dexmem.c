@@ -308,8 +308,12 @@ DWORD getpagetablephys(DWORD vaddr,DWORD *pagedir){
 };
 
 void dex32_freeuserpagetable(DWORD *pgd){  //ATOMIC function
-   DWORD userstart=(DWORD)userspace >> 22,
-         userend  =0xC0000000 >> 22;
+   /* Process page directories may drop everything above 4MB (userspace).
+      The kernel page directory (pagedir1) identity-maps 0-16MB for the
+      kernel image and heap. ELF/PE loaders dual-map user programs into
+      pagedir1 then call this; they must not free PDE 1-3 (4-16MB) or the
+      next disk read / malloc above 4MB hangs. */
+   DWORD userstart, userend  =0xC0000000 >> 22;
    DWORD auxstart=0xFFC00000 >> 22;
    DWORD *pagedir,cpuflags;
    DWORD *pagetbl,address;
@@ -317,6 +321,11 @@ void dex32_freeuserpagetable(DWORD *pgd){  //ATOMIC function
    DWORD pages=0;
    storeflags(&cpuflags);
    stopints();
+
+   if (pgd == pagedir1)
+      userstart = 0x01000000 >> 22; /* preserve 0-16MB identity map */
+   else
+      userstart = (DWORD)userspace >> 22;
      
    pagedir =(DWORD*)getvirtaddress((DWORD)pgd);
    for (i=userstart;i<userend;i++)
@@ -645,21 +654,19 @@ void *dex32_sbrk(unsigned int amt)
    {
      DWORD pages=(amt/4096)+1;
      DWORD flags;
-     char *ret=current_process->knext,temp[255];
+     char *ret=current_process->knext;
      dex32_stopints(&flags);
      if (amt==0)
         {
         dex32_restoreints(flags);
-        
         return ((void*)current_process->knext);
         };
      if (amt%4096==0) pages=amt/4096;
 
-   /*  ret=dex32_commit((DWORD)current_process->knext,
-                 pages,(DWORD*)SYS_PAGEDIR_VIR,
-                  PG_USER | PG_WR);*/
-     //increases the heap of the process
-     //  addmemusage(&(current_process->meminfo),ret,pages);
+     /* Commit pages into the process page directory so malloc/sbrk
+        used by the in-OS compiler can grow beyond the initial heap. */
+     dex32_commit((DWORD)ret, pages,
+                  (DWORD*)current_process->pagedirloc, PG_USER | PG_WR);
 
      current_process->knext+=pages*4096;
      dex32_restoreints(flags);
@@ -689,12 +696,15 @@ void dex32_copy_on_write(DWORD *directory)
 void dex32_copy_pagedirU(DWORD *destdir,DWORD *source)
    {
      DWORD i;
-     DWORD userstart=(DWORD)userspace >> 22,
+     /* Kernel identity-maps 0-16MB (image + heap + VFS nodes). User
+        processes must keep that map or syscalls like fopen() page-fault
+        once the kernel heap grows past 4MB. */
+     DWORD kernelend = 0x01000000 >> 22,
            userend  =0xC0000000 >> 22,
            stopaddr =0xF0000000 >> 22;
      disablepaging();
     // memset(destdir,0,0x1000);
-     for (i=0;i<userstart;i++)
+     for (i=0;i<kernelend;i++)
         destdir[i]=source[i];
      for (i=userend;i<stopaddr;i++)
         destdir[i]=source[i];

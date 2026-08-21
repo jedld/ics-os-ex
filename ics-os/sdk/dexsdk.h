@@ -258,7 +258,7 @@ int fwrite(const void *buf,int itemsize,int noitems,FILE* fhandle);
 char fputc(char c,FILE *f);
 int fclose(FILE *stream);
 int fflush (FILE *stream);
-char *fseek(FILE* f,long x,int y);
+int fseek(FILE* f,long x,int y);
 long int ftell(FILE *stream);
 int closefile(FILE* fhandle);
 int remove(char *filename);

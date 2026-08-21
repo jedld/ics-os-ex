@@ -462,9 +462,7 @@ EMIT2:				if((flags & PR_LJ) == 0)
 	return count;
 }
 
-int toupper(int c){
-  return c+('A'-'a');
-}
+/* toupper/tolower live in posix.c */
 
 int printf(const char *fmt, ...)
 {
@@ -1126,9 +1124,7 @@ int feof(FILE *f){
    return dexsdk_systemcall(0x52,(int)f,0,0,0,0);
 };
 
-int fstat(FILE *fp,vfs_stat *statbuf){
-   return dexsdk_systemcall(0x58,(int)fp,(int)statbuf,0,0,0);
-};
+/* POSIX fstat() lives in posix.c */
 
 FILE *fopen(const char *filename,const char *s){
    int read=0,write=0,append=0;
@@ -1250,9 +1246,7 @@ int fflush (FILE *stream){
    return dexsdk_systemcall(0x59,(int)stream,0,0,0,0);
 };
 
-char *fseek(FILE* f,long x,int y){
-   return (char*)dexsdk_systemcall(0x41,(int)f,x,y,0,0);
-};
+/* fseek lives in posix.c (POSIX int return) */
 
 long int ftell(FILE *stream){
    return dexsdk_systemcall(0x47,(int)stream,0,0,0,0);
@@ -1322,9 +1316,7 @@ void delay(unsigned int ms){
     dexsdk_systemcall(0x9B,ms,0,0,0,0);
 }
 
-int time(){
-    dexsdk_systemcall(0x55,0,0,0,0,0);
-}
+/* time() lives in posix.c */
 
 void get_date_time(dex32_datetime *datetime){ 
     dexsdk_systemcall(0x53,(int)datetime,0,0,0,0);
@@ -1403,11 +1395,9 @@ int thread_join(int tid){
    return dexsdk_systemcall(0xA1,tid,0,0,0,0);
 }
 
-char *getenv(char *name, char *buff){
-   return dexsdk_systemcall(0x9F,(int)name,(int)buff,0,0,0);
-}
+/* getenv() lives in posix.c (POSIX 1-arg) */
 
-char *setenv(char *name, char *value,int replace){
+int setenv(const char *name, const char *value, int replace){
    return dexsdk_systemcall(0xA0,(int)name,(int)value,(int)replace,0,0);
 }
 

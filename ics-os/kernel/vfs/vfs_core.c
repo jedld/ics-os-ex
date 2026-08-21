@@ -40,6 +40,7 @@ sync_sharedvar vfs_busy; //used for the busy waiting loops inside the vfs
 vfs_node *vfs_searchname(const char *name);
 int file_ok(file_PCB* fhandle); //validates a file handle
 char *showpath(char *s);
+char *getfullpath(vfs_node *node, char *s);
 
 
 /***********************************************************************************
@@ -181,6 +182,8 @@ int vfs_directwrite(char *buf, int itemsize, int n, file_PCB* fhandle)
                 //determine the smallest allocation unit that this filesystem supports
                 //and check if we need more blocks
                 bytes_per_allocation_unit = bridges_call(fs,&fs->getbytesperblock,fhandle->ptr->memid);
+                if (bytes_per_allocation_unit == 0)
+                    return 0;
                 totalblocks=fhandle->ptr->size/bytes_per_allocation_unit+1;
                 neededblocks=(start+size)/bytes_per_allocation_unit+1;
 
@@ -755,17 +758,13 @@ file_PCB *openfilex(char *filename,int mode)
    
 char * vfs_getcwd (char *buffer, unsigned int size)
 {
-    char *workdir_name = current_process->workdir->name;
+    char tmp[256];
     int i;
-    
-    if (buffer==0) return -1;
-    
-    for (i=0;i< (size-1) && workdir_name[i]; i++)
-      {
-          buffer[i] = workdir_name[i];
-      }; 
+    if (buffer==0) return (char*)-1;
+    getfullpath(current_process->workdir, tmp);
+    for (i=0; i < (int)(size-1) && tmp[i]; i++)
+        buffer[i] = tmp[i];
     buffer[i] = 0;
-
     return buffer;
 };
 
@@ -1073,6 +1072,45 @@ int fgetsectors(file_PCB* fhandle)
 };
 
 char *getfullpath(vfs_node *node,char *s);
+
+/* Eager file-backed map: allocate a buffer and fill it from the VFS.
+   This is the mmap path used for executable loading — one contiguous
+   mapping populated via the optimized FAT coalesced reader + block cache.
+   Caller must free() the returned pointer. */
+void *vfs_mapfile(const char *path, DWORD *out_size)
+{
+    file_PCB *f;
+    vfs_stat st;
+    char *buf;
+    DWORD size;
+
+    f = openfilex((char*)path, FILE_READ);
+    if (!f) return 0;
+    fstat(f, &st);
+    size = st.st_size;
+    if (size == 0) {
+        fclose(f);
+        if (out_size) *out_size = 0;
+        return 0;
+    }
+    buf = (char*)malloc(size + 511);
+    if (!buf) {
+        fclose(f);
+        return 0;
+    }
+    /* Prefer a large buffer so VFS goes through vfs_directread. */
+    if (size <= 0x10000)
+        vfs_setbuffer(f, 0, size, FILE_IOFBF);
+    if (fread(buf, size, 1, f) != size) {
+        free(buf);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    if (out_size) *out_size = size;
+    return buf;
+}
+
 /* Copies a file from one location to another, if a file with the same
 name already exists in the destination, fcopy will return an error*/
 int fcopy(char *source, char *dest)

@@ -2,12 +2,14 @@
 @echo Loading Microsoft C runtime library...
 loadmod /icsos/lib1/msvcrt.dll
 @echo Initializing RAM Disk...
-loadmod /icsos/lib1/ramdisk.dll -blocks 10000
+loadmod /icsos/lib1/ramdisk.dll -blocks 30000
 mount fat ramdisk /ramdisk
 rem copy /icsos/apps/ed.exe /ramdisk
 pcut rd: /ramdisk/
 cls
 cd icsos
+set PATH=/icsos/apps
+set SDK_HOME=/icsos/tcc1
 @echo 
 @echo Welcome to the ICS Operating System
 echo

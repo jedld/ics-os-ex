@@ -1,0 +1,13 @@
+TinyCC 0.9.27 (i386 sources only) vendored for ICS-OS self-hosting.
+Upstream: https://bellard.org/tcc/  License: LGPL-2.1
+
+Host build (produces apps/tcc.exe):
+  make -C contrib/tcc && make -C contrib/tcc install
+
+In-OS self-build (requires a working apps/tcc.exe on the image):
+  tccboot
+  # stages sources to /ramdisk, compiles ONE_SOURCE tcc -> /ramdisk/tccnew.exe,
+  # verifies -v and compiling min.c, installs to /icsos/apps/tcc.exe when possible
+
+Automated test:
+  make test-tccboot

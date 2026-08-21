@@ -1083,8 +1083,10 @@ int dex32_thread_join(DWORD threadid){
 
 //wait for a given process given its id
 int dex32_waitpid(int pid,int status){
+   (void)status;
    while (ps_findprocess(pid) != -1)
-      ;  
+      taskswitch();
+   return 0;
 };
 
 

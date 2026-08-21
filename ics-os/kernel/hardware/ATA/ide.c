@@ -605,6 +605,26 @@ const char *ide_identify_partition_type(int part_type)
         };
         
 };
+int ide_partition_get_bytes_per_block()
+{
+   return 512;
+}
+
+int ide_partition_total_blocks()
+{
+   int i;
+   int device_context = devmgr_getcontext();
+
+   for (i = 0; i < ide_total_partition; i++) {
+      if (ide_partitions[i].mydeviceid == device_context) {
+         if (ide_partitions[i].endlba > ide_partitions[i].startlba)
+            return (int)(ide_partitions[i].endlba - ide_partitions[i].startlba);
+         return 0;
+      }
+   }
+   return 0;
+}
+
 //register the partitions in a HD to the device manager
 int ide_registerpartitions(int deviceid)
 {
@@ -641,6 +661,8 @@ int ide_registerpartitions(int deviceid)
                         
                 mypartition.read_block = ide_read_block_partition;
                 mypartition.write_block = ide_write_block_partition;
+                mypartition.get_block_size = ide_partition_get_bytes_per_block;
+                mypartition.total_blocks = ide_partition_total_blocks;
                 //register the partition to the device manager
                 mydeviceid = devmgr_register((devmgr_generic*)&mypartition);
                 

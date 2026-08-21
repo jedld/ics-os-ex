@@ -31,10 +31,10 @@
 
 /*Defines ELF memory resource sizes, increasing the commit memory
   may improve performance.*/
-#define ELF_HEAP_COMMIT 0x10000
-#define ELF_HEAP_RESERVE 0x100000
-#define ELF_STACK_COMMIT 0x10000
-#define ELF_STACK_RESERVE 0x100000
+#define ELF_HEAP_COMMIT 0x800000
+#define ELF_HEAP_RESERVE 0x2000000
+#define ELF_STACK_COMMIT 0x100000
+#define ELF_STACK_RESERVE 0x200000
 
 /*Defines if an ELF module is to be loadad as a USER app or SYSTEM app*/
 #define ELF_USERO 0
@@ -320,10 +320,12 @@ int elf_loadmodule(char *module_name,char *elf_image,
 
 
 
+#ifdef DEBUG_USER_PROCESS
         printf("DEX elf loader:\n");
         printf("entry point: [0x%X], ",elfheader->e_entry);
         printf("number of sections:[%d], ",totalsections);
         printf("number of program headers:[%d]\n",totalheaders);
+#endif
 
   
        //pagedir=pagedir1; //allocate space for the pagedirectory
@@ -375,7 +377,9 @@ int elf_loadmodule(char *module_name,char *elf_image,
     };
     
 
+#ifdef DEBUG_USER_PROCESS
      printf("loading section headers:\n");
+#endif
      if (sectionh)
      {   
         DWORD section_size = 0, section_base_start = 0xFFFFFFFF,
@@ -393,7 +397,9 @@ int elf_loadmodule(char *module_name,char *elf_image,
                section_base_end = sectionh[i].sh_addr + sectionh[i].sh_size;
         };
         
+#ifdef DEBUG_USER_PROCESS
         printf("ELF region 0x%x - 0x%x.\n", section_base_start, section_base_end);
+#endif
         
         dex32_commitblock((DWORD)section_base_start,section_base_end - section_base_start + 0x1000,
                           &pages, pagedir, PG_WR | PG_USER);        
@@ -406,8 +412,10 @@ int elf_loadmodule(char *module_name,char *elf_image,
             void *buf;
             char section_name[255];
             strcpy(section_name, strtbl + sectionh[i].sh_name);
+#ifdef DEBUG_USER_PROCESS
             printf("%s: size [%d], offset [0x%X] load [0x%X].. ",
                     section_name,sectionh[i].sh_size,sectionh[i].sh_offset,sectionh[i].sh_addr);
+#endif
                     
             
             //check if we have a symbol table                
@@ -434,7 +442,9 @@ int elf_loadmodule(char *module_name,char *elf_image,
                            DWORD file_offset = (DWORD)elf_image + (DWORD)sectionh[i].sh_offset;
                            //copy section data to the buffer           
                            memcpy(sectionh[i].sh_addr, file_offset, sectionh[i].sh_size);
+#ifdef DEBUG_USER_PROCESS
                            printf("loaded [0x%X].", file_offset);
+#endif
                        }
                            else /*a .bss section?*/
                        if (sectionh[i].sh_size!=0)
@@ -444,12 +454,15 @@ int elf_loadmodule(char *module_name,char *elf_image,
                        
 
                  }
+#ifdef DEBUG_USER_PROCESS
             printf("\n");
+#endif
           };
      };     
      
      
      //attempt to interpret the symbol table
+#ifdef DEBUG_USER_PROCESS
      if (symtable!=0)
      {
            int i2;
@@ -474,11 +487,14 @@ int elf_loadmodule(char *module_name,char *elf_image,
                               };                        
                       };
     };
+#endif
                
      //we are done loading section headers, now we try to load the program headers
      if (programh)
      {
+#ifdef DEBUG_USER_PROCESS
        printf("Loading Program headers ..\n");
+#endif
        
        
        for (i=0;i<totalheaders;i++)
@@ -489,12 +505,12 @@ int elf_loadmodule(char *module_name,char *elf_image,
             //This must be a loadable segment
             if (programh[i].p_type == PT_LOAD)
             {
-                   DWORD section_base_addr;     
+#ifdef DEBUG_USER_PROCESS
                    printf("virtual address: [0x%X] ",programh[i].p_vaddr);
                    printf("file offset: [0x%X] \n",programh[i].p_offset);           
                    printf("Size in memory : %d ", programh[i].p_memsz);
                    printf("Size in file   : %d \n",programh[i].p_filesz); 
-
+#endif
             }
               else
             if (programh[i].p_type == PT_DYNAMIC)  
@@ -523,7 +539,9 @@ int elf_loadmodule(char *module_name,char *elf_image,
         {
          DWORD flags;
          dex32_stopints(&flags);
+#ifdef DEBUG_USER_PROCESS
          printf("executing entrypoint at (0x%x)..\n", (DWORD) entrypoint);
+#endif
          ret = createprocess(entrypoint,module_name,pagedir,memptr,stackloc,
                                  1000,SYSCALL_STACK,0,p,workdir,parent);
          dex32_freeuserpagetable(pagedir1);

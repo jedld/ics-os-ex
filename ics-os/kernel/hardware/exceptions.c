@@ -34,7 +34,6 @@ void GPFhandler(DWORD address)
     exc_recover();
         
     while (1) {};
-    startints();
 
   };
   
@@ -95,7 +94,7 @@ void exc_dumpflags(DEX32_DDL_INFO *output, DWORD flags)
 void exc_showdump(DWORD location,int type,DWORD pf_info)
 {
    int ret;
-   char fault_type[25];
+   char fault_type[80];
    DWORD pageentry,direntry,ktopheap = knext;
    DEX32_DDL_INFO *beforeout,*showdumpout;
 
@@ -165,30 +164,30 @@ void exc_showdump(DWORD location,int type,DWORD pf_info)
              get_function_name(current_process->context,current_process->function));
 
 
-   if (current_process->op_success==1) DDLprintf(&showdumpout,"syscall terminated normally\n");
+   if (current_process->op_success==1)    DDLprintf(&showdumpout,"syscall terminated normally\n");
       else
       {
          DDLprintf(&showdumpout,"Fault occured during system call.\n");
       };
-      
-   DDLprintf(&showdumpout,"Press any key to continue...");
-   
-   disable_taskswitching();
-   startints();
-   kb_pause();
 
-   //return to the previous screen
+   /* Always copy a compact dump to COM1 so headless qemu tests can see
+      faults. Do not wait for a key — kb_pause() hangs -display none. */
+   {
+      char line[160];
+      sprintf(line, "%s process=%s eip=0x%x loc=0x%x\n",
+              fault_type, current_process->name,
+              current_process->regs.EIP, location);
+      serial_puts(line);
+   }
+
    Dex32SetActiveDDL(beforeout);
   
    #else
       printf("%s\n",fault_type);
       printf("faulting process                       :%s\n",current_process->name);
       printf("Tried to access invalid memory location: 0x%x\n",location);
-      printf("Fault occured during system call. This might be a bug.\n");
-      printf("System halted for protection purposes\n.");
-      printf("Page directory entry at that address is: 0x%x\n",ret);
+      printf("Page directory entry at that address is: 0x%x\n",pageentry);
       printf("Address of faulting instruction is     : 0x%x\n",current_process->regs.EIP);
-      while(1){};
    #endif
    
    stopints();

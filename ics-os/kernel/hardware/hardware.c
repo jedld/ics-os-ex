@@ -119,3 +119,19 @@ void getcpumodel(char *s)
 
 
 ;};
+
+/* Reboot via the keyboard controller, then QEMU ACPI/debug ports. */
+void machine_reboot(void)
+{
+   unsigned char good = 0x02;
+   int i;
+   printf("ICS-OS: rebooting...\n");
+   for (i = 0; i < 100000 && (good & 0x02); i++)
+      good = inportb(0x64);
+   outportb(0x64, 0xFE);
+   outportw(0x604, 0x2000);
+   outportb(0x501, 0);
+   while (1)
+      asm volatile ("hlt");
+};
+

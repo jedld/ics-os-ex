@@ -9,6 +9,7 @@ int _start(){
    char params[500];
    
    getparameters(params);
+   printf("[start] %s\n", params);
    
    s=strtok(params," ");
    

@@ -15,7 +15,7 @@ bzImage: all
 
 all: obj Kernel32.bin
 
-obj: scheduler.o fat.o iso9660.o devfs.o iomgr.o devmgr_error.o kernel32.o \
+obj: scheduler.o fat.o iso9660.o devfs.o iomgr.o blkcache.o devmgr_error.o kernel32.o \
 		startup.o asmlib.o irqwrap.o 
 	#strip --strip-debug *.o
 		
@@ -41,22 +41,25 @@ iso9660.o:
 devfs.o:
 	$(CC) $(CFLAGS) -o devfs.o filesystem/devfs.c
 	
-iomgr.o: iomgr/iosched.c iomgr/iosched.h stdlib/time.h
+iomgr.o: iomgr/iosched.c iomgr/iosched.h stdlib/time.h iomgr/blkcache.h
 	$(CC) $(CFLAGS) -o iomgr.o iomgr/iosched.c
+
+blkcache.o: iomgr/blkcache.c iomgr/blkcache.h
+	$(CC) $(CFLAGS) -o blkcache.o iomgr/blkcache.c
 	
 devmgr_error.o:
 	$(CC) $(CFLAGS) -o devmgr_error.o devmgr/devmgr_error.c
 
-startup.o:
-	$(ASM) $(ASMFLAGS) -o startup.o startup/startup.asm
+startup.o: startup/startup.S
+	$(CC) $(CFLAGS) -o startup.o startup/startup.S
 	
-asmlib.o:
-	$(ASM) $(ASMFLAGS) -o asmlib.o startup/asmlib.asm 
+asmlib.o: startup/asmlib.S
+	$(CC) $(CFLAGS) -o asmlib.o startup/asmlib.S
 
-irqwrap.o:
-	$(ASM) $(ASMFLAGS) -o irqwrap.o irqwrap.asm
+irqwrap.o: irqwrap.S
+	$(CC) $(CFLAGS) -o irqwrap.o irqwrap.S
 	
-Kernel32.bin: startup.o asmlib.o kernel32.o scheduler.o iomgr.o fat.o iso9660.o \
+Kernel32.bin: startup.o asmlib.o kernel32.o scheduler.o iomgr.o blkcache.o fat.o iso9660.o \
 		devfs.o irqwrap.o devmgr_error.o
 	ld $(LDFLAGS) -Map mapfile.txt
 
