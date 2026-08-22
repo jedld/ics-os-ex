@@ -473,8 +473,11 @@ int loadroot(fatdirentry **buf,const BPB *bpbblock,int id)
    int blockloc=bpbblock->sectors_per_fat*bpbblock->num_fats+
    bpbblock->num_boot_sectors;
    
-   int sector=sizeof(fatdirentry)*bpbblock->num_root_dir_ents/
-   bpbblock->bytes_per_sector;
+   /* FAT directory entries are always 32 bytes on disk; do not use
+      sizeof(fatdirentry) which can exceed 32 with compiler bitfield packing. */
+   int sector=((bpbblock->num_root_dir_ents * 32) +
+               (bpbblock->bytes_per_sector - 1)) /
+              bpbblock->bytes_per_sector;
    int i;
    DWORD handle;
    
@@ -810,8 +813,10 @@ DWORD update_dirs(BPB *bpbblock,vfs_node *tdir,BYTE *fat,int id)
           blockloc=fat_sectors_per_fat(bpbblock)*bpbblock->num_fats+
           bpbblock->num_boot_sectors;
           
-          sector=sizeof(fatdirentry)*bpbblock->num_root_dir_ents/
-          bpbblock->bytes_per_sector;
+          /* On-disk FAT dirents are 32 bytes; sizeof(fatdirentry) may be larger. */
+          sector=((bpbblock->num_root_dir_ents * 32) +
+                  (bpbblock->bytes_per_sector - 1)) /
+                 bpbblock->bytes_per_sector;
           
           //queue the WRITE request
           DWORD handle=dex32_requestIO(id,IO_WRITE,blockloc,sector,dir);
@@ -1187,9 +1192,9 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
       if (dir[i].name[0]==0xe5 ||
       dir[i].name[0]==0x00)
       {
-         int spacemode=0;
-         dex32_datetime d;
          dos_date dosdate;
+         dex32_datetime d;
+         int spacemode=0;
          
          if (dir[i].name[0]==0x00)
          {
@@ -1223,9 +1228,10 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
          f->date_created=d;
          f->date_modified=d;
          
-         dosdate.year=(d.year-1980)&0x7f;
-         dosdate.date=d.day;
-         dosdate.month=d.month;
+         /* DOS date: YYYYYYYMMMMDDDDD */
+         dosdate = (dos_date)((((d.year - 1980) & 0x7f) << 9) |
+                              ((d.month & 0xf) << 5) |
+                              (d.day & 0x1f));
          
          dir[i].cdate=dosdate; //store the date created
          dir[i].mdate=dosdate; //store the date modified
@@ -1526,18 +1532,16 @@ int fat_mount(vfs_node *mountpoint,fatdirentry *buf2,BPB *bpb,int id)
             node->start_sector = buf2[i].st_clust;
             //convert from DOS date format to dex32 VFS date format
             d=buf2[i].cdate; //The date created
-            
-            node->date_created.day=d.date&0x1f;
-            node->date_created.year=d.year&0x7f;
-            node->date_created.year+=1980;
-            node->date_created.month=d.month&0xf;
+            /* DOS date: YYYYYYYMMMMDDDDD */
+            node->date_created.day=d & 0x1f;
+            node->date_created.month=(d >> 5) & 0xf;
+            node->date_created.year=((d >> 9) & 0x7f) + 1980;
             
             d=buf2[i].mdate; //The date modified
             
-            node->date_modified.day=d.date&0x1f;
-            node->date_modified.year=d.year&0x7f;
-            node->date_modified.year+=1980;
-            node->date_modified.month=d.month&0xf;
+            node->date_modified.day=d & 0x1f;
+            node->date_modified.month=(d >> 5) & 0xf;
+            node->date_modified.year=((d >> 9) & 0x7f) + 1980;
             
             node->misc=&buf2[i];
             node->miscsize=0;

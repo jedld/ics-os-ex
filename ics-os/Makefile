@@ -164,22 +164,67 @@ test-smp: vmdex
 	@! grep -aq "General Protection fault" /tmp/icsos-smp.log
 	@echo "test-smp PASS"
 
-# Boot, compile hello.c with in-OS TinyCC, run it, then reboot.
-# NOTE: i386 TinyCC selfhost is paused on the x86_64 kernel; test kept for later port.
-test-selfhost: apps
-	@echo "SKIP: i386 TinyCC selfhost paused until x86_64 TCC port"
-	@false
+# Boot, compile min.c/hello.c with in-OS TinyCC (ELF64), run them, reboot.
+test-selfhost: apps vmdex
+	@echo "Building Multiboot2 ISO for x86_64 TinyCC selfhost..."
+	@mkdir -p /tmp/icsos-selfhost-iso/boot/grub /tmp/icsos-selfhost-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-selfhost-iso/vmdex
+	@cp apps/tcc.exe /tmp/icsos-selfhost-iso/apps/tcc.exe
+	@cp contrib/selfhost/min.c contrib/selfhost/hello.c \
+		contrib/selfhost/tinyio.c contrib/selfhost/tinycrt.c \
+		/tmp/icsos-selfhost-iso/apps/
+	@printf '%s\n' 'set PATH=/icsos/apps' 'selfhost' 'reboot' \
+		> /tmp/icsos-selfhost-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-selfhost-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-selfhost.iso /tmp/icsos-selfhost-iso >/dev/null 2>&1
+	@echo "Running self-host test (TinyCC inside ICS-OS)..."
+	@-timeout 300 $(QEMU_X64) -smp 1 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-selfhost.iso -boot d > /tmp/icsos-selfhost.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-selfhost.log
+	@grep -aq "ramdisk: mounted" /tmp/icsos-selfhost.log
+	@grep -aq "SELFHOST_TEST_PASS" /tmp/icsos-selfhost.log
+	@! grep -aq "SELFHOST_TEST_FAIL" /tmp/icsos-selfhost.log
+	@echo "test-selfhost PASS"
 
 # Boot and run the I/O / block-cache microbenchmark.
 test-iobench: apps
 	@echo "SKIP: iobench needs stable disk_mgr on x86_64 (follow-up)"
 	@false
 
-# Boot, rebuild TinyCC with itself inside ICS-OS (long-running).
-test-tccboot: apps
-	@echo "SKIP: tccboot paused on x86_64 kernel"
-	@false
-
+# Boot, rebuild TinyCC with itself inside ICS-OS (Multiboot2 ISO).
+# Packs an 8.3-renamed TinyCC tree as one ustar so staging is a single CD read.
+test-tccboot: apps vmdex
+	@echo "Building 8.3 TinyCC source tree + tccsrc.tar..."
+	@chmod +x scripts/stage-tcc-short.sh
+	@scripts/stage-tcc-short.sh /tmp/icsos-tcc-short
+	@tar --format=ustar -C /tmp/icsos-tcc-short -cf /tmp/icsos-tccsrc.tar .
+	@echo "Building Multiboot2 ISO for x86_64 TinyCC self-build (tccboot)..."
+	@rm -rf /tmp/icsos-tccboot-iso
+	@mkdir -p /tmp/icsos-tccboot-iso/boot/grub \
+		/tmp/icsos-tccboot-iso/apps \
+		/tmp/icsos-tccboot-iso/tcc1 \
+		/tmp/icsos-tccboot-iso/include
+	@cp kernel/Kernel64.bin /tmp/icsos-tccboot-iso/vmdex
+	@cp apps/tcc.exe /tmp/icsos-tccboot-iso/apps/tcc.exe
+	@cp contrib/selfhost/min.c /tmp/icsos-tccboot-iso/apps/min.c
+	@cp /tmp/icsos-tccsrc.tar /tmp/icsos-tccboot-iso/tccsrc.tar
+	@cp sdk/tccsdk.c sdk/posix.c sdk/libtcc1.c sdk/crt1.c sdk/setjmp.c \
+		/tmp/icsos-tccboot-iso/tcc1/
+	@cp -a sdk/include/. /tmp/icsos-tccboot-iso/include/
+	@printf '%s\n' 'set PATH=/icsos/apps' 'set SDK_HOME=/icsos/tcc1' \
+		'tccboot' 'reboot' > /tmp/icsos-tccboot-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-tccboot-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-tccboot.iso /tmp/icsos-tccboot-iso >/dev/null 2>&1
+	@echo "Running tccboot test (KVM)..."
+	@-timeout 900 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+		-cdrom /tmp/icsos-tccboot.iso -boot d > /tmp/icsos-tccboot.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-tccboot.log
+	@grep -aq "ramdisk: mounted" /tmp/icsos-tccboot.log
+	@grep -aq "TCCBOOT_TEST_PASS" /tmp/icsos-tccboot.log
+	@! grep -aq "TCCBOOT_TEST_FAIL" /tmp/icsos-tccboot.log
+	@echo "test-tccboot PASS"
 # Faster check: boot and exec the host-built hello.exe from the CD root.
 test-exec: kernel/Kernel64.bin apps/hello.exe
 	@echo "Building Multiboot2 ISO with hello.exe for exec smoke test..."

@@ -6,11 +6,9 @@ Modern real-world operating systems are too complex to be taught to undergraduat
 
 Thus, this project aims to develop a simple yet operational instructional operating system for teaching undergraduate operating systems courses. ICS-OS is a fork of <a href='http://sourceforge.net/projects/dex-os'>DEX-OS</a> by Joseph Dayo.
 
-ICS-OS remains a 32-bit protected-mode kernel. It boots on 64-bit (AMD64) PCs in legacy/compatibility mode via GRUB, including from a USB thumb drive that is then mounted as the root filesystem.
+This tree (`ics-os-ex`) is an **x86-64 long-mode** instructional kernel. It boots via GRUB **Multiboot2**, uses **software context switching**, **LAPIC/SMP**, **ISO9660 CD root**, **ELF64 user executables**, and an in-OS **x86_64 TinyCC** that can compile and run programs (`make test-selfhost`).
 
-This tree (`ics-os-ex`) extends the instructional base with an **x86-64 long-mode kernel**, **software context switching**, **LAPIC/SMP**, **in-OS TinyCC** (i386 selfhost paused on 64-bit), a **POSIX-ish user libc**, **FAT32/IDE/USB I/O performance work**, and **ELF executable loading**.
-
-See [ics-os/docs/smp-longmode.md](ics-os/docs/smp-longmode.md) for the long-mode / SMP design notes.
+The historical DEX/ICS-OS 32-bit path is not the active kernel. See [ics-os/docs/smp-longmode.md](ics-os/docs/smp-longmode.md) for long-mode / SMP notes.
 
 ## Downloads
 
@@ -57,16 +55,26 @@ Headless smoke tests (serial console, no VGA window):
 ```
 $ make test-boot          # Multiboot2 CD: serial + Root mount [OK]
 $ make test-smp           # QEMU -smp 2, LAPIC AP bring-up + work-steal
-$ make test-exec          # load host-built hello.exe (ELF64 CRT)
-$ make test-integration   # runs test-boot + test-smp + test-exec
-# or: ./scripts/run-integration-tests.sh
-# make test-selfhost      # paused: needs x86_64 TinyCC port
-$ make test-iobench       # file I/O / block-cache microbenchmark
+$ make test-exec          # host-built hello.exe (ELF64 CRT)
+$ make test-selfhost      # in-OS TinyCC compiles min.c + hello.c, then runs them
+$ make test-integration   # test-boot + test-smp + test-exec
+# make test-tccboot       # in-OS rebuild of TinyCC (staging works; full ONE_SOURCE still slow/hangs)
+# make test-iobench       # skipped until disk_mgr is stable on x86_64
 ```
 
 Agent/contributor notes: see [AGENTS.md](AGENTS.md).
 
-The kernel is **ELF64** and boots via GRUB `multiboot2` on the USB image (QEMU `-kernel` cannot load this image).
+The kernel is **ELF64** and boots via GRUB `multiboot2`. QEMU `-kernel` cannot load this image — use an ISO or USB image.
+
+Interactive VGA (GUI) boot for manual testing:
+
+```
+$ qemu-system-x86_64 -smp 2 -m 256M -display gtk \
+    -cdrom /tmp/icsos-gui.iso -boot d
+```
+
+(`make boot-usb-amd64` also opens a QEMU window from `ics-os-usb.img`.)
+
 Write `ics-os-usb.img` to a physical thumb drive (BIOS/CSM firmware can boot it as a disk; the kernel also has a UHCI USB mass-storage driver):
 
 ```
@@ -97,7 +105,7 @@ $ make boot-livecd
 
 ### Using Docker to build
 
-ICS-OS is a 32-bit operating system and requires a 32-bit toolchain (`gcc -m32`). You need to install
+Docker is optional. The active kernel is **64-bit**; a 32-bit toolchain is only needed for leftover i386 bits. You need to install
 [docker](https://docs.docker.com/engine/install/ubuntu/) and [docker-compose](https://docs.docker.com/compose/install/)
 to build inside a container.
 
@@ -128,17 +136,21 @@ to set up the build environment.
 ### x86-64 long mode and SMP
 
 - Kernel builds as **ELF64** (`-m64`, `lscript64.ld`) and enters long mode from a Multiboot2 32-bit stub.
-- **Software context switch** + `fxsave` (no hardware TSS task switching).
+- **Software context switch** + `fxsave`/`fxrstor` (no hardware TSS task switching).
 - **Priority round-robin** scheduler with a spinlock-protected ready queue.
-- **LAPIC** init/timer/EOI and **AP bring-up** (`make test-smp` with `-smp 2`).
+- **LAPIC** init/timer/EOI and **AP bring-up**; APs unpark after root mount and work-steal (`make test-smp` with `-smp 2`).
+- User processes / console / `fg_mgr` are BSP-pinned today; APs run migratable kthreads.
 
-### In-OS TinyCC and self-hosting
+### Userland, TinyCC, and self-hosting
 
-- Vendored **TinyCC 0.9.27** (i386) under `ics-os/contrib/tcc/` — **selfhost paused** on the x86_64 kernel until an x86_64 TCC port.
-- POSIX-oriented user headers in `ics-os/sdk/include/` plus `posix.c`, `setjmp.c`, and the existing DexSDK.
-- Host apps build as **ELF64** (`sdk/app.mk`).
-- Console commands: `selfhost`, `exectest`, `iobench`, `cc`, `kbuild`, `tccboot` (selfhost/tccboot need 64-bit TCC).
-- Staging script `scripts/stage-selfhost.sh` copies compiler sources, SDK headers, and kernel sources onto the USB image.
+- Host apps and in-OS binaries are **ELF64** (`sdk/app.mk`).
+- Vendored **TinyCC 0.9.27** with an **x86_64 backend** (`contrib/tcc/x86_64-gen.c`, `x86_64-link.c`).
+- SDK is LP64 (`sdk/include/`, `tccsdk.c`, `posix.c`, `crt1.c`); x86_64 `va_list` uses compiler builtins.
+- **In-kernel FAT16 ramdisk** at `/ramdisk` for writable compile output (CD is read-only).
+- `make test-selfhost` stages `tcc.exe` + sources onto `/ramdisk`, compiles `min.c` and `hello.c` inside the OS, and runs them (`SELFHOST_TEST_PASS`).
+- Console commands: `selfhost`, `exectest`, `tccboot`, `iobench`, `cc`.
+- `make test-tccboot` stages an 8.3-renamed TinyCC tree (`tccsrc.tar`) onto ramdisk; the in-OS ONE_SOURCE rebuild of TinyCC itself is not green yet.
+- ISO9660 multi-sector directories skip sector padding (large dirs such as `/src/tcc` list all files).
 
 ### I/O performance
 

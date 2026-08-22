@@ -990,6 +990,31 @@ void dex32copyblock(DWORD vdest,DWORD vsource,DWORD pages,DWORD *pagedir)
    };
 
 
+void dex32_restore_identity_map(void)
+{
+#ifdef __x86_64__
+   extern u64 boot_pd0[], boot_pd1[], boot_pd2[], boot_pd3[];
+   extern u64 boot_pml4[];
+   u64 *pds[4];
+   u64 phys = 0;
+   int pd, i;
+
+   /* User processes currently run in kernel CS and can corrupt the boot
+      2MiB identity map (e.g. clear R/W). Reinstall P|RW|PS before each exec. */
+   pds[0] = boot_pd0;
+   pds[1] = boot_pd1;
+   pds[2] = boot_pd2;
+   pds[3] = boot_pd3;
+   for (pd = 0; pd < 4; pd++) {
+      for (i = 0; i < 512; i++) {
+         pds[pd][i] = phys | 0x83ULL; /* present | writable | page-size */
+         phys += 0x200000ULL;
+      }
+   }
+   __asm__ volatile ("mov %0, %%cr3" :: "r"((unsigned long)(uintptr)boot_pml4) : "memory");
+#endif
+}
+
 void mem_init()
 {
 #ifdef __x86_64__

@@ -130,15 +130,18 @@ DWORD totalgdtentries=10;
 /*====================The DEX Memory Map==========================================*/
 
 #ifdef __x86_64__
-/* Identity-mapped long mode: keep kernel heap inside physical RAM. */
+/* Identity-mapped long mode: keep kernel heap inside physical RAM.
+   User heap grows up from userheap; user stack grows down from
+   userstackloc. Leave a gap so large compilers (TinyCC) do not collide. */
 char *kbaseheap=(char*)0x03000000;
 char *kmodeproc=(char*)0x05000000,
      *kmodeproc_next=(char*)0x05000000;
-char *lmodeproc=(char*)0x06000000,
-     *lmodeproc_next= (char*)0x06000000;
+/* Keep above ELF64's default 2MiB-aligned .data at 0x600000 (TCC). */
+char *lmodeproc=(char*)0x10000000,
+     *lmodeproc_next= (char*)0x10000000;
 char *knext=          (char*)0x03000000;
-char *userstackloc=   (char*)0x0B000000;
-char *userheap=       (char*)0x0A000000;
+char *userstackloc=   (char*)0x0E000000;  /* stack grows down (2MB) */
+char *userheap=       (char*)0x0A000000;  /* heap grows up; ~64MB before stack */
 char *syscallstack=   (char*)0x09000000;
 char *linux_userspace=(char*)0x08000000;
 char *sharedmemloc=   (char*)0x07000000;
@@ -221,6 +224,7 @@ int  maplineartophysical2(unsigned int *pagedir,unsigned int linearaddr,
 DWORD xmaplineartophysical(const DWORD linearmemory,const DWORD physicalmemory,
    DWORD *pagedir,const DWORD attb);
 void mem_init();
+void dex32_restore_identity_map(void);
 DWORD *mempop();
 void mempush(DWORD mem);
 DWORD obtainpage();

@@ -369,9 +369,12 @@ int ide_cdromreadsectors(int interface,int dev,DWORD lba,DWORD sectors, char *bu
 {
    ide_cdrom_read_packet atapi_packet;
    ide_cdrom_seek atapi_seek_packet;
-   ide_cdrom_readCD_packet atapi_read_packet;
    
-   int base,i,stat;
+   int base,stat;
+   DWORD done = 0;
+   /* ATAPI transfers fail or hang when too large; chunk like HDD PIO. */
+   const DWORD max_sectors = 16;
+
    if (interface == 0) base = 0x1f0;
               else 
                        base = 0x170;
@@ -381,28 +384,38 @@ int ide_cdromreadsectors(int interface,int dev,DWORD lba,DWORD sectors, char *bu
       
    atapi_seek_packet.opcode = 0x00;
    stat = reg_packet(dev,12, SYS_DATA_SEL,&atapi_seek_packet,0,0,SYS_DATA_SEL,0);
-   
-   printf("status returned: =%d\n",stat);   
-   //prepare the ATAPI packet command
-   memset( &atapi_packet, 0, sizeof(ide_cdrom_read_packet));
-   atapi_packet.opcode = 0x28;   //read command
-   
-   //ATAPI lba address format and blocks seems to be in BIG endian... so we have to make
-   //the necessary conversion
- 
-   atapi_packet.lba_address[0] = (lba & 0xFF000000) >> 24;
-   atapi_packet.lba_address[1] = (lba & 0x00FF0000) >> 16;
-   atapi_packet.lba_address[2] = (lba & 0x0000FF00) >> 8;
-   atapi_packet.lba_address[3] = lba & 0xFF;
-   
-   atapi_packet.blocks[0] = (sectors & 0x0000FF00) >> 8;
-   atapi_packet.blocks[1] = (sectors & 0xFF);
-   
-   if (reg_packet(dev,12, SYS_DATA_SEL,&atapi_packet,0,(long)sectors * 2048,
-          SYS_DATA_SEL,(unsigned int)(uintptr)buffer)!=0) {
-      printf("read failure!\n");
-      return -1;
-   };
+   (void)stat;
+
+   while (sectors > 0) {
+      DWORD chunk = sectors > max_sectors ? max_sectors : sectors;
+      DWORD cur = lba + done;
+      int tries, rc = -1;
+
+      for (tries = 0; tries < 3; tries++) {
+         memset( &atapi_packet, 0, sizeof(ide_cdrom_read_packet));
+         atapi_packet.opcode = 0x28;   //read command
+         atapi_packet.lba_address[0] = (cur & 0xFF000000) >> 24;
+         atapi_packet.lba_address[1] = (cur & 0x00FF0000) >> 16;
+         atapi_packet.lba_address[2] = (cur & 0x0000FF00) >> 8;
+         atapi_packet.lba_address[3] = cur & 0xFF;
+         atapi_packet.blocks[0] = (chunk & 0x0000FF00) >> 8;
+         atapi_packet.blocks[1] = (chunk & 0xFF);
+
+         rc = reg_packet(dev,12, SYS_DATA_SEL,&atapi_packet,0,(long)chunk * 2048,
+                SYS_DATA_SEL,(unsigned int)(uintptr)(buffer + done * 2048));
+         if (rc == 0)
+            break;
+         /* Soft-reset-ish: TEST UNIT READY before retry. */
+         atapi_seek_packet.opcode = 0x00;
+         reg_packet(dev,12, SYS_DATA_SEL,&atapi_seek_packet,0,0,SYS_DATA_SEL,0);
+      }
+      if (rc != 0) {
+         printf("read failure!\n");
+         return 0;  /* iosched treats non-zero as success */
+      }
+      done += chunk;
+      sectors -= chunk;
+   }
    
    return 1;
 };

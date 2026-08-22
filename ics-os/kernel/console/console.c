@@ -165,33 +165,110 @@ static int tccboot_copy1(const char *src, const char *dst)
    return 1;
 }
 
-/* Stage TinyCC + SDK sources onto the ramdisk for a fast self-build. */
+/* Write a small text file (TCC @response list). */
+static int tccboot_writefile(const char *path, const char *text)
+{
+   file_PCB *f;
+   int n = strlen(text);
+   f = openfilex((char*)path, FILE_WRITE);
+   if (!f) {
+      printf("tccboot: cannot create %s\n", path);
+      return 0;
+   }
+   if (fwrite((char*)text, n, 1, f) != n) {
+      printf("tccboot: write failed %s\n", path);
+      fclose(f);
+      return 0;
+   }
+   fclose(f);
+   return 1;
+}
+
+/* Minimal ustar extract: regular files only, into destdir/. */
+static int tccboot_untar(const char *tar, DWORD tarsize, const char *destdir)
+{
+   DWORD off = 0;
+   while (off + 512 <= tarsize) {
+      const char *hdr = tar + off;
+      char name[120], path[256];
+      DWORD fsize = 0, i, nwrite;
+      file_PCB *f;
+      const unsigned char *p;
+
+      off += 512;
+      if (hdr[0] == 0)
+         break;
+      if (hdr[156] == '5' || hdr[156] == '2')
+         continue;
+      if (hdr[156] != '0' && hdr[156] != 0)
+         continue;
+
+      memset(name, 0, sizeof(name));
+      memcpy(name, hdr, 100);
+      if (name[0] == '.' && name[1] == '/')
+         memmove(name, name + 2, strlen(name + 2) + 1);
+      if (name[0] == 0)
+         continue;
+
+      p = (const unsigned char *)(hdr + 124);
+      for (i = 0; i < 11 && p[i]; i++) {
+         if (p[i] >= '0' && p[i] <= '7')
+            fsize = (fsize << 3) + (p[i] - '0');
+      }
+
+      if (off + fsize > tarsize) {
+         printf("tccboot: tar truncated (%s)\n", name);
+         return 0;
+      }
+
+      sprintf(path, "%s/%s", destdir, name);
+      printf("  extract %s (%u)\n", path, (unsigned)fsize);
+      f = openfilex(path, FILE_WRITE);
+      if (!f) {
+         printf("tccboot: cannot create %s\n", path);
+         return 0;
+      }
+      if (fsize) {
+         nwrite = fwrite((char*)(tar + off), (int)fsize, 1, f);
+         if (nwrite != fsize) {
+            printf("tccboot: write failed %s\n", path);
+            fclose(f);
+            return 0;
+         }
+      }
+      fclose(f);
+      off += (fsize + 511) & ~511U;
+   }
+   return 1;
+}
+
+/* Stage via one ISO tar map (avoids many ATAPI opens). */
 static int tccboot_stage(void)
 {
-   static const char *tcc_files[] = {
-      "tcc.c", "tcc.h", "config.h", "libtcc.c", "libtcc.h",
-      "tccpp.c", "tccgen.c", "tccelf.c", "tccrun.c", "tccasm.c", "tcctools.c",
-      "i386-gen.c", "i386-link.c", "i386-asm.c", "i386-asm.h", "i386-tok.h",
-      "tcctok.h", "stab.h", "stab.def", "elf.h",
-      0
-   };
    static const char *sdk_files[] = {
       "tccsdk.c", "posix.c", "libtcc1.c", "crt1.c", "setjmp.c",
       0
    };
    char src[256], dst[256];
+   char *tarbuf;
+   DWORD tarsize;
    int i;
 
    mkdir("/ramdisk/tcc");
    mkdir("/ramdisk/sdk");
 
-   printf("tccboot: staging TinyCC sources to /ramdisk/tcc\n");
-   for (i = 0; tcc_files[i]; i++) {
-      sprintf(src, "/icsos/src/tcc/%s", tcc_files[i]);
-      sprintf(dst, "/ramdisk/tcc/%s", tcc_files[i]);
-      if (!tccboot_copy1(src, dst))
-         return 0;
+   printf("tccboot: loading /icsos/tccsrc.tar\n");
+   tarbuf = (char*)vfs_mapfile("/icsos/tccsrc.tar", &tarsize);
+   if (!tarbuf || tarsize < 512) {
+      printf("tccboot: cannot map tccsrc.tar\n");
+      return 0;
    }
+   printf("tccboot: extracting %u bytes to /ramdisk/tcc\n", (unsigned)tarsize);
+   if (!tccboot_untar(tarbuf, tarsize, "/ramdisk/tcc")) {
+      free(tarbuf);
+      return 0;
+   }
+   free(tarbuf);
 
    printf("tccboot: staging SDK to /ramdisk/sdk\n");
    for (i = 0; sdk_files[i]; i++) {
@@ -200,28 +277,49 @@ static int tccboot_stage(void)
       if (!tccboot_copy1(src, dst))
          return 0;
    }
+
+   if (!tccboot_copy1("/icsos/apps/tcc.exe", "/ramdisk/tcc.exe") ||
+       !tccboot_copy1("/icsos/apps/min.c", "/ramdisk/min.c"))
+      return 0;
    return 1;
 }
 
 /* Rebuild TinyCC using the host-built in-OS tcc.exe. */
 static int tccboot_run(void)
 {
-   char cmd[768];
+   static const char rsp[] =
+      "-nostdlib\n"
+      "-static\n"
+      "-w\n"
+      "-DTCC_TARGET_X86_64\n"
+      "-DONE_SOURCE\n"
+      "-DCONFIG_TCC_STATIC\n"
+      "-nostdinc\n"
+      "-I/ramdisk/tcc\n"
+      "-I/icsos/include\n"
+      "-I/icsos/tcc1\n"
+      "-o/ramdisk/tccnew.exe\n"
+      "/ramdisk/tcc/tcc.c\n"
+      "/ramdisk/sdk/tccsdk.c\n"
+      "/ramdisk/sdk/posix.c\n"
+      "/ramdisk/sdk/libtcc1.c\n"
+      "/ramdisk/sdk/crt1.c\n"
+      "/ramdisk/sdk/setjmp.c\n";
+   char cmd[128];
 
-   if (!tccboot_stage())
+   if (!tccboot_stage()) {
+      printf("TCCBOOT_TEST_FAIL stage\n");
       return 0;
+   }
+
+   if (!tccboot_writefile("/ramdisk/tccboot.rsp", rsp)) {
+      printf("TCCBOOT_TEST_FAIL rsp\n");
+      return 0;
+   }
 
    printf("tccboot: compiling TinyCC (ONE_SOURCE) — this takes a while\n");
-   sprintf(cmd,
-           "/icsos/apps/tcc.exe -nostdlib -static -w "
-           "-DTCC_TARGET_I386 -DONE_SOURCE -DCONFIG_TCC_STATIC "
-           "-nostdinc -I/ramdisk/tcc -I/icsos/include -I/icsos/tcc1 "
-           "-o/ramdisk/tccnew.exe "
-           "/ramdisk/tcc/tcc.c "
-           "/ramdisk/sdk/tccsdk.c /ramdisk/sdk/posix.c "
-           "/ramdisk/sdk/libtcc1.c /ramdisk/sdk/crt1.c /ramdisk/sdk/setjmp.c");
-
-   if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
+   sprintf(cmd, "/ramdisk/tcc.exe @/ramdisk/tccboot.rsp");
+   if (!user_execp("/ramdisk/tcc.exe", 0, cmd)) {
       printf("TCCBOOT_TEST_FAIL compile\n");
       return 0;
    }
@@ -234,8 +332,7 @@ static int tccboot_run(void)
 
    printf("tccboot: tccnew compiling min.c\n");
    sprintf(cmd,
-           "/ramdisk/tccnew.exe -nostdlib -static "
-           "-o/ramdisk/min2.exe /icsos/apps/min.c");
+           "/ramdisk/tccnew.exe -nostdlib -static -o/ramdisk/min2.exe /ramdisk/min.c");
    if (!user_execp("/ramdisk/tccnew.exe", 0, cmd)) {
       printf("TCCBOOT_TEST_FAIL tccnew min.c\n");
       return 0;
@@ -246,11 +343,6 @@ static int tccboot_run(void)
       printf("TCCBOOT_TEST_FAIL run min2\n");
       return 0;
    }
-
-   /* Install the self-built compiler over the apps copy when possible. */
-   printf("tccboot: installing /ramdisk/tccnew.exe -> /icsos/apps/tcc.exe\n");
-   if (fcopy("/ramdisk/tccnew.exe", "/icsos/apps/tcc.exe") == -1)
-      printf("tccboot: warning: could not install to /icsos/apps (ramdisk copy is ok)\n");
 
    printf("TCCBOOT_TEST_PASS\n");
    return 1;
@@ -303,23 +395,19 @@ int user_execp(char *fname, DWORD mode, char *params){
          
          fg_setmykeyboard(id);
 
+         dex32_child_faulted = 0;
          //wait for the child process to finish
          dex32_waitpid(id,0);
 
          fg_setmykeyboard(getprocessid());
          if (!from_cache){
-            /* Keep a large binary (tcc) cached; do not let a tiny
-               program like min.exe displace it. */
-            if (size >= 65536) {
-               if (cached_buf && cached_buf != buf)
-                  free(cached_buf);
-               cached_buf = buf;
-               cached_size = size;
-               strncpy(cached_name, fname, 255);
-               cached_name[255] = 0;
-            } else {
-               free(buf);
-            }
+            /* Do not cache ELF images across runs: user processes share
+               pagedir1 and a stale buffer can be left inconsistent after exit. */
+            free(buf);
+         }
+         if (dex32_child_faulted) {
+            printf("execp: child faulted\n");
+            return 0;
          }
          return id;
    };
@@ -1204,42 +1292,52 @@ int console_execute(const char *str){
          printf("EXEC_TEST_PASS\n");
    }else
    if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
-      char cmd[512], sdk[128]="", path[128]="";
-      env_getenv("SDK_HOME", sdk);
-      env_getenv("PATH", path);
-      if (sdk[0]==0) strcpy(sdk, "/icsos/tcc1");
-      if (path[0]==0) strcpy(path, "/icsos/apps");
-      printf("selfhost: checking tcc -v\n");
-      sprintf(cmd, "%s/tcc.exe -v", path);
-      if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
-         printf("SELFHOST_TEST_FAIL tcc -v\n");
-      } else {
-         printf("selfhost: compiling /icsos/apps/min.c (no includes)\n");
-         sprintf(cmd, "%s/tcc.exe -nostdlib -static -o/ramdisk/min.exe /icsos/apps/min.c",
-                 path);
-         if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
-            printf("SELFHOST_TEST_FAIL min.c\n");
-         } else {
-            printf("selfhost: running /ramdisk/min.exe\n");
-            if (!user_execp("/ramdisk/min.exe", 0, "/ramdisk/min.exe")) {
-               printf("SELFHOST_TEST_FAIL run min.exe\n");
-            } else {
-               /* Small hello with tinyio/tinycrt — full SDK compile is too slow in-OS for now. */
-               printf("selfhost: compiling hello.c\n");
-               sprintf(cmd, "%s/tcc.exe -nostdlib -static "
-                       "-o/ramdisk/hello.exe "
-                       "/icsos/apps/hello.c /icsos/apps/tinyio.c /icsos/apps/tinycrt.c",
-                       path);
-               if (!user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
-                  printf("SELFHOST_TEST_FAIL compile hello\n");
-               } else {
-                  printf("selfhost: running hello.exe\n");
-                  user_execp("/ramdisk/hello.exe", 0, "/ramdisk/hello.exe");
-                  printf("SELFHOST_TEST_PASS\n");
-               }
-            }
+      char cmd[512];
+      int ok = 1;
+      /* Stage onto ramdisk so compiles do not re-hit ATAPI mid-run. */
+      if (ok) {
+         printf("selfhost: staging tcc + sources onto /ramdisk\n");
+         if (fcopy("/icsos/apps/tcc.exe", "/ramdisk/tcc.exe") == -1 ||
+             fcopy("/icsos/apps/min.c", "/ramdisk/min.c") == -1 ||
+             fcopy("/icsos/apps/hello.c", "/ramdisk/hello.c") == -1) {
+            printf("SELFHOST_TEST_FAIL stage\n");
+            ok = 0;
          }
       }
+      if (ok) {
+         printf("selfhost: compiling /ramdisk/min.c (no includes)\n");
+         sprintf(cmd,
+                 "/ramdisk/tcc.exe -nostdlib -static -o/ramdisk/min.exe /ramdisk/min.c");
+         if (!user_execp("/ramdisk/tcc.exe", 0, cmd)) {
+            printf("SELFHOST_TEST_FAIL min.c\n");
+            ok = 0;
+         }
+      }
+      if (ok) {
+         printf("selfhost: running /ramdisk/min.exe\n");
+         if (!user_execp("/ramdisk/min.exe", 0, "/ramdisk/min.exe")) {
+            printf("SELFHOST_TEST_FAIL run min.exe\n");
+            ok = 0;
+         }
+      }
+      if (ok) {
+         printf("selfhost: compiling /ramdisk/hello.c\n");
+         sprintf(cmd,
+                 "/ramdisk/tcc.exe -nostdlib -static -o/ramdisk/hello.exe /ramdisk/hello.c");
+         if (!user_execp("/ramdisk/tcc.exe", 0, cmd)) {
+            printf("SELFHOST_TEST_FAIL hello.c\n");
+            ok = 0;
+         }
+      }
+      if (ok) {
+         printf("selfhost: running /ramdisk/hello.exe\n");
+         if (!user_execp("/ramdisk/hello.exe", 0, "/ramdisk/hello.exe")) {
+            printf("SELFHOST_TEST_FAIL run hello.exe\n");
+            ok = 0;
+         }
+      }
+      if (ok)
+         printf("SELFHOST_TEST_PASS\n");
    }else
    if (strcmp(u,"tccboot") == 0){  //-- Rebuild TinyCC with the in-OS tcc.
       tccboot_run();

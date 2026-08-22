@@ -183,7 +183,16 @@ typedef int (*sfnptr_t)(unsigned c, void **helper);
 typedef void (*sighandler_t)(int signum);
 
 
-/*********stdarg types from DJGPP*************/
+/*********stdarg*************/
+#if defined(__x86_64__)
+/* SysV AMD64 passes varargs in registers; use compiler builtins. */
+typedef __builtin_va_list va_list;
+#define va_start(ap, last) __builtin_va_start(ap, last)
+#define va_end(ap)         __builtin_va_end(ap)
+#define va_arg(ap, T)      __builtin_va_arg(ap, T)
+#define va_copy(d, s)      __builtin_va_copy(d, s)
+#else
+/* DJGPP / i386 stack-based varargs */
 typedef void *va_list;
 
 #define __dj_va_rounded_size(T)  \
@@ -196,8 +205,9 @@ typedef void *va_list;
 #define va_end(ap)
 
 #define va_start(ap, last_arg) ((void)((ap) = \
-     (va_list)((char *)(&last_arg)+__dj_va_rounded_size(last_arg))))  
-     
+     (va_list)((char *)(&last_arg)+__dj_va_rounded_size(last_arg))))
+#endif
+
 #define unconst(__v, __t) __extension__ ({union { const __t __cp; __t __p; } __q; __q.__cp = __v; __q.__p;})
      
 void  clrscr();
@@ -215,7 +225,7 @@ int getx();
 int gety();
 void gotoxy(int x,int y);
 int printf(const char *fmt, ...);
-unsigned int dexsdk_systemcall(int function_number,long p1,long p2,
+unsigned long dexsdk_systemcall(int function_number,long p1,long p2,
                   long p3,long p4,long p5);
 void *malloc(size_t size);
 void *memmove (void *dst, const void *src,unsigned int count);

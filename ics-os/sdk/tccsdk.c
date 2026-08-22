@@ -35,9 +35,9 @@ int errno;
 FILE *stdout = (FILE*)1, *stdin =(FILE*)2, *stderr=(FILE*)1;
 
 /*executes a dex32 systemcall (int 0x30) , implementation almost similar to linux*/
-unsigned int dexsdk_systemcall(int function_number, long p1, long p2,
+unsigned long dexsdk_systemcall(int function_number, long p1, long p2,
                   long p3, long p4, long p5){
-   unsigned int return_value;
+   unsigned long return_value;
    __asm__ volatile ("int $0x30" \
          : "=a" (return_value) \
          : "0" ((long)(function_number)),"b" ((long)(p1)),"c" ((long)(p2)), \
@@ -837,11 +837,14 @@ static void init_buckets(void){
 }
 
 
+/* 16-byte header before user payload keeps SysV malloc alignment. */
+#define MALLOC_HDR 16
+
 void free(void *ptr){
    int b;
    if (ptr == 0)
       return;
-   b = *(int *)((char *)ptr-4);
+   b = *(int *)((char *)ptr - MALLOC_HDR);
    *(char **)ptr = buckets[b];
    buckets[b] =(char*) ptr;
 }
@@ -851,11 +854,11 @@ void *realloc(void *ptr, size_t size) {
    int oldsize;
    if (ptr == 0)
       return malloc(size);
-   oldsize = bucket2size[*(int *)((char *)ptr-4)];
-   if (size <= oldsize)
+   oldsize = bucket2size[*(int *)((char *)ptr - MALLOC_HDR)];
+   if (size <= (size_t)oldsize)
       return ptr;
    newptr = (char *)malloc(size);
-   memcpy(newptr, ptr, oldsize);
+   memcpy(newptr, ptr, (unsigned int)oldsize);
    free(ptr);
    return newptr;
 }
@@ -867,18 +870,18 @@ void *malloc(size_t size){
    if (bucket2size[0] == 0)
       init_buckets();
 
-   b = size2bucket(size);
+   b = size2bucket((int)size);
    if (buckets[b]){
       rv = buckets[b];
       buckets[b] = *(char **)rv;
       return rv;
    }
 
-   size = bucket2size[b]+4;
-   rv = (char *)sbrk(size);
+   size = (size_t)bucket2size[b] + MALLOC_HDR;
+   rv = (char *)sbrk((int)size);
 
    *(int *)rv = b;
-   rv += 4;
+   rv += MALLOC_HDR;
    return rv;
 }
 
@@ -911,12 +914,19 @@ void *memmove (void *dst, const void *src,unsigned int count){
 };
 
 void *memset (void *dst,int val,unsigned int count){
-   void *start = dst;
-   while (count--) {
-      *(char *)dst = (char)val;
-      dst = (char *)dst + 1;
+   unsigned char *p = dst;
+   /* Word-fill large blocks — TinyCC ONE_SOURCE does huge zeroing. */
+   if (count >= 16 && ((unsigned long)p & 7) == 0 && (val & 0xff) == 0) {
+      unsigned long *q = (unsigned long *)p;
+      while (count >= 8) {
+         *q++ = 0;
+         count -= 8;
+      }
+      p = (unsigned char *)q;
    }
-   return(start);
+   while (count--)
+      *p++ = (unsigned char)val;
+   return dst;
 };
 
 void *memchr(const void *s, int c, size_t n){
@@ -933,13 +943,22 @@ void *memchr(const void *s, int c, size_t n){
 }
 
 void *memcpy (void * dst, const void * src,unsigned int count){
-   void * ret = dst;
-   while (count--) {
-      *(char *)dst = *(char *)src;
-      dst = (char *)dst + 1;
-      src = (char *)src + 1;
+   unsigned char *d = dst;
+   const unsigned char *s = src;
+   if (count >= 16 &&
+       (((unsigned long)d | (unsigned long)s) & 7) == 0) {
+      unsigned long *ld = (unsigned long *)d;
+      const unsigned long *ls = (const unsigned long *)s;
+      while (count >= 8) {
+         *ld++ = *ls++;
+         count -= 8;
+      }
+      d = (unsigned char *)ld;
+      s = (const unsigned char *)ls;
    }
-   return(ret);
+   while (count--)
+      *d++ = *s++;
+   return dst;
 };
 
 int memcmp(const void *s1, const void *s2, size_t n){
@@ -1101,7 +1120,7 @@ int strncmp(const char *s1, const char *s2, size_t n){
 /************Input functions*************/
 
 int kb_deq(int *code){
-   return dexsdk_systemcall(1,(int)code,0,0,0,0);
+   return dexsdk_systemcall(1,(long)code,0,0,0,0);
 };
   
 char getch(){
@@ -1118,11 +1137,11 @@ int getchar(){
 
 /******** Files ********/
 FILE *openfile(const char  *filename,int mode){
-   return (FILE*)dexsdk_systemcall(4,(int)filename,mode,0,0,0);
+   return (FILE*)dexsdk_systemcall(4,(long)filename,mode,0,0,0);
 };
 
 int feof(FILE *f){
-   return dexsdk_systemcall(0x52,(int)f,0,0,0,0);
+   return dexsdk_systemcall(0x52,(long)f,0,0,0,0);
 };
 
 /* POSIX fstat() lives in posix.c */
@@ -1206,15 +1225,15 @@ char *fgets(char *s, int n, FILE* f){
       s[x+1]= 0;
       return s;
    };
-   return (char*)dexsdk_systemcall(0x40,(int)s,n,(int)f,0,0); 
+   return (char*)dexsdk_systemcall(0x40,(long)s,n,(long)f,0,0); 
 };
 
 int fread(const void *buf,int itemsize,int noitems,FILE* fhandle){
-   return dexsdk_systemcall(0x39,(int)buf,itemsize,noitems,(int)fhandle,0);
+   return dexsdk_systemcall(0x39,(long)buf,itemsize,noitems,(long)fhandle,0);
 };
 
 int fwrite(const void *buf,int itemsize,int noitems,FILE* fhandle){
-   return dexsdk_systemcall(0x45,(int)buf,itemsize,noitems,(int)fhandle,0);
+   return dexsdk_systemcall(0x45,(long)buf,itemsize,noitems,(long)fhandle,0);
 };
  
 char fputc(char c,FILE *f){
@@ -1244,29 +1263,29 @@ int fclose(FILE *stream){
 int fflush (FILE *stream){
    if (stream == stdout || stream==stderr || stream == stdin) 
       return 1;
-   return dexsdk_systemcall(0x59,(int)stream,0,0,0,0);
+   return dexsdk_systemcall(0x59,(long)stream,0,0,0,0);
 };
 
 /* fseek lives in posix.c (POSIX int return) */
 
 long int ftell(FILE *stream){
-   return dexsdk_systemcall(0x47,(int)stream,0,0,0,0);
+   return dexsdk_systemcall(0x47,(long)stream,0,0,0,0);
 };
 
 int closefile(FILE* fhandle){
-   return dexsdk_systemcall(5,(int)fhandle,0,0,0,0);
+   return dexsdk_systemcall(5,(long)fhandle,0,0,0,0);
 };
 
 int remove(char *filename){
-   return dexsdk_systemcall(0x49,(int)filename,0,0,0,0);
+   return dexsdk_systemcall(0x49,(long)filename,0,0,0,0);
 };
 
 int mkdir (const char *filename, mode_t mode){
-    return dexsdk_systemcall(0x4A,(int)filename,0,0,0,0);
+    return dexsdk_systemcall(0x4A,(long)filename,0,0,0,0);
 };
 
 int copyfile(const char *src, const char *dest){
-    return dexsdk_systemcall(0x97,(int)src,(int)dest,0,0,0);
+    return dexsdk_systemcall(0x97,(long)src,(long)dest,0,0,0);
 };
 
 //------------------------------------------
@@ -1295,7 +1314,7 @@ void write_pixel(int x, int y, char color){
 }
 
 void write_text(char *str, int x,int y, char color,int size){
-    dexsdk_systemcall(0x9D,(int)str,(int)x,(int)y,(char)color,(int)size);
+    dexsdk_systemcall(0x9D,(long)str,(int)x,(int)y,(char)color,(int)size);
 }
 
 void write_char(unsigned char ch, int x,int y, char color,int size){
@@ -1320,7 +1339,7 @@ void delay(unsigned int ms){
 /* time() lives in posix.c */
 
 void get_date_time(dex32_datetime *datetime){ 
-    dexsdk_systemcall(0x53,(int)datetime,0,0,0,0);
+    dexsdk_systemcall(0x53,(long)datetime,0,0,0,0);
 }
 
 //keypressed
@@ -1352,11 +1371,11 @@ int getpid(){
 };
 
 int exec(char *fname,unsigned short  mode, char *params){
-   return dexsdk_systemcall(0x5C,(int)fname,mode,(int)params,0,0);     
+   return dexsdk_systemcall(0x5C,(long)fname,mode,(long)params,0,0);     
 }
 
 int execp(char *fname,unsigned short mode, char *params){
-   return dexsdk_systemcall(0x5B,(int)fname, mode,(int)params,0,0);     
+   return dexsdk_systemcall(0x5B,(long)fname, mode,(long)params,0,0);     
 }
 
 void sleep(unsigned int ms){
@@ -1386,7 +1405,7 @@ void thread_exit(){
 int thread_create(void *f){
    unsigned char *stk = (unsigned char *)malloc(10240);
    *((unsigned int*)(stk + 10240 - 4)) = (unsigned int)thread_exit;
-   return dexsdk_systemcall(0xB,(int)f,(int)stk,10240,0,0);
+   return dexsdk_systemcall(0xB,(long)f,(long)stk,10240,0,0);
 }
 
 /* Waits until the given thread of the calling process terminates.
@@ -1399,7 +1418,7 @@ int thread_join(int tid){
 /* getenv() lives in posix.c (POSIX 1-arg) */
 
 int setenv(const char *name, const char *value, int replace){
-   return dexsdk_systemcall(0xA0,(int)name,(int)value,(int)replace,0,0);
+   return dexsdk_systemcall(0xA0,(long)name,(long)value,(int)replace,0,0);
 }
 
 

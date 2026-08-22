@@ -61,7 +61,25 @@ Default scheduler is **priority round-robin** (`process/scheduler.c`):
 ## Userland / TinyCC
 
 - Host apps build as **ELF64** (`sdk/app.mk` uses `-m64`).
-- In-OS **i386 TinyCC selfhost is paused** until an x86_64 TCC port exists.
+- In-OS **x86_64 TinyCC** (`apps/tcc.exe`) can compile and run programs on the
+  long-mode kernel. Smoke test: `make test-selfhost` (Multiboot2 ISO, `-smp 1`).
+- Selfhost stages `tcc` + sources onto `/ramdisk` first so compiles do not
+  depend on ATAPI mid-run (CD reads during large ELF64 user processes remain
+  flaky). Asserts `SELFHOST_TEST_PASS` after compiling/running `min.c` and
+  `hello.c` (tinyio/tinycrt).
+- Kernel `lmodeproc` lives at `0x10000000` so it does not collide with TCC's
+  default ELF `.data` window at `0x600000`.
+- **ISO9660**: directory sector padding (`size==0`) advances to the next
+  sector instead of ending the directory early (multi-sector dirs like
+  `/src/tcc` previously hid later files).
+- Full `tccboot` (rebuild TinyCC with itself): `make test-tccboot`
+  (Multiboot2 ISO, KVM). Staging works: 8.3-renamed sources packed as
+  `tccsrc.tar`, extracted onto `/ramdisk`, compile via
+  `tcc @/ramdisk/tccboot.rsp`. In-OS ONE_SOURCE of TinyCC itself still
+  hangs (no output for 15m after opening `tcc.c`); follow-up is to
+  finish that compile or shrink the translation unit.
+- ISO9660 directory records skip sector padding so multi-sector dirs
+  (e.g. `/src/tcc`) list all files.
 
 ## Key files
 

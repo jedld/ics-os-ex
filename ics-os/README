@@ -4,14 +4,15 @@ ICS-OS is an educational operating system based on Dex-OS (http://sourceforge.ne
 
 ## ics-os-ex extensions
 
-This checkout adds experimental long-mode, SMP, self-hosting, and I/O work:
+This checkout is the **x86-64 long-mode** instructional kernel:
 
 - **x86-64 long mode** (`Kernel64.bin`, Multiboot2) — see `docs/smp-longmode.md`
 - **Software context switch** + priority round-robin scheduler
 - **LAPIC / SMP** (`make test-smp` with QEMU `-smp 2`)
-- **TinyCC** in `contrib/tcc/` (i386 selfhost paused until x86_64 TCC)
-- Console tests: `selfhost`, `exectest`, `iobench`, `cc`, `kbuild`, `tccboot`
+- **ELF64 user exec** (`make test-exec`) and **in-OS x86_64 TinyCC** (`make test-selfhost`)
+- FAT16 **ramdisk** at `/ramdisk`; ISO9660 CD root; 8.3 `tccsrc.tar` staging for `tccboot`
+- Console tests: `selfhost`, `exectest`, `tccboot`, `iobench`, `cc`
 - Faster FAT/IDE/USB I/O (extents, block cache, mmap-style exec load)
-- Staging: `scripts/stage-selfhost.sh`
+- Staging: `scripts/stage-selfhost.sh`, `scripts/stage-tcc-short.sh`
 
 Top-level documentation: see `../README.md`.

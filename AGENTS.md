@@ -25,7 +25,8 @@ Useful individual targets (from `ics-os/`):
 | `test-boot` | Multiboot2 ISO boots; `Root mount [OK]` |
 | `test-smp` | `-smp 2`; AP online; AP work-steal; no GPF |
 | `test-exec` | `hello.exe` → `Hello World` + `EXEC_TEST_PASS` |
-| `test-integration` | All of the above |
+| `test-selfhost` | In-OS TinyCC compiles/runs `min.c` + `hello.c` |
+| `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).
 
@@ -36,7 +37,7 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 - **Identity map** covers low 4GiB; do not rebuild classic 2-level user PTs for that range on x86_64.
 - **SMP**: APs load the kernel GDT (`ap_load_kernel_gdt`), use LAPIC timer vector **0x41**, claim tasks with `on_cpu`, and honor `cpu_affinity`. Console / `fg_mgr` / user processes are BSP-pinned today.
 - **Serial** is the headless oracle. Prefer `serial_puts` / putc mirroring for QEMU `-nographic` tests.
-- **i386 in-OS TinyCC selfhost** is paused on the 64-bit kernel (`test-selfhost` / `test-tccboot` skip).
+- **x86_64 in-OS TinyCC** can compile/run `min.c`/`hello.c` (`make test-selfhost`). Full in-OS TinyCC rebuild (`test-tccboot`) is not green yet.
 
 ## Coding conventions
 

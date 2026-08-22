@@ -1,11 +1,9 @@
-/* Minimal CRT for selfhost hello — no getparameters/strtok dependency. */
-extern int main(int argc, char **argv);
+/* Minimal CRT for selfhost hello — no .data argv strings. */
+extern int main(void);
 void exit(int status);
 
-int _start(void)
+void _start(void)
 {
-   static char *argv[] = { "hello", 0 };
-   main(1, argv);
+   main();
    exit(0);
-   return 0;
 }

@@ -69,6 +69,7 @@ int totalprocesses=0;
 //global vriables used for triggering taskswitcher events.
 DWORD sigpriority = 0; //set this to the process ID of the process that requires immediate attention
 DWORD sigterm = 0; //set this to the process ID of the process you wish to terminate
+volatile int dex32_child_faulted = 0;
 DWORD sigwait = 0; /*set this to the process ID of the process which is not
                    supposed to be interrupted*/
 DWORD sigshutdown = 0; //not implemented yet
@@ -454,10 +455,15 @@ DWORD createprocess(
    
    //set up the program parameters (command line arguments)
    if (params!=0){
-      temp->parameters=(char*)malloc(512);
-      strcpy(temp->parameters,params);
+      int plen = strlen(params) + 1;
+      if (plen < 4) plen = 4;
+      temp->parameters=(char*)malloc(plen);
+      if (temp->parameters)
+         strcpy(temp->parameters,params);
+      temp->knext = userheap + 16;
    }else{
       temp->parameters=0;
+      temp->knext = userheap + 16;
    }
 
    //prepare to enter critical section
@@ -1087,12 +1093,13 @@ int dex32_getname(DWORD processid, int bufsize, char *s){
    return 0;
 };
 
-//copies the parameters passed to a program into a user buffer
-void dex32_getparametersinfo(char *buf){
-   if (current_process->parameters != 0)
+/* Copy process cmdline into the caller's buffer (identity-mapped). */
+unsigned long dex32_getparametersinfo(char *buf){
+   if (buf && current_process->parameters)
       strcpy(buf, current_process->parameters);
-   else
-      strcpy(buf,"");
+   else if (buf)
+      buf[0] = 0;
+   return 1;
 };
 
 //waits till a child process terminates

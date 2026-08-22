@@ -6,7 +6,7 @@
 #define CONFIG_TCC_SYSINCLUDEPATHS "{B}/include:/icsos/include"
 #define CONFIG_TCC_LIBPATHS "{B}"
 #define CONFIG_TCC_CRTPREFIX "{B}"
-#define CONFIG_TCC_ELFINTERP "/lib/ld-linux.so.2"
+#define CONFIG_TCC_ELFINTERP "/lib64/ld-linux-x86-64.so.2"
 #define CONFIG_TCC_STATIC 1
 #define CONFIG_TCC_ASM 1
 /* Disable -run backtrace / bounds checker (needs signals, mmap extras). */

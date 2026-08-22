@@ -371,7 +371,7 @@ int elf_loadmodule(char *module_name,char *elf_image,
             addmemusage(&memptr,userheap,pages);
          }
          for (phi = 0; phi < eh64->e_phnum; phi++) {
-            if (ph64[phi].p_type == PT_LOAD) {
+            if (ph64[phi].p_type == PT_LOAD && ph64[phi].p_memsz > 0) {
                char *dst = (char *)(uintptr)ph64[phi].p_vaddr;
                dex32_commitblock((DWORD)(uintptr)dst, (int)ph64[phi].p_memsz, &pages,
                                  pagedir, PG_WR | PG_USER);

@@ -88,20 +88,10 @@ typedef struct __attribute__((packed)) _fat_long_entry
 } dos_long_entry;
 
 
-typedef struct __attribute__((packed)) _dos_time                 /* Warning: this struct must be packed */
-{
-	unsigned two_secs : 5;  /* low 5 bits: 2-second increments */
-	unsigned minutes : 6;   /* middle 6 bits: minutes */
-	unsigned hours : 5;     /* high 5 bits: hours (0-23) */
-} dos_time;                              /* 2 bytes total */
-
-typedef struct __attribute__((packed)) _dos_date                 /* Warning: this struct must be packed */
-{
-	unsigned date : 5;      /* low 5 bits: date (1-31) */
-	unsigned month : 4;     /* middle 4 bits: month (1-12) */
-	unsigned year : 7;      /* high 7 bits: year - 1980 */
-} dos_date;                              /* 2 bytes total */
-
+/* DOS date/time are 16-bit packed fields on disk. Use plain WORDs so
+   fatdirentry stays exactly 32 bytes (bitfield packing is not portable). */
+typedef WORD dos_time;
+typedef WORD dos_date;
 
 typedef struct __attribute__((packed)) fat_bootsector			/* Warning: this struct must be packed */
 {

@@ -56,9 +56,7 @@ context_load:
     movq CTX_CR3(%rdi), %rax
     testq %rax, %rax
     jz 1f
-    movq %cr3, %rcx
-    cmpq %rax, %rcx
-    je 1f
+    /* Always reload CR3 to flush TLB when entering a task. */
     movq %rax, %cr3
 1:
     movq CTX_RSP(%rdi), %rsp

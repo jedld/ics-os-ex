@@ -18,7 +18,7 @@ bzImage: all
 
 all: obj Kernel64.bin
 
-obj: scheduler.o fat.o iso9660.o devfs.o iomgr.o blkcache.o devmgr_error.o kernel32.o \
+obj: scheduler.o fat.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o devmgr_error.o kernel32.o \
 		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o
 		
 kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
@@ -39,6 +39,9 @@ fat.o: filesystem/fat12.c filesystem/fat12.h
 	
 iso9660.o:
 	$(CC) $(CFLAGS) -o iso9660.o filesystem/iso9660.c
+
+ramdisk.o: filesystem/ramdisk.c filesystem/ramdisk.h
+	$(CC) $(CFLAGS) -o ramdisk.o filesystem/ramdisk.c
 	
 devfs.o:
 	$(CC) $(CFLAGS) -o devfs.o filesystem/devfs.c
@@ -74,7 +77,7 @@ smp.o: cpu/smp.c cpu/smp.h
 	$(CC) $(CFLAGS) -o smp.o cpu/smp.c
 	
 Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
-		scheduler.o iomgr.o blkcache.o fat.o iso9660.o \
+		scheduler.o iomgr.o blkcache.o fat.o iso9660.o ramdisk.o \
 		devfs.o irqwrap.o devmgr_error.o
 	ld $(LDFLAGS) -Map mapfile.txt
 

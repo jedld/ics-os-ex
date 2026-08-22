@@ -282,8 +282,9 @@ void exc_recover(){
       printf("dex32_kernel: user mode page fault.\n");
       printf("recovery mode active. system may become unstable.\n");
       printf("shutting down application..\n");
-      //remove process from the process queue
-      exit(0);
+      /* Non-zero so waiters can distinguish crash from clean exit(0). */
+      dex32_child_faulted = 1;
+      exit(1);
       startints();
    };
 };

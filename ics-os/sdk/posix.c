@@ -16,7 +16,7 @@
 #include <time.h>
 #include <stdarg.h>
 
-extern unsigned int dexsdk_systemcall(int function_number,long p1,long p2,
+extern unsigned long dexsdk_systemcall(int function_number,long p1,long p2,
                   long p3,long p4,long p5);
 extern void *malloc(size_t size);
 extern void free(void *ptr);
@@ -195,14 +195,14 @@ char *getcwd(char *buf, size_t size)
       buf = tmp;
       size = sizeof(tmp);
    }
-   if (!dexsdk_systemcall(FXN_GETCWD, (int)buf, (int)size, 0, 0, 0))
+   if (!dexsdk_systemcall(FXN_GETCWD, (long)buf, (int)size, 0, 0, 0))
       return 0;
    return buf;
 }
 
 int chdir(const char *path)
 {
-   return dexsdk_systemcall(FXN_CHDIR, (int)path, 0, 0, 0, 0) ? 0 : -1;
+   return dexsdk_systemcall(FXN_CHDIR, (long)path, 0, 0, 0, 0) ? 0 : -1;
 }
 
 int isatty(int fd)
@@ -231,7 +231,7 @@ int chmod(const char *path, mode_t mode)
 
 int rename(const char *oldpath, const char *newpath)
 {
-   int r = dexsdk_systemcall(FXN_RENAME, (int)oldpath, (int)newpath, 0, 0, 0);
+   int r = dexsdk_systemcall(FXN_RENAME, (long)oldpath, (long)newpath, 0, 0, 0);
    return r ? 0 : -1;
 }
 
@@ -373,7 +373,7 @@ static int fstat_file(FILE *f, struct stat *buf)
    memset(buf, 0, sizeof(*buf));
    memset(&vs, 0, sizeof(vs));
    vs.size = (int)sizeof(vs);
-   if (dexsdk_systemcall(FXN_FSTAT, (int)f, (int)&vs, 0, 0, 0) < 0)
+   if (dexsdk_systemcall(FXN_FSTAT, (long)f, (long)&vs, 0, 0, 0) < 0)
       return -1;
    buf->st_size = vs.st_size;
    buf->st_mode = S_IFREG | 0777;
@@ -668,14 +668,14 @@ sighandler_t signal(int sig, sighandler_t handler)
 
 int fseek(FILE *f, long off, int whence)
 {
-   dexsdk_systemcall(0x41, (int)f, (int)off, whence, 0, 0);
+   dexsdk_systemcall(0x41, (long)f, (long)off, whence, 0, 0);
    return 0;
 }
 
 char *getenv(const char *name)
 {
    static char buf[512];
-   if (!dexsdk_systemcall(0x9F, (int)name, (int)buf, 0, 0, 0))
+   if (!dexsdk_systemcall(0x9F, (long)name, (long)buf, 0, 0, 0))
       return 0;
    return buf;
 }

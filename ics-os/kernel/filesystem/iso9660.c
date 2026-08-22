@@ -276,7 +276,22 @@ int iso9660_mountdirectory(vfs_node *directory, int id)
             iso9660_directory *dir =(iso9660_directory*)dirptr;
             vfs_node *node;
             
-            if (dir->size == 0 ) break;
+            /* Directory records do not span sectors; unused bytes at the
+               end of a sector are zero. Skip to the next sector instead of
+               treating that padding as end-of-directory (which hid later
+               files like tccpp.c on multi-sector dirs). */
+            if (dir->size == 0 ) {
+               DWORD into = size % 2048;
+               DWORD skip;
+               if (into == 0)
+                  break;
+               skip = 2048 - into;
+               if (size + skip >= mountpoint->miscsize2)
+                  break;
+               size += skip;
+               dirptr += skip;
+               continue;
+            }
             
             //allocate a new vfs_node
             node=(vfs_node*)malloc(sizeof(vfs_node));

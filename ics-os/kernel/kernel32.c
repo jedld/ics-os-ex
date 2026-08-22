@@ -109,6 +109,7 @@ extern void textcolor(unsigned char c);
 #include "filesystem/fat12.h"
 #include "filesystem/iso9660.h"
 #include "filesystem/devfs.h"
+#include "filesystem/ramdisk.h"
 #include "process/event.h"
 #include "devmgr/extensions.h"
 #include "process/environment.h"
@@ -614,7 +615,11 @@ void dex_init(){
    //Install a null block device
    printf("Initializng the null block device...");
    devfs_initnull();
-   printf("[OK]\n");   
+   printf("[OK]\n");
+
+   printf("Initializing the RAM disk...");
+   ramdisk_init();
+   printf("[OK]\n");
     
    printf("Initializing the filesystem driver...");
    //install and initialize the Device Filesystem driver
@@ -641,6 +646,18 @@ void dex_init(){
             printf("Root filesystem is the USB mass-storage device.\n");
       }
 
+      /* Prefer CD when Multiboot2 boot device is the CD-ROM. */
+      if (!mounted && (strcmp(boot_device_name,"cds0") == 0
+                       || (boot_device_name[0] == 0
+                           && devmgr_finddevice("cds0") != -1
+                           && !usb_storage_available()))) {
+         if (devmgr_finddevice("cds0") != -1) {
+            mounted = (vfs_mount_device("cdfs","cds0","icsos") != -1);
+            if (mounted)
+               printf("Root filesystem is the CD-ROM (cdfs).\n");
+         }
+      }
+
       /* USB stick / hard disk presented as BIOS IDE (not CD). */
       if (!mounted && boot_device_name[0]
           && strcmp(boot_device_name,"fd0") != 0
@@ -652,14 +669,11 @@ void dex_init(){
       if (!mounted && devmgr_finddevice("hdp0p0") != -1)
          mounted = (vfs_mount_device("fat","hdp0p0","icsos") != -1);
 
-      /* Live CD / Multiboot2 ISO (cdfs) — prefer when boot device is CD. */
-      if (!mounted && (strcmp(boot_device_name,"cds0") == 0
-                       || devmgr_finddevice("cds0") != -1)) {
-         if (devmgr_finddevice("cds0") != -1) {
-            mounted = (vfs_mount_device("cdfs","cds0","icsos") != -1);
-            if (mounted)
-               printf("Root filesystem is the CD-ROM (cdfs).\n");
-         }
+      /* Live CD fallback if boot_device was unset / ambiguous. */
+      if (!mounted && devmgr_finddevice("cds0") != -1) {
+         mounted = (vfs_mount_device("cdfs","cds0","icsos") != -1);
+         if (mounted)
+            printf("Root filesystem is the CD-ROM (cdfs).\n");
       }
 
       /* Floppy image (legacy) — only if named fd0 and device exists. */
@@ -672,6 +686,10 @@ void dex_init(){
          printf("Warning: no root filesystem mounted (continuing).\n");
       else
          printf("Root mount [OK]\n");
+
+      /* Writable scratch FS for in-OS compiles (selfhost / tccboot). */
+      if (mounted)
+         ramdisk_mount();
 
       /* Unpark APs after root mount; console remains BSP-pinned. */
       if (mounted && cpu_count > 1) {

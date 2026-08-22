@@ -116,17 +116,22 @@ DWORD iomgr_diskmgr()
                            ptr->num_of_blocks, ptr->lowblock,itoa(ptr->buf,temp,16));
                  #endif
 
-                 if (myblock->read_block(ptr->lowblock,ptr->buf,ptr->num_of_blocks))
+                 /* Drivers return 1 on success; historically some returned -1
+                    on error, which is truthy — treat only >0 as success. */
+                 if (myblock->read_block(ptr->lowblock,ptr->buf,ptr->num_of_blocks) > 0)
                  {
                   lastjob=ptr->lowblock;
                   ptr->status=IO_COMPLETE;
-                  /* Cache 512-byte devices only. Skip CD names (cdp0/cds0). */
-                  if (myblock->hdr.name[0] != 'c' || myblock->hdr.name[1] != 'd') {
-                     if (myblock->putcache)
-                        myblock->putcache(ptr->buf, ptr->lowblock, ptr->num_of_blocks);
-                     else
-                        blkcache_put(ptr->deviceid, ptr->lowblock,
-                                     ptr->num_of_blocks, ptr->buf);
+                  /* Refresh optional memory caches after a media read.
+                     Do NOT call putcache here: for write-through devices
+                     (e.g. in-kernel ramdisk) putcache is the store itself, and
+                     replaying a stale/UAF buffer would corrupt just-written data.
+                     Floppy-style caches use getcache/putcache for hits in
+                     dex32_requestIO; they do not need this writeback. */
+                  if ((myblock->hdr.name[0] != 'c' || myblock->hdr.name[1] != 'd') &&
+                      myblock->putcache == 0) {
+                     blkcache_put(ptr->deviceid, ptr->lowblock,
+                                  ptr->num_of_blocks, ptr->buf);
                   }
                  } 
                        else

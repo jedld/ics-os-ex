@@ -295,6 +295,8 @@ extern int totalprocesses;
 //global vriables used for triggering taskswitcher events.
 extern DWORD sigpriority; //set this to the process ID of the process that requires immediate attention
 extern DWORD sigterm;     //set this to the process ID of the process you wish to terminate
+/* Set by exception recovery when a user process faults; cleared by waiters. */
+extern volatile int dex32_child_faulted;
 extern DWORD sigwait;     /*set this to the process ID of the process which is not
                             supposed to be interrupted*/
 extern DWORD sigshutdown;
@@ -348,7 +350,7 @@ DWORD    createthread(void *ptr,void *stack,DWORD stacksize);
 DWORD    createuthread(void *ptr,void *stack,DWORD stacksize);
 DWORD    dex32_exitprocess(DWORD ret_value);
 int      dex32_getname(DWORD processid,int bufsize,char *s);
-void     dex32_getparametersinfo(char *buf);
+unsigned long dex32_getparametersinfo(char *buf);
 DWORD    dex32_asyncproc(saveregs *r,void *entrypoint,char *name,DWORD stacksize);
 DWORD    dex32_setservice();
 void     dex32_set_timer(DWORD rate);
