@@ -43,6 +43,17 @@ upon receving \r */
 void getstring(char *buf, DEX32_DDL_INFO *dev){
    unsigned int i=0;
    char c;
+   if (current_process && current_process->ctty) {
+      int n = tty_read(current_process->ctty, buf, 255);
+      if (n < 0) {
+         buf[0] = 0;
+         return;
+      }
+      if (n > 0 && buf[n-1] == '\n')
+         n--;
+      buf[n] = 0;
+      return;
+   }
    do{
       c=getch();
       if (c=='\r' || c=='\n' || c==0xa) 
@@ -152,201 +163,7 @@ int user_fork(){
 };
 
 
-int user_execp(char *fname, DWORD mode, char *params);
-
-/* Copy one file; print a short status. Returns 1 on success. */
-static int tccboot_copy1(const char *src, const char *dst)
-{
-   printf("  %s -> %s\n", src, dst);
-   if (fcopy((char*)src, (char*)dst) == -1) {
-      printf("tccboot: copy failed: %s\n", src);
-      return 0;
-   }
-   return 1;
-}
-
-/* Write a small text file (TCC @response list). */
-static int tccboot_writefile(const char *path, const char *text)
-{
-   file_PCB *f;
-   int n = strlen(text);
-   f = openfilex((char*)path, FILE_WRITE);
-   if (!f) {
-      printf("tccboot: cannot create %s\n", path);
-      return 0;
-   }
-   if (fwrite((char*)text, n, 1, f) != n) {
-      printf("tccboot: write failed %s\n", path);
-      fclose(f);
-      return 0;
-   }
-   fclose(f);
-   return 1;
-}
-
-/* Minimal ustar extract: regular files only, into destdir/. */
-static int tccboot_untar(const char *tar, DWORD tarsize, const char *destdir)
-{
-   DWORD off = 0;
-   while (off + 512 <= tarsize) {
-      const char *hdr = tar + off;
-      char name[120], path[256];
-      DWORD fsize = 0, i, nwrite;
-      file_PCB *f;
-      const unsigned char *p;
-
-      off += 512;
-      if (hdr[0] == 0)
-         break;
-      if (hdr[156] == '5' || hdr[156] == '2')
-         continue;
-      if (hdr[156] != '0' && hdr[156] != 0)
-         continue;
-
-      memset(name, 0, sizeof(name));
-      memcpy(name, hdr, 100);
-      if (name[0] == '.' && name[1] == '/')
-         memmove(name, name + 2, strlen(name + 2) + 1);
-      if (name[0] == 0)
-         continue;
-
-      p = (const unsigned char *)(hdr + 124);
-      for (i = 0; i < 11 && p[i]; i++) {
-         if (p[i] >= '0' && p[i] <= '7')
-            fsize = (fsize << 3) + (p[i] - '0');
-      }
-
-      if (off + fsize > tarsize) {
-         printf("tccboot: tar truncated (%s)\n", name);
-         return 0;
-      }
-
-      sprintf(path, "%s/%s", destdir, name);
-      printf("  extract %s (%u)\n", path, (unsigned)fsize);
-      f = openfilex(path, FILE_WRITE);
-      if (!f) {
-         printf("tccboot: cannot create %s\n", path);
-         return 0;
-      }
-      if (fsize) {
-         nwrite = fwrite((char*)(tar + off), (int)fsize, 1, f);
-         if (nwrite != fsize) {
-            printf("tccboot: write failed %s\n", path);
-            fclose(f);
-            return 0;
-         }
-      }
-      fclose(f);
-      off += (fsize + 511) & ~511U;
-   }
-   return 1;
-}
-
-/* Stage via one ISO tar map (avoids many ATAPI opens). */
-static int tccboot_stage(void)
-{
-   static const char *sdk_files[] = {
-      "tccsdk.c", "posix.c", "libtcc1.c", "crt1.c", "setjmp.c",
-      0
-   };
-   char src[256], dst[256];
-   char *tarbuf;
-   DWORD tarsize;
-   int i;
-
-   mkdir("/ramdisk/tcc");
-   mkdir("/ramdisk/sdk");
-
-   printf("tccboot: loading /icsos/tccsrc.tar\n");
-   tarbuf = (char*)vfs_mapfile("/icsos/tccsrc.tar", &tarsize);
-   if (!tarbuf || tarsize < 512) {
-      printf("tccboot: cannot map tccsrc.tar\n");
-      return 0;
-   }
-   printf("tccboot: extracting %u bytes to /ramdisk/tcc\n", (unsigned)tarsize);
-   if (!tccboot_untar(tarbuf, tarsize, "/ramdisk/tcc")) {
-      free(tarbuf);
-      return 0;
-   }
-   free(tarbuf);
-
-   printf("tccboot: staging SDK to /ramdisk/sdk\n");
-   for (i = 0; sdk_files[i]; i++) {
-      sprintf(src, "/icsos/tcc1/%s", sdk_files[i]);
-      sprintf(dst, "/ramdisk/sdk/%s", sdk_files[i]);
-      if (!tccboot_copy1(src, dst))
-         return 0;
-   }
-
-   if (!tccboot_copy1("/icsos/apps/tcc.exe", "/ramdisk/tcc.exe") ||
-       !tccboot_copy1("/icsos/apps/min.c", "/ramdisk/min.c"))
-      return 0;
-   return 1;
-}
-
-/* Rebuild TinyCC using the host-built in-OS tcc.exe. */
-static int tccboot_run(void)
-{
-   static const char rsp[] =
-      "-nostdlib\n"
-      "-static\n"
-      "-w\n"
-      "-DTCC_TARGET_X86_64\n"
-      "-DONE_SOURCE\n"
-      "-DCONFIG_TCC_STATIC\n"
-      "-nostdinc\n"
-      "-I/ramdisk/tcc\n"
-      "-I/icsos/include\n"
-      "-I/icsos/tcc1\n"
-      "-o/ramdisk/tccnew.exe\n"
-      "/ramdisk/tcc/tcc.c\n"
-      "/ramdisk/sdk/tccsdk.c\n"
-      "/ramdisk/sdk/posix.c\n"
-      "/ramdisk/sdk/libtcc1.c\n"
-      "/ramdisk/sdk/crt1.c\n"
-      "/ramdisk/sdk/setjmp.c\n";
-   char cmd[128];
-
-   if (!tccboot_stage()) {
-      printf("TCCBOOT_TEST_FAIL stage\n");
-      return 0;
-   }
-
-   if (!tccboot_writefile("/ramdisk/tccboot.rsp", rsp)) {
-      printf("TCCBOOT_TEST_FAIL rsp\n");
-      return 0;
-   }
-
-   printf("tccboot: compiling TinyCC (ONE_SOURCE) — this takes a while\n");
-   sprintf(cmd, "/ramdisk/tcc.exe @/ramdisk/tccboot.rsp");
-   if (!user_execp("/ramdisk/tcc.exe", 0, cmd)) {
-      printf("TCCBOOT_TEST_FAIL compile\n");
-      return 0;
-   }
-
-   printf("tccboot: verifying /ramdisk/tccnew.exe -v\n");
-   if (!user_execp("/ramdisk/tccnew.exe", 0, "/ramdisk/tccnew.exe -v")) {
-      printf("TCCBOOT_TEST_FAIL tccnew -v\n");
-      return 0;
-   }
-
-   printf("tccboot: tccnew compiling min.c\n");
-   sprintf(cmd,
-           "/ramdisk/tccnew.exe -nostdlib -static -o/ramdisk/min2.exe /ramdisk/min.c");
-   if (!user_execp("/ramdisk/tccnew.exe", 0, cmd)) {
-      printf("TCCBOOT_TEST_FAIL tccnew min.c\n");
-      return 0;
-   }
-
-   printf("tccboot: running /ramdisk/min2.exe\n");
-   if (!user_execp("/ramdisk/min2.exe", 0, "/ramdisk/min2.exe")) {
-      printf("TCCBOOT_TEST_FAIL run min2\n");
-      return 0;
-   }
-
-   printf("TCCBOOT_TEST_PASS\n");
-   return 1;
-}
+#include "selfhost.c"  /* tccboot / kbuild / fullhost self-host drivers */
 
 /**
  * Function that reads an executable and creates a new process for it.
@@ -379,7 +196,7 @@ int user_execp(char *fname, DWORD mode, char *params){
             kthread path can starve under software scheduling while the console
             spins on pd_ok(). */
          id = dex32_loader(fname, buf, userspace, mode, params,
-                           showpath(temp), current_process);
+                          showpath(temp), current_process);
 
          if (!id || (int)id == -1){
             printf("execp: failed to start %s\n", fname);
@@ -390,11 +207,8 @@ int user_execp(char *fname, DWORD mode, char *params){
             }
             return 0;
          }
-
          printf("execp: started pid=%d, waiting\n", (int)id);
-         
          fg_setmykeyboard(id);
-
          dex32_child_faulted = 0;
          //wait for the child process to finish
          dex32_waitpid(id,0);
@@ -1256,33 +1070,11 @@ int console_execute(const char *str){
    if (strcmp(u,"reboot") == 0){  //-- Reboot the machine (keyboard + QEMU ports).
       machine_reboot();
    }else
-   if (strcmp(u,"kbuild") == 0){  //-- Rebuild the kernel with in-OS tcc and install as /vmdex.
-      char cmd[1024];
-      printf("kbuild: compiling kernel with tcc (this can take a while)...\n");
-      sprintf(cmd,
-         "/icsos/apps/tcc.exe -nostdlib -static -g0 "
-         "-I/icsos/src/kernel -I/icsos/include "
-         "-o /icsos/Kernel32.bin "
-         "-Wl,-T/icsos/src/kernel/lscript-self.ld "
-         "/icsos/src/kernel/startup/startup.S "
-         "/icsos/src/kernel/startup/asmlib.S "
-         "/icsos/src/kernel/irqwrap.S "
-         "/icsos/src/kernel/kernel32.c "
-         "/icsos/src/kernel/process/scheduler.c "
-         "/icsos/src/kernel/filesystem/fat12.c "
-         "/icsos/src/kernel/filesystem/iso9660.c "
-         "/icsos/src/kernel/filesystem/devfs.c "
-         "/icsos/src/kernel/iomgr/iosched.c "
-         "/icsos/src/kernel/devmgr/devmgr_error.c");
-      if (user_execp("/icsos/apps/tcc.exe", 0, cmd)) {
-         printf("kbuild: installing /icsos/Kernel32.bin as /vmdex\n");
-         if (fcopy("/icsos/Kernel32.bin", "/vmdex") == -1)
-            printf("kbuild: failed to install vmdex\n");
-         else
-            printf("kbuild: done. Type 'reboot' to boot the new kernel.\n");
-      } else {
-         printf("kbuild: tcc failed or is not installed.\n");
-      }
+   if (strcmp(u,"kbuild") == 0){  //-- Rebuild the kernel with in-OS tcc.
+      kbuild_run(0);
+   }else
+   if (strcmp(u,"fullhost") == 0){  //-- tccboot then kbuild with tccnew.
+      fullhost_run();
    }else
    if (strcmp(u,"exectest") == 0){  //-- Run the host-built hello.exe (ELF loader smoke test).
       printf("exectest: running /icsos/apps/hello.exe\n");
@@ -1406,14 +1198,29 @@ void console_main(){
    Dex32SetProcessDDL(myddl, getprocessid());
    myfg = fg_register(myddl, getprocessid());
    fg_setforeground( myfg->id );
+   {
+      tty_t *t = tty_alloc((struct _dex32_direct_device_hdl *)myddl,
+                           TTY_ECHO | TTY_ICANON | TTY_ISIG);
+      tty_set_fg(t);
+      tty_attach_proc(current_process, t);
+      if (myfg && myfg != (fg_processinfo *)-1)
+         myfg->tty = t;
+   }
 
    clrscr();
+   printf("console: tmux keys  C-b c/n/p/l/0-9/w/x/?  (F2 new, F12 next)\n");
    strcpy(last,"");
     
    if (console_first == 0) 
       script_load("/icsos/autoexec.bat");
     
-   console_first++;  
+   console_first++;
+   /* Prefer userland sh.exe when present (PATH on CD / ramdisk). */
+   if (user_execp("/icsos/apps/sh.exe", 0, "/icsos/apps/sh.exe")) {
+      fg_exit();
+      exit(0);
+      return;
+   }
    do{
       textcolor(WHITE);
       textbackground(BLACK);
