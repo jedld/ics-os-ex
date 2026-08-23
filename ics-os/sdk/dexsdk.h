@@ -54,6 +54,9 @@
 #define FXN_STAT 36
 #define FXN_FORK 0x90
 #define FXN_SLEEP 0x54
+#define FXN_SYSREAD  0xA4
+#define FXN_SYSWRITE 0xA5
+#define FXN_KCMD     0xA6
 
 /*============DEX constants for files===========*/
 #define FILE_READ 0
@@ -185,12 +188,34 @@ typedef void (*sighandler_t)(int signum);
 
 /*********stdarg*************/
 #if defined(__x86_64__)
-/* SysV AMD64 passes varargs in registers; use compiler builtins. */
+#if defined(__TINYC__)
+/* TinyCC x86_64 has no __builtin_va_list type; use the runtime va_list
+   (sdk/libtcc1.c __va_start/__va_arg, mirroring TCC's stdarg.h). */
+typedef struct {
+    unsigned int gp_offset;
+    unsigned int fp_offset;
+    union {
+        unsigned int overflow_offset;
+        char *overflow_arg_area;
+    };
+    char *reg_save_area;
+} __va_list_struct;
+typedef __va_list_struct va_list[1];
+void __va_start(__va_list_struct *ap, void *fp);
+void *__va_arg(__va_list_struct *ap, int arg_type, int size, int align);
+#define va_start(ap, last) __va_start(ap, __builtin_frame_address(0))
+#define va_arg(ap, type) \
+    (*(type *)(__va_arg(ap, __builtin_va_arg_types(type), sizeof(type), __alignof__(type))))
+#define va_copy(dest, src) (*(dest) = *(src))
+#define va_end(ap)
+#else
+/* GCC x86_64: compiler builtins. */
 typedef __builtin_va_list va_list;
 #define va_start(ap, last) __builtin_va_start(ap, last)
 #define va_end(ap)         __builtin_va_end(ap)
 #define va_arg(ap, T)      __builtin_va_arg(ap, T)
 #define va_copy(d, s)      __builtin_va_copy(d, s)
+#endif
 #else
 /* DJGPP / i386 stack-based varargs */
 typedef void *va_list;
