@@ -8,6 +8,7 @@
 #include "iosched.h"
 #include "blkcache.h"
 #include "../stdlib/time.h"
+#include "../process/process.h"
 
 //The registers that the io scheduler uses
 int IOmgr_pause=0;
@@ -56,15 +57,26 @@ DWORD iomgr_flushmgr()
 
  };
 
-//this defines the threaded function which performs the actual
-//reads and writes to the block device
+//the disk manager is the worker for the blocking work-queue.  Normal
+//requests are executed synchronously by dex32_requestIO() (in the
+//caller's context); this thread is a safety net that drains any
+//request left on the queue and periodically flushes pending writes.
+//
+//Why synchronous execution:  disk_mgr is a priority-0 kernel thread
+//(createkthread) while user processes get priority 1 (createprocess).
+//A user process that blocked in open()/read() waited on
+//dex32_IOcomplete() in a taskswitch() loop, but the priority scheduler
+//kept re-selecting the (runnable) user process over disk_mgr, so the
+//queued CD/HD read never ran -> deadlock.  Raising the worker's
+//priority is not an option: it busy-polls, so a higher priority would
+//starve the user/boot path.  Running the request inline in the
+//caller's context removes the dependency on the worker's scheduling
+//entirely.
+static DWORD iomgr_execjob(IOrequest *ptr);
 DWORD iomgr_diskmgr()
 {
    IOrequest *ptr;
-   char temp[10],temp2[10];
-   char *vidmem = (char*) 0xB8000;
    DWORD lastjob=0;
-   devmgr_block_desc *myblock;
    flush_counter=time();
    do
     {
@@ -75,127 +87,91 @@ DWORD iomgr_diskmgr()
 		//Commit writes to the disk if a specified time interval has
 		//been met.
 		        if ( (flush_counter - time() > flush_time) ||
-                   (time() - flush_counter > flush_time ) || forceflush)
-                    {
+                   (time() - flush_counter > flush_time) || forceflush)
+                   {
                      forceflush=0;
 
                      if (shouldflush()) iomgr_flushmgr();
                      flush_counter=time();
                     };
-         cpu_idle();
-         continue;};
+          cpu_idle();
+          continue;};
 
       
       if (ptr!=0)
       {
-         sync_entercrit(&IOrequest_busy);   
-         /*Turn of task switching to improve performance*/
-         disable_taskswitching();
-         
-         do {
-      //read or write data to the disk
-      //   sigwait=current_process->processid;
-      if (ptr->type==IO_READ)
-         {
-
-                 #ifdef DEBUG_READ
-                 printf("dex32_diskmgr: Reading block %d..\n",ptr->lowblock);
-                 #endif		
-                 myblock = (devmgr_block_desc*)devmgr_devlist[ptr->deviceid];
-                 
-                 devmgr_setcontext(ptr->deviceid);
-                 
-                 if (myblock->hdr.type!=DEVMGR_BLOCK)
-                 {
-                 printf("IO ERROR: Device %d is not a block device!\n",ptr->deviceid);
-                 }
-                       else
-              { 
-                 #ifdef DEBUG_READ         
-                 printf("reading %d blocks starting at %d to location 0x%s.\n",
-                           ptr->num_of_blocks, ptr->lowblock,itoa(ptr->buf,temp,16));
-                 #endif
-
-                 /* Drivers return 1 on success; historically some returned -1
-                    on error, which is truthy — treat only >0 as success. */
-                 if (myblock->read_block(ptr->lowblock,ptr->buf,ptr->num_of_blocks) > 0)
-                 {
-                  lastjob=ptr->lowblock;
-                  ptr->status=IO_COMPLETE;
-                  /* Refresh optional memory caches after a media read.
-                     Do NOT call putcache here: for write-through devices
-                     (e.g. in-kernel ramdisk) putcache is the store itself, and
-                     replaying a stale/UAF buffer would corrupt just-written data.
-                     Floppy-style caches use getcache/putcache for hits in
-                     dex32_requestIO; they do not need this writeback. */
-                  if ((myblock->hdr.name[0] != 'c' || myblock->hdr.name[1] != 'd') &&
-                      myblock->putcache == 0) {
-                     blkcache_put(ptr->deviceid, ptr->lowblock,
-                                  ptr->num_of_blocks, ptr->buf);
-                  }
-                 } 
-                       else
-                 {
-                   #ifdef DEBUG_READ
-                   printf("io_mgr(): read error?\n");
-                   #endif
-                   ptr->status=IO_ERROR;
-                 };
-
-                #ifdef DEBUG_READ          
-          	    printf("dex32_diskmgr: read block Done..\n");
-          	    #endif
-          	    
-	          };	    
-                           
-	        }
-      	            else
-            if (ptr->type==IO_WRITE)
-            {
-            	    #ifdef DEBUG_IOREADWRITE
-            	    printf("dex32_diskmgr: Writing block %d to device %d\n",ptr->lowblock,ptr->deviceid);
-            	    #endif
-	                    
-	                //obtain the device descriptor       
-	                myblock = (devmgr_block_desc*)devmgr_devlist[ptr->deviceid];
-	                
-                    devmgr_setcontext(ptr->deviceid);
-                    
-                    if (myblock->hdr.type!=DEVMGR_BLOCK)
-                    {
-                        printf("IO ERROR: Device %d is not a block device!\n",ptr->deviceid);
-                    }
-                            else        
-                    if (myblock->write_block==0)
-                    {
-                         printf("IO ERROR: Device %d does not support writes!\n",ptr->deviceid);
-                         ptr->status=IO_ERROR;
-                    }
-                            else         
-                    if (myblock->write_block(ptr->lowblock,ptr->buf,ptr->num_of_blocks))
-                    {
-                         lastjob=ptr->lowblock;
-                         ptr->status=IO_COMPLETE;
-                    } 
-                            else
-                          ptr->status=IO_ERROR;
-                    #ifdef DEBUG_IOREADWRITE
-                    printf("dex32_diskmgr: write block Done..\n");
-                    #endif
-                ;}
-                ptr= IOmgr_obtainjob(0,0,lastjob);
+          sync_entercrit(&IOrequest_busy);   
+          /*Turn of task switching to improve performance*/
+          disable_taskswitching();
+          
+          do {
+             lastjob=iomgr_execjob(ptr);
+             ptr= IOmgr_obtainjob(0,0,lastjob);
 
            }
            
-          while ( ptr!=0);    
+           while ( ptr!=0);    
 
-          enable_taskswitching(); /*Turn on task switiching*/
-          sync_leavecrit(&IOrequest_busy);
+           enable_taskswitching(); /*Turn on task switiching*/
+           sync_leavecrit(&IOrequest_busy);
       };
       
-    } while (1);
+     } while (1);
 
-;};
+ ;};
+
+/*Execute a single (dequeued) block request synchronously in the
+ *current context.  Marks the request complete/error and returns its
+ *lowblock for proximity-ordered picking.  Used by iomgr_diskmgr (queue
+ *drain) and by dex32_requestIO (synchronous fast path).*/
+static DWORD iomgr_execjob(IOrequest *ptr)
+{
+   devmgr_block_desc *myblock;
+
+   myblock = (devmgr_block_desc*)devmgr_devlist[ptr->deviceid];
+
+   devmgr_setcontext(ptr->deviceid);
+
+   if (myblock->hdr.type!=DEVMGR_BLOCK)
+   {
+      printf("IO ERROR: Device %d is not a block device!\n", ptr->deviceid);
+      ptr->status=IO_ERROR;
+      return ptr->lowblock;
+   };
+
+   if (ptr->type==IO_READ)
+   {
+      /* Drivers return 1 on success; historically some returned -1
+         on error, which is truthy - treat only >0 as success. */
+      if (myblock->read_block(ptr->lowblock,ptr->buf,ptr->num_of_blocks) > 0)
+      {
+         ptr->status=IO_COMPLETE;
+         if ((myblock->hdr.name[0] != 'c' || myblock->hdr.name[1] != 'd') &&
+             myblock->putcache == 0) {
+            blkcache_put(ptr->deviceid, ptr->lowblock,
+                         ptr->num_of_blocks, ptr->buf);
+         }
+      } 
+      else
+         ptr->status=IO_ERROR;
+   }
+   else if (ptr->type==IO_WRITE)
+   {
+      if (myblock->write_block==0)
+      {
+         printf("IO ERROR: Device %d does not support writes!\n", ptr->deviceid);
+         ptr->status=IO_ERROR;
+      } 
+      else if (myblock->write_block(ptr->lowblock,ptr->buf,ptr->num_of_blocks))
+         ptr->status=IO_COMPLETE;
+      else
+         ptr->status=IO_ERROR;
+   }
+   else
+      ptr->status=IO_ERROR;
+
+   return ptr->lowblock;
+};
 
 //dequeue a request
 IOrequest *IOmgr_obtainjob(int deviceid,
@@ -386,6 +362,28 @@ DWORD dex32_requestIO(int deviceid,int type,DWORD block,DWORD numblocks, void *b
       restoreflags(flags);      
       sync_leavecrit(&IOrequest_busy);
 
+      /* Execute the request synchronously in the caller's
+         context.  disk_mgr is a priority-0 kernel thread and
+         user processes get priority 1, so a user process
+         blocked on dex32_IOcomplete() would never be
+         descheduled in favor of disk_mgr and the queued
+         read would never complete (starvation deadlock).
+         Running the read/write inline makes the request
+         complete before dex32_requestIO() returns; the
+         worker thread only needs to drain stragglers.
+         Cache-hit fast paths above already completed.
+         A read of a cache-miss block executes here; the
+         result is still cached by iomgr_execjob so a
+         second request for the same block is served from
+         the cache. */
+      { DWORD fl2; storeflags(&fl2); stopints();
+        sync_entercrit(&IOrequest_busy);
+        disable_taskswitching();
+        IOmgr_obtainjob(0,0,0);
+        iomgr_execjob(ptr);
+        enable_taskswitching();
+        sync_leavecrit(&IOrequest_busy);
+        restoreflags(fl2); }
       return (DWORD)ptr->rID;
 ;};
 
