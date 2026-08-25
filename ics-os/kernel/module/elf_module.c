@@ -369,6 +369,20 @@ int elf_loadmodule(char *module_name,char *elf_image,
             dex32_commitblock((DWORD)(uintptr)userheap, ELF_HEAP_COMMIT, &pages,
                         pagedir, PG_WR | PG_USER );
             addmemusage(&memptr,userheap,pages);
+            /* Zero the freshly committed user stack + initial heap. On the
+               x86_64 identity map dex32_commitblock() only records usage —
+               the physical frames are reused across processes, so without
+               zeroing, a process's stack/heap (and every malloc served from
+               the ELF_HEAP_COMMIT initial heap, e.g. the in-OS TinyCC's
+               compile/link working set) would read stale data from whatever
+               ran here before. That made in-OS tcc.exe emit a
+               non-deterministic, corrupt tccnew.exe. Zeroing matches Linux
+               brk()/mmap() semantics and prevents leaking one user process's
+               memory to another. Parameters arrive via the getparameters
+               syscall, so zeroing the stack before first run is safe. */
+            memset((void *)(uintptr)(userstackloc - ELF_STACK_COMMIT), 0,
+                   ELF_STACK_COMMIT);
+            memset((void *)(uintptr)userheap, 0, ELF_HEAP_COMMIT);
          }
          for (phi = 0; phi < eh64->e_phnum; phi++) {
             if (ph64[phi].p_type == PT_LOAD && ph64[phi].p_memsz > 0) {

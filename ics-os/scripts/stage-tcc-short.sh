@@ -35,13 +35,26 @@ for f in "$DST/tcc/"*; do
     "$f"
 done
 
+# SDK runtime is a FIXED dependency (like libc): the in-OS tccboot links the
+# host-prebuilt objects instead of parsing the raw SDK sources in-OS. Parsing
+# them in-OS hit TinyCC/SDK-header clashes (va_list, size_t) that the host
+# gcc handles fine. Build the 5 runtime objects with host gcc (APP_CFLAGS).
+SDKOBJ_CFLAGS="-m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding \
+  -fno-pie -fno-pic -fno-stack-protector -fno-strict-aliasing -mcmodel=large \
+  -mno-red-zone -nostdinc -I$ROOT/sdk/include -I$ROOT/contrib/tcc \
+  -DTCC_TARGET_X86_64 -DONE_SOURCE=0 -DCONFIG_TCC_STATIC"
+mkdir -p "$DST/sdkobj"
+for f in tccsdk posix libtcc1 crt1 setjmp; do
+  echo "host: building SDK runtime object $f.o"
+  gcc -c $SDKOBJ_CFLAGS -o "$DST/sdkobj/$f.o" "$ROOT/sdk/$f.c"
+done
+# Keep the raw SDK sources + header for reference / future in-OS compiles.
 cp -a "$ROOT/sdk/tccsdk.c" "$ROOT/sdk/posix.c" "$ROOT/sdk/libtcc1.c" \
       "$ROOT/sdk/crt1.c" "$ROOT/sdk/setjmp.c" "$DST/sdk/"
-# The tccboot link step compiles these SDK sources raw (not preprocessed),
-# so the quoted #include "dexsdk.h" in tccsdk.c/crt1.c must resolve.
 cp -a "$ROOT/sdk/dexsdk.h" "$DST/sdk/dexsdk.h"
 cp -a "$ROOT/apps/tcc.exe" "$DST/tcc.exe"
 cp -a "$ROOT/contrib/selfhost/min.c" "$DST/min.c"
+cp -a "$ROOT/contrib/selfhost/args.c" "$DST/args.c"
 
 # Host-preprocess so in-OS tcc does not open headers (ISO/FAT include I/O GPFs).
 # tcc -E defines __TINYC__, so sdk/stdarg.h expands to struct va_list.

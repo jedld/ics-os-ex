@@ -40,6 +40,48 @@ int fg_toggle(){
 };
 
 
+static int fg_last = 0;
+static int fg_prefix = 0;
+
+static void fg_vga_status(const char *msg, unsigned char attr)
+{
+   volatile unsigned char *vga = (unsigned char *)0xB8000 + 24 * 80 * 2;
+   int i;
+   for (i = 0; i < 80; i++) {
+      char ch = (msg && msg[i]) ? msg[i] : ' ';
+      vga[i * 2] = (unsigned char)ch;
+      vga[i * 2 + 1] = attr;
+   }
+}
+
+void fg_status(const char *msg)
+{
+   fg_vga_status(msg, 0x1F); /* white on blue */
+}
+
+static void fg_status_windows(const char *hint)
+{
+   char line[81];
+   int i, n = 0;
+   n = sprintf(line, "[%d]", fg_current);
+   for (i = 0; i < FG_MAXCONSOLE && n < 70; i++) {
+      if (fg_vconsoles[i] && !fg_vconsoles[i]->ignore) {
+         PCB386 *p = ps_findprocess(fg_vconsoles[i]->pid);
+         char mark = (i == fg_current) ? '*' : ' ';
+         if (p && p != (PCB386 *)-1)
+            n += sprintf(line + n, " %c%d:%s", mark, i, p->name);
+         else
+            n += sprintf(line + n, " %c%d", mark, i);
+      }
+   }
+   if (hint && n < 78) {
+      line[n++] = ' ';
+      strncpy(line + n, hint, 80 - n - 1);
+      line[80] = 0;
+   }
+   fg_status(line);
+}
+
 //Sets the foreground console
 int fg_setforeground(int num){
    DWORD cpuflags;
@@ -50,47 +92,137 @@ int fg_setforeground(int num){
    if (num < FG_MAXCONSOLE){
       if (fg_vconsoles[num] != 0){
          DEX32_DDL_INFO *fgDDL= fg_vconsoles[num]->screen;
-         int ret = fg_current;
+         ret = fg_current;
+         if (num != fg_current)
+            fg_last = fg_current;
          Dex32SetActiveDDL(fgDDL);
          fg_current = num;
+         if (fg_vconsoles[num]->tty)
+            tty_set_fg(fg_vconsoles[num]->tty);
       };
    };
     
    dex32_restoreints(cpuflags);
-    
+   if (ret != -1)
+      fg_status_windows(0);
    return ret;
 };
 
-//move to previous console
+static int fg_usable(int i)
+{
+   return i >= 0 && i < FG_MAXCONSOLE && fg_vconsoles[i]
+          && !fg_vconsoles[i]->ignore;
+}
+
+//move to previous console (wraps, tmux C-b p)
 void fg_prev(){
-   int candidate = -1;
    int i;
-   for (i = fg_current-1; i >= 0; i--){
-      if (fg_vconsoles[i]!=0){
-         if (!fg_vconsoles[i]->ignore){
-            candidate = i;break;
-         };
-      };
-   }   
-   if (candidate != -1) 
-      fg_setforeground(candidate);
-};
-
-//moves to the next virtual console
-void fg_next(){
-   int candidate = -1;
-   int i;
-   for (i= fg_current + 1; i < FG_MAXCONSOLE;i++){
-      if (fg_vconsoles[i]!=0){
-         if (!fg_vconsoles[i]->ignore){
-            candidate = i;break;
-         };
-      };   
+   for (i = 1; i <= FG_MAXCONSOLE; i++) {
+      int n = (fg_current - i + FG_MAXCONSOLE) % FG_MAXCONSOLE;
+      if (fg_usable(n)) {
+         fg_setforeground(n);
+         return;
+      }
    }
-
-   if (candidate != -1) 
-      fg_setforeground(candidate);
 };
+
+//moves to the next virtual console (wraps, tmux C-b n)
+void fg_next(){
+   int i;
+   for (i = 1; i <= FG_MAXCONSOLE; i++) {
+      int n = (fg_current + i) % FG_MAXCONSOLE;
+      if (fg_usable(n)) {
+         fg_setforeground(n);
+         return;
+      }
+   }
+};
+
+static void fg_lastwin(void)
+{
+   if (fg_usable(fg_last))
+      fg_setforeground(fg_last);
+   else
+      fg_next();
+}
+
+static void fg_kill_current(void)
+{
+   int pid, i, others = 0;
+   if (!fg_usable(fg_current))
+      return;
+   for (i = 0; i < FG_MAXCONSOLE; i++)
+      if (fg_usable(i) && i != fg_current)
+         others++;
+   if (!others) {
+      fg_status("C-b x: last window — not killed");
+      return;
+   }
+   pid = fg_vconsoles[fg_current]->pid;
+   fg_next();
+   if (pid)
+      dex32_killkthread(pid);
+}
+
+/* tmux-style prefix C-b (keyboard encodes Ctrl-A=0, Ctrl-B=1, Ctrl-C=2). */
+#define FG_PREFIX  ('b' - 'a')
+
+int fg_mux_key(int c)
+{
+   if (!fg_prefix) {
+      if (c == FG_PREFIX) {
+         fg_prefix = 1;
+         fg_status_windows("C-b  c:new n:next p:prev l:last w:list x:kill ?:help");
+         return 1;
+      }
+      return 0;
+   }
+   fg_prefix = 0;
+   if (c == FG_PREFIX) {
+      /* C-b C-b: send literal Ctrl-B to the tty. */
+      tty_input_fg(2);
+      return 1;
+   }
+   if (c == 'c' || c == ('c' - 'a')) {
+      console_new();
+      fg_status_windows("new");
+      return 1;
+   }
+   if (c == 'n' || c == ('n' - 'a')) {
+      fg_next();
+      return 1;
+   }
+   if (c == 'p' || c == ('p' - 'a')) {
+      fg_prev();
+      return 1;
+   }
+   if (c == 'l' || c == ('l' - 'a')) {
+      fg_lastwin();
+      return 1;
+   }
+   if (c == 'w' || c == ('w' - 'a') || c == 's') {
+      fg_set_state(1);
+      return 1;
+   }
+   if (c == 'x' || c == ('x' - 'a')) {
+      fg_kill_current();
+      return 1;
+   }
+   if (c == '?' || c == '/') {
+      fg_status("C-b c new | n next | p prev | l last | 0-9 select | w list | x kill | C-b C-b send");
+      return 1;
+   }
+   if (c >= '0' && c <= '9') {
+      int n = c - '0';
+      if (fg_usable(n))
+         fg_setforeground(n);
+      else
+         fg_status("no such window");
+      return 1;
+   }
+   fg_status_windows(0);
+   return 1;
+}
 
 
 //grab the keyboard
@@ -149,6 +281,7 @@ fg_processinfo *fg_register(DEX32_DDL_INFO *scr, int keyboard){
    new_vconsole->screen = scr;
    new_vconsole->keyboardfocus = keyboard;
    new_vconsole->pid = getprocessid();
+   new_vconsole->tty = 0;
    fg_vconsoles[slot] = new_vconsole;
 
    dex32_restoreints(cpuflags);

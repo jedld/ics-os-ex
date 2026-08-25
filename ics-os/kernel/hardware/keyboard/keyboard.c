@@ -123,8 +123,10 @@ void  kbd_irq(void)
 
    if (c!=-1)
     {
-    
-           if (!kb_dohotkey(c,kbd_status))
+           /* tmux-style multiplexer first so C-b is not typed into the shell. */
+           if (fg_mux_key(c))
+              ;
+           else if (!kb_dohotkey(c,kbd_status))
            {     
                    if (c == SOFT_RESET) ps_shutdown();
                         else 
@@ -135,9 +137,13 @@ void  kbd_irq(void)
                    if (c==KEY_F4+400) kill_foreground();  //force terminate
                         else
                    if (c=='c'-'a')
-                        signal_foreground(); //ask the app to terminate itself
+                        {
+                        signal_foreground(); /* ask the app to terminate itself */
+                        tty_input_fg(3);
+                        }
                    else
                         {
+                        tty_input_fg(c);
                       	if (inq(&_q,c)==-1) beep();
                       	}
           	};

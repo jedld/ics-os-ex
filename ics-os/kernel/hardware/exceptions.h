@@ -31,7 +31,17 @@
 #define INVALID_TSS 4
 
 void divide_error(DWORD address);
+/* x86_64 fault context, filled live by the #13 wrapper (irqwrap.S). */
+struct gpf_info {
+   unsigned long long rip;   /* faulting RIP */
+   unsigned long long cr2;   /* faulting linear address (0 if not a page fault) */
+   unsigned int err;         /* #13 error code */
+   unsigned int cs, ss;      /* active segment selectors at fault */
+   unsigned long long rsp;   /* active RSP at fault */
+   unsigned long long cr3;   /* active page table */
+};
 void GPFhandler(DWORD address);
+void GPFhandler64(struct gpf_info *fi);
 DWORD pagefaulthandler(DWORD location,DWORD fault_info);
 void exc_showdump(DWORD location,int type,DWORD pf_info);
 void exc_invalidtss(DWORD address);

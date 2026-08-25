@@ -1132,6 +1132,10 @@ char getch(){
 };
 
 int getchar(){
+   char c;
+   long n = dexsdk_systemcall(FXN_SYSREAD, 0, (long)&c, 1, 0, 0);
+   if (n == 1)
+      return (unsigned char)c;
    return (int)getch();
 };
 
@@ -1348,17 +1352,19 @@ void kb_ready(){
 }
 
 //random
-unsigned long int next = 1;
+/* Named rand_seed (not 'next'): with ONE_SOURCE=0 the TinyCC preprocessor's
+   global function next() (tccpp.c) collides with this global symbol at link. */
+static unsigned long int rand_seed = 1;
 
 /* rand: return pseudo-random integer on 0..32767 */
 int rand(void){
-   next = next * 1103515245 + 12345;
-   return (unsigned int)(next/65536) % 32768;
+   rand_seed = rand_seed * 1103515245 + 12345;
+   return (unsigned int)(rand_seed/65536) % 32768;
 }
 
 /* srand: set seed for rand() */
 void srand(unsigned int seed){
-   next = seed;
+   rand_seed = seed;
 }
 
 /*Process control functions */

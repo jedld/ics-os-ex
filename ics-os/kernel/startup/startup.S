@@ -75,12 +75,15 @@ gdtr64:
 .code32
 .text
 .globl startup
+.globl _start
 .extern main
 .extern long_mode_entry
 
 .equ KERNEL_CS64, 0x08
 .equ KERNEL_DS,   0x10
 
+_start:
+startup_alias:
 startup:
     /* Preserve Multiboot EAX/EBX before any clobber (serial uses %al!). */
     movl %eax, 0x9000
@@ -198,6 +201,22 @@ long_mode_start:
     movb $0x0F, 0xb8007
 
     /* Do NOT disable LAPIC — leave enabled for SMP later */
+
+    /* Zero the C-global BSS region: boot_stack_top .. bssEnd.
+       .bss also holds the in-use boot page tables (boot_pml4..boot_pd3,
+       CR3 points here) and the boot stack below boot_stack_top; zeroing
+       those would destroy paging immediately.  Everything from
+       boot_stack_top to bssEnd is NOBITS holding stale RAM, so every
+       uninitialized C global (sync locks, flags, PCBs) is garbage and
+       boot is non-deterministic (e.g. processmgr_busy.busy != 0
+       deadlocks sync_entercrit in ps_scheduler_install). */
+    movabs $boot_stack_top, %rsi
+    movabs $bssEnd, %rcx
+zero_bss:
+    movl $0, (%rsi)
+    addq $4, %rsi
+    cmpq %rcx, %rsi
+    jne zero_bss
 
     call main
 

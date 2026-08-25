@@ -8,6 +8,7 @@
 .extern fdchandler
 .extern api_syscall
 .extern GPFhandler
+.extern GPFhandler64
 .extern CPUint
 .extern nocoprocessor
 .extern divide_error
@@ -129,9 +130,27 @@ gpfwrapper:
     cli
     /* On entry: 0(rsp)=error, 8(rsp)=rip, 16(rsp)=cs, 24(rsp)=rflags */
     PUSH_ALL
-    /* After PUSH_ALL (15 regs): error at 120, rip at 128 */
-    movq 128(%rsp), %rdi        /* faulting RIP for GPFhandler */
-    call GPFhandler
+    /* After PUSH_ALL (15 regs): error at 120, rip at 128, cs at 136 */
+    /* struct gpf_info layout (gcc): rip(0) cr2(8) err(16) pad(20) cs(20) ss(24)
+       rsp(32) cr3(40) sizeof=48 */
+    subq $64, %rsp
+    movq 192(%rsp), %rax        /* saved rip (128 + 64) */
+    movq %rax, 0(%rsp)
+    movq %cr2, %rax
+    movq %rax, 8(%rsp)
+    movl 184(%rsp), %eax        /* error code (120 + 64) */
+    movl %eax, 16(%rsp)
+    movw 200(%rsp), %ax         /* cs (136 + 64) -> field cs @20 */
+    movw %ax, 20(%rsp)
+    movw %ss, %ax
+    movw %ax, 24(%rsp)
+    leaq 8(%rsp), %rax          /* active RSP = return frame (rip+8) */
+    movq %rax, 32(%rsp)
+    movq %cr3, %rax
+    movq %rax, 40(%rsp)
+    movq %rsp, %rdi
+    call GPFhandler64
+    addq $64, %rsp
     POP_ALL
     addq $8, %rsp
     iretq

@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-exec test-iobench test-smp test-boot test-integration
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-smp test-boot test-integration
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -65,6 +65,8 @@ usb: apps prep_image
 apps:
 	-$(MAKE) -C contrib/hello
 	-$(MAKE) -C contrib/hello install
+	-$(MAKE) -C contrib/sh
+	-$(MAKE) -C contrib/sh install
 	$(MAKE) -C contrib/tcc
 	$(MAKE) -C contrib/tcc install
 
@@ -204,11 +206,13 @@ test-tccboot: apps vmdex
 	@mkdir -p /tmp/icsos-tccboot-iso/boot/grub \
 		/tmp/icsos-tccboot-iso/apps \
 		/tmp/icsos-tccboot-iso/tcc1 \
-		/tmp/icsos-tccboot-iso/include
+		/tmp/icsos-tccboot-iso/include \
+		/tmp/icsos-tccboot-iso/pre
 	@cp kernel/Kernel64.bin /tmp/icsos-tccboot-iso/vmdex
 	@cp apps/tcc.exe /tmp/icsos-tccboot-iso/apps/tcc.exe
 	@cp contrib/selfhost/min.c /tmp/icsos-tccboot-iso/apps/min.c
 	@cp /tmp/icsos-tccsrc.tar /tmp/icsos-tccboot-iso/tccsrc.tar
+	@cp /tmp/icsos-tcc-short/pre/*.c /tmp/icsos-tccboot-iso/pre/
 	@cp sdk/tccsdk.c sdk/posix.c sdk/libtcc1.c sdk/crt1.c sdk/setjmp.c \
 		/tmp/icsos-tccboot-iso/tcc1/
 	@cp -a sdk/include/. /tmp/icsos-tccboot-iso/include/
@@ -218,13 +222,72 @@ test-tccboot: apps vmdex
 		> /tmp/icsos-tccboot-iso/boot/grub/grub.cfg
 	@grub-mkrescue -o /tmp/icsos-tccboot.iso /tmp/icsos-tccboot-iso >/dev/null 2>&1
 	@echo "Running tccboot test (KVM)..."
-	@-timeout 900 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+	@-timeout 7200 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
 		-cdrom /tmp/icsos-tccboot.iso -boot d > /tmp/icsos-tccboot.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-tccboot.log
 	@grep -aq "ramdisk: mounted" /tmp/icsos-tccboot.log
 	@grep -aq "TCCBOOT_TEST_PASS" /tmp/icsos-tccboot.log
 	@! grep -aq "TCCBOOT_TEST_FAIL" /tmp/icsos-tccboot.log
 	@echo "test-tccboot PASS"
+
+# Compile the kernel inside ICS-OS with tcc (C via tcc, GAS via prebuilt .o).
+test-kbuild: apps vmdex
+	@echo "Staging kernel sources + GAS objects for kbuild..."
+	@chmod +x scripts/stage-kernel-src.sh
+	@scripts/stage-kernel-src.sh /tmp/icsos-kbuild
+	@echo "Building Multiboot2 ISO for kbuild..."
+	@rm -rf /tmp/icsos-kbuild-iso
+	@mkdir -p /tmp/icsos-kbuild-iso/boot/grub /tmp/icsos-kbuild-iso/apps \
+		/tmp/icsos-kbuild-iso/kasm
+	@cp kernel/Kernel64.bin /tmp/icsos-kbuild-iso/vmdex
+	@cp apps/tcc.exe /tmp/icsos-kbuild-iso/apps/tcc.exe
+	@cp /tmp/icsos-kbuild/ksrc.tar /tmp/icsos-kbuild-iso/ksrc.tar
+	@cp /tmp/icsos-kbuild/kasm/*.o /tmp/icsos-kbuild-iso/kasm/
+	@printf '%s\n' 'set PATH=/icsos/apps' 'kbuild' 'reboot' \
+		> /tmp/icsos-kbuild-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-kbuild-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-kbuild.iso /tmp/icsos-kbuild-iso >/dev/null 2>&1
+	@echo "Running kbuild test (KVM)..."
+	@-timeout 1800 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+		-cdrom /tmp/icsos-kbuild.iso -boot d > /tmp/icsos-kbuild.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-kbuild.log
+	@grep -aq "KBUILD_TEST_PASS" /tmp/icsos-kbuild.log
+	@! grep -aq "KBUILD_TEST_FAIL" /tmp/icsos-kbuild.log
+	@echo "test-kbuild PASS"
+
+# Compile tcc with tcc, then compile the kernel with tccnew.
+test-fullhost: apps vmdex
+	@echo "Staging tcc + kernel sources for fullhost..."
+	@chmod +x scripts/stage-tcc-short.sh scripts/stage-kernel-src.sh
+	@scripts/stage-tcc-short.sh /tmp/icsos-tcc-short
+	@tar --format=ustar -C /tmp/icsos-tcc-short -cf /tmp/icsos-tccsrc.tar .
+	@scripts/stage-kernel-src.sh /tmp/icsos-kbuild
+	@rm -rf /tmp/icsos-fullhost-iso
+	@mkdir -p /tmp/icsos-fullhost-iso/boot/grub /tmp/icsos-fullhost-iso/apps \
+		/tmp/icsos-fullhost-iso/tcc1 /tmp/icsos-fullhost-iso/include \
+		/tmp/icsos-fullhost-iso/kasm
+	@cp kernel/Kernel64.bin /tmp/icsos-fullhost-iso/vmdex
+	@cp apps/tcc.exe /tmp/icsos-fullhost-iso/apps/tcc.exe
+	@cp contrib/selfhost/min.c /tmp/icsos-fullhost-iso/apps/min.c
+	@cp /tmp/icsos-tccsrc.tar /tmp/icsos-fullhost-iso/tccsrc.tar
+	@cp /tmp/icsos-kbuild/ksrc.tar /tmp/icsos-fullhost-iso/ksrc.tar
+	@cp /tmp/icsos-kbuild/kasm/*.o /tmp/icsos-fullhost-iso/kasm/
+	@cp sdk/tccsdk.c sdk/posix.c sdk/libtcc1.c sdk/crt1.c sdk/setjmp.c \
+		/tmp/icsos-fullhost-iso/tcc1/
+	@cp -a sdk/include/. /tmp/icsos-fullhost-iso/include/
+	@printf '%s\n' 'set PATH=/icsos/apps' 'fullhost' 'reboot' \
+		> /tmp/icsos-fullhost-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-fullhost-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-fullhost.iso /tmp/icsos-fullhost-iso >/dev/null 2>&1
+	@echo "Running fullhost test (KVM, long)..."
+	@-timeout 3600 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+		-cdrom /tmp/icsos-fullhost.iso -boot d > /tmp/icsos-fullhost.log 2>&1
+	@grep -aq "TCCBOOT_TEST_PASS" /tmp/icsos-fullhost.log
+	@grep -aq "KBUILD_TEST_PASS" /tmp/icsos-fullhost.log
+	@grep -aq "FULLHOST_TEST_PASS" /tmp/icsos-fullhost.log
+	@echo "test-fullhost PASS"
 # Faster check: boot and exec the host-built hello.exe from the CD root.
 test-exec: kernel/Kernel64.bin apps/hello.exe
 	@echo "Building Multiboot2 ISO with hello.exe for exec smoke test..."

@@ -73,13 +73,58 @@ Default scheduler is **priority round-robin** (`process/scheduler.c`):
   sector instead of ending the directory early (multi-sector dirs like
   `/src/tcc` previously hid later files).
 - Full `tccboot` (rebuild TinyCC with itself): `make test-tccboot`
-  (Multiboot2 ISO, KVM). Staging works: 8.3-renamed sources packed as
-  `tccsrc.tar`, extracted onto `/ramdisk`, compile via
-  `tcc @/ramdisk/tccboot.rsp`. In-OS ONE_SOURCE of TinyCC itself still
-  hangs (no output for 15m after opening `tcc.c`); follow-up is to
-  finish that compile or shrink the translation unit.
+  (Multiboot2 ISO, KVM). Sources + SDK + `tcc.exe` are packed as one
+  ustar (`tccsrc.tar`) and extracted onto `/ramdisk`. TinyCC is then
+  compiled **per file** (`-DONE_SOURCE=0`) and linked to `tccnew.exe`,
+  which must compile and run `min.c`. `make test-kbuild` compiles kernel
+  C with in-OS tcc and links against prebuilt GAS objects. `make
+  test-fullhost` is tccboot then kbuild using `tccnew.exe`. A tcc-linked
+  kernel currently double-faults after serial init (red-zone / calling
+  convention); the tests assert a valid ELF64 image.
 - ISO9660 directory records skip sector padding so multi-sector dirs
   (e.g. `/src/tcc`) list all files.
+
+## TTY / userland console
+
+The interactive shell is moving out of the kernel (`console_execute` in
+`kernel/console/console.c`) onto a POSIX-style tty + userland `sh.exe`.
+
+Kernel keeps: character queues, canonical line discipline (`\b`, `\r`),
+VGA (DEX DDL) and serial backends, Ctrl-C → SIGINT to the foreground pgrp,
+and a fallback kernel prompt if `/icsos/apps/sh.exe` is missing.
+
+Userland: `contrib/sh/sh.exe` reads fd 0 / writes fd 1. Unknown commands
+call `sys_kcmd` so existing builtins still work while they are ported.
+
+Command classification (`console_execute`):
+
+- **shell builtin:** `echo`, `cd`, `set`, `exit`, `help`, `!!`, `pwd`
+- **user utility (target):** `ls`/`dir`, `cat`/`type`, `cp`/`copy`, `mkdir`,
+  `ps`/`procs`, `rm`/`del`
+- **privileged (stay kernel syscalls):** `mount`, `umount`, `reboot`,
+  `kbuild`, `loadmod`, `selfhost`, `tccboot`
+
+F12 still switches virtual consoles; each VT has its own tty. COM1 is
+`ttyS0` (serial backend) for headless tests.
+
+**tmux-style window keys** (prefix `Ctrl-B`, same as tmux; F2/F11/F12 still work):
+
+| After `C-b` | Action |
+|-------------|--------|
+| `c` | new console |
+| `n` / `p` | next / previous (wraps) |
+| `l` | last window |
+| `0`–`9` | select window |
+| `w` | window list (fg manager) |
+| `x` | kill current window (not the last one) |
+| `?` | help on the status line |
+| `C-b` | send a literal Ctrl-B to the tty |
+
+A blue status line on row 24 shows `[*n:name …]` while the prefix is armed.
+
+Ring-3: user CS is recorded as `USER_CODE` (64-bit DPL=3 GDT). Software
+context switch still uses kernel CS until TSS.rsp0 + `iretq` is wired;
+`int 0x30` already has DPL=3.
 
 ## Key files
 
@@ -90,4 +135,6 @@ Default scheduler is **priority round-robin** (`process/scheduler.c`):
 | IRQ wrappers | `kernel/irqwrap.S` |
 | Context switch | `kernel/cpu/context.S` |
 | LAPIC / SMP | `kernel/cpu/lapic.c`, `smp.c`, `ap_trampoline.S` |
+| TTY | `kernel/console/tty.c` |
+| Userland shell | `contrib/sh/sh.c` |
 | Linker | `kernel/lscript64.ld` |

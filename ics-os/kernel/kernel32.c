@@ -115,6 +115,7 @@ extern void textcolor(unsigned char c);
 #include "process/environment.h"
 #include "console/foreground.h"
 #include "console/console.h"
+#include "console/tty.h"
 #include "iomgr/blkcache.h"
 #include "stdlib/stdlib.h"
 #include "devmgr/bridges.h"
@@ -145,6 +146,7 @@ extern int cpu_count;
   compilation without the use of a makefile*/
 
 #include "console/dex_DDL.c"
+#include "console/tty.c"
 #include "hardware/dexapm.c"
 #include "hardware/chips/irqhandlers.c"
 #include "memory/dlmalloc.c"
@@ -367,6 +369,7 @@ void main(){
     
    //initialize the virtual console manager
    fg_init();
+   tty_init();
     
    //Create a virtual console that the kernel will send its output to
    consoleDDL = Dex32CreateDDL();

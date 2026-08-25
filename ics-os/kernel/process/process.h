@@ -239,6 +239,20 @@ typedef struct _PCB386 {
 
    void *stdin;             //For pipes *NOT YET IMPLEMENTED*
 
+#define FD_NONE  0
+#define FD_TTY   1
+#define FD_VFS   2
+#define FD_MAX   16
+   struct {
+      int type;
+      void *ptr;
+   } fds[FD_MAX];
+   struct _tty *ctty;
+   int session;
+   int pgrp;
+   int pending_sig;
+   DWORD usercs;           /* recorded USER_CODE for future ring-3 iretq */
+
    int context,function;    /*used by device drivers to determine context info.
                                Reserved on USER mode programs.*/
     

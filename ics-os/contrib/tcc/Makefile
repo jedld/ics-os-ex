@@ -13,7 +13,8 @@ override CFLAGS := $(APP_CFLAGS) \
 LIBS := $(SDK)/tccsdk.c $(SDK)/posix.c $(SDK)/libtcc1.c $(SDK)/crt1.c $(SDK)/setjmp.c
 
 $(EXE): tcc.c tcc.h config.h libtcc.c x86_64-gen.c x86_64-link.c x86_64-asm.h \
-		$(SDK)/posix.c $(SDK)/tccsdk.c $(SDK)/crt1.c $(SDK)/setjmp.c
+		$(SDK)/posix.c $(SDK)/tccsdk.c $(SDK)/crt1.c $(SDK)/setjmp.c \
+		$(SDK)/libtcc1.c
 	$(CC) $(CFLAGS) $(APP_LDFLAGS) -Wl,-s -o$(EXE) tcc.c $(LIBS)
 
 install: $(EXE)

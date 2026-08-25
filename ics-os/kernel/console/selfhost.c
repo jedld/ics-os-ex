@@ -190,17 +190,48 @@ static int tccboot_run(void)
    }
 
    printf("tccboot: linking tccnew.exe\n");
+   /* The SDK runtime (tccsdk/posix/libtcc1/crt1/setjmp) is a fixed
+      dependency, linked from host-prebuilt objects (sdkobj/) so the in-OS
+      tcc never has to parse the raw SDK headers (which hit TinyCC/SDK
+      header clashes such as va_list and size_t). */
    sprintf(cmd,
-           "%s -nostdlib -static -I/icsos/include -o /ramdisk/tccnew.exe "
+           "%s -nostdlib -static -o /ramdisk/tccnew.exe "
            "/ramdisk/obj/tcc.o /ramdisk/obj/libtcc.o /ramdisk/obj/tccpp.o "
            "/ramdisk/obj/tccgen.o /ramdisk/obj/tccelf.o /ramdisk/obj/tccrun.o "
            "/ramdisk/obj/tccasm.o /ramdisk/obj/x64gen.o /ramdisk/obj/x64lnk.o "
            "/ramdisk/obj/i386asm.o "
-           "/ramdisk/sdk/tccsdk.c /ramdisk/sdk/posix.c /ramdisk/sdk/libtcc1.c "
-           "/ramdisk/sdk/crt1.c /ramdisk/sdk/setjmp.c",
+           "/ramdisk/sdkobj/tccsdk.o /ramdisk/sdkobj/posix.o "
+           "/ramdisk/sdkobj/libtcc1.o /ramdisk/sdkobj/crt1.o "
+           "/ramdisk/sdkobj/setjmp.o",
            cc);
    if (!run_tcc(cc, cmd)) {
       printf("TCCBOOT_TEST_FAIL link\n");
+      return 0;
+   }
+
+   /* CONTROL: a small TCC-linked binary run WITH command-line arguments.
+      If this prints its args but the large tccnew.exe does not, the hang is
+      specific to the big binary; if it also hangs, args/TCC-link are the bug. */
+   printf("tccboot: control - compiling /ramdisk/args.c (with SDK)\n");
+   /* Link the SDK objects (like tccnew) so printf/getparameters/strtok/crt1
+      resolve. This makes args.exe a small TCC-compiled + full-SDK binary with
+      the SAME linker output (2MB-aligned .data at 0x64xxxx) and the SAME
+      instrumented crt1, but a tiny core. If it runs with args but the large
+      tccnew does not, the fault is in the big core; if it also hangs, the
+      TCC link / SDK crt1 / args path is the bug. */
+   sprintf(cmd,
+           "/ramdisk/tcc.exe -nostdlib -static -o /ramdisk/args.exe "
+           "/ramdisk/args.c "
+           "/ramdisk/sdkobj/tccsdk.o /ramdisk/sdkobj/posix.o "
+           "/ramdisk/sdkobj/libtcc1.o /ramdisk/sdkobj/crt1.o "
+           "/ramdisk/sdkobj/setjmp.o");
+   if (!run_tcc("/ramdisk/tcc.exe", cmd)) {
+      printf("TCCBOOT_TEST_FAIL compile args.c\n");
+      return 0;
+   }
+   printf("tccboot: control - running /ramdisk/args.exe with args\n");
+   if (!user_execp("/ramdisk/args.exe", 0, "/ramdisk/args.exe hello world")) {
+      printf("TCCBOOT_TEST_FAIL run args.exe\n");
       return 0;
    }
 

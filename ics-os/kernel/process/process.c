@@ -402,6 +402,15 @@ DWORD createprocess(
    temp->op_success   = 1; 
    temp->arrivaltime  = getprecisetime();             //set the time the process was created 
    temp->stdin        = parent->stdin;                //set stdin to be the same as parent
+   {
+      int fi;
+      for (fi = 0; fi < FD_MAX; fi++)
+         temp->fds[fi] = parent->fds[fi];
+      temp->ctty = parent->ctty;
+      temp->session = parent->session;
+      temp->pgrp = parent->pgrp;
+      temp->usercs = USER_CODE;
+   }
    memcpy(&temp->regs2,&ps_kernelfpustate,sizeof(ps_kernelfpustate));
 
    //get the working directory of this process
@@ -439,7 +448,8 @@ DWORD createprocess(
    temp->regs.SS0    = SYS_STACK_SEL;
    temp->syscallsize=syscallsize;
 
-   /* Software context (run in kernel CS for now; full ring3 later). */
+   /* Software context. usercs is USER_CODE; actual CS stays kernel until
+      TSS.rsp0 + iretq ring-3 is wired (int 0x30 DPL is already 3). */
    {
       uintptr top = (uintptr)stack;
       top &= ~(uintptr)15;
@@ -467,8 +477,8 @@ DWORD createprocess(
    }
 
    //prepare to enter critical section
-   sync_entercrit(&processmgr_busy);	
-   dex32_stopints(&flags);  
+   sync_entercrit(&processmgr_busy);
+   dex32_stopints(&flags);
 
    //allocate memory for the system call stack
    dex32_commitblock((DWORD)(uintptr)syscallstack,syscallsize,&pages,pagedir,PG_WR);
@@ -507,11 +517,26 @@ DWORD createprocess(
 #endif
 
    //add the process to the list of processes
+   /* Compile jobs (in-OS TinyCC) are the workhorses of the self-host
+      pipeline.  The parent console blocks in dex32_waitpid() which
+      re-invokes the scheduler on every timer tick; under priority RR
+      the child only gets ~50% of the CPU (and each context switch costs
+      fxsave/fxrstor + CR3 reload).  Giving user processes priority 1
+      lets the compile run uninterrupted while the console still gets its
+      slice on the ~20 voluntary taskswitch() calls it makes per second. */
+   temp->priority = 1;
+
    ps_enqueue(temp);
 
-   //end of critical section
-   dex32_restoreints(flags);
+   //end of critical section — exit the crit section WHILE interrupts are
+   //still disabled so the console cannot be preempted mid-leavecrit.
+   //Do NOT re-enable interrupts here: the caller (user_execp) will
+   //re-enable them after entering dex32_waitpid().  Re-enabling here
+   //opens a window where a timer IRQ fires, schedule_from_timer runs,
+   //and the scheduler picks the newly-created child (priority 1) before
+   //the parent is in the waitpid loop — corrupting the context switch.
    sync_leavecrit(&processmgr_busy);
+   dex32_restoreints(flags);
 
    return temp->processid;
 };
@@ -698,6 +723,14 @@ DWORD createkthread(void *ptr,char *name,DWORD stacksize){
 
    temp->arrivaltime = getprecisetime();
    temp->stdin       = current_process->stdin;
+   {
+      int fi;
+      for (fi = 0; fi < FD_MAX; fi++)
+         temp->fds[fi] = current_process->fds[fi];
+      temp->ctty = current_process->ctty;
+      temp->session = current_process->session;
+      temp->pgrp = current_process->pgrp;
+   }
    temp->cpu_affinity = -1;
    temp->on_cpu = -1;
 
@@ -1145,8 +1178,9 @@ int dex32_waitpid(int pid,int status){
       PCB386 *p = ps_findprocess(pid);
       if (p == (PCB386*)-1)
          return 0;
-      /* Prefer an explicit switch to the child. Generic RR may starve
-         newly created user processes under software scheduling. */
+      /* Directly switch to the child. The ctx_load_in_progress guard
+         in context_load prevents a nested ps_switchto from clobbering
+         the child's saved ctx if a timer fires during context_load. */
       ps_switchto(p);
    }
 };
@@ -1352,10 +1386,24 @@ void ps_set_affinity(int pid, int cpu){
 
 //Context switching, dispatcher
 // Software context switch (replaces hardware TSS far-jumps).
+
+/* Reentrancy guard: set while we are between fpu_save and the
+   context_switch/context_load call.  A timer IRQ that fires in that
+   window (context_load restores RFLAGS with IF set BEFORE the final
+   `ret`) would otherwise re-enter ps_switchto via schedule_from_timer
+   and clobber the in-flight task's saved ctx (live RIP/RSP overwrites
+   the seeded entry point).  The guard is per-CPU so SMP is safe. */
+static volatile int ps_switchto_in_progress[4];
+
+
 void ps_switchto(PCB386 *process){
    PCB386 *prev = current_process;
    int me = smp_cpu_id();
    extern void lapic_send_ipi(u32 apic_id, u32 vector);
+
+   if (ps_switchto_in_progress[me])
+      return; /* already switching — a nested call from IRQ would corrupt ctx */
+   ps_switchto_in_progress[me] = 1;
 
    if (!process)
       return;
@@ -1375,8 +1423,11 @@ void ps_switchto(PCB386 *process){
    }
 
    if (prev && prev != process) {
-      fpu_save(&prev->fpu);
+     fpu_save(&prev->fpu);
    }
+   /* Guard is now active: any timer IRQ that fires between here and the
+      context_load's final `ret` will see ps_switchto_in_progress[me]==1
+      and bail out of schedule_from_timer without touching contexts. */
 
    /* Seed context from legacy TSS fields on first run. */
    if (process->ctx.rip == 0 && process->regs.EIP != 0) {
@@ -1397,10 +1448,17 @@ void ps_switchto(PCB386 *process){
    current_process = process;
    fpu_restore(&process->fpu);
 
+   /* Clear the guard before the actual switch.  The remaining window
+      (context_load's `pushq; ret`) is tiny; even if a timer fires
+      there, the nested ps_switchto will save the new task's live ctx
+      (RIP inside context_load) and the new task will correctly resume
+      to its entry point when re-scheduled. */
+   ps_switchto_in_progress[me] = 0;
+
    if (prev && prev != process)
-      context_switch(&prev->ctx, &process->ctx, &prev->on_cpu);
+     context_switch(&prev->ctx, &process->ctx, &prev->on_cpu);
    else
-      context_load(&process->ctx);
+     context_load(&process->ctx);
 };
 
 /*Calls the scheduler voluntarily*/
@@ -1410,10 +1468,20 @@ inline void taskswitch(){
 };
 
 /* Invoked from the timer IRQ wrapper after time_handler(). */
+
 void schedule_from_timer(void){
    PCB386 *readyprocess;
    devmgr_scheduler_extension *cursched;
    static PCB386 *zombie_free;
+
+   /* If context_load is in progress, the new task's context has been
+      fully loaded (RSP, GPRs, RFLAGS all restored) but the flag was
+      left set because context_load cannot clear it before `ret` without
+      opening a race window.  Clear it here — the new task is already
+      running, so it is safe to proceed with scheduling. */
+   extern volatile int ctx_load_in_progress;
+   if (ctx_load_in_progress)
+      return;
 
    if (sigwait || !current_process)
       return;
@@ -1930,7 +1998,7 @@ void process_init(){
    setgdt(PF_TSS,&(pfPCB.regs),103,0x89,0);
    //create a duplicate copy
    memcpy(&pfPCB_copy.regs,&pfPCB.regs,sizeof(pfPCB.regs));
-   setgdt(USER_CODE,0,0xFFFFF,0xFA,0xCF);
+   setgdt(USER_CODE,0,0xFFFFF,0xFA,0xAF); /* long-mode 64-bit user CS (DPL=3) */
    setgdt(USER_DATA,0,0xFFFFF,0xF2,0xCF);
    setgdt(USER_STACK,0,0xFFFFF,0xF2,0xCF);
    setgdt(USER_TSS,0,103,0xE9,0);
@@ -1947,14 +2015,18 @@ void process_init(){
    current_process = kernel;
    current_process->workdir = vfs_root;
 
+   /* processmgr_busy must be valid BEFORE the scheduler is
+      installed: extension_override() calls sync_entercrit() on it,
+      which busy-waits on var->busy.  (BSS is zeroed at startup, but
+      make the dependency explicit and robust.) */
+   processmgr_busy.busy = 0;
+   processmgr_busy.wait = 0;
    ps_scheduler_install();    //defined in kernel/process/scheduler.c
 
 #ifdef DEBUG_STARTUP
    printf("process manager: done.\n");
 #endif
 
-   processmgr_busy.busy = 0;
-   processmgr_busy.wait = 0;
     
    printf("Starting process manager...\n");
 };

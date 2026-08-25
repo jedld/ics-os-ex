@@ -530,6 +530,76 @@ long double __ulltold(unsigned long long a)
     }
 }
 
+/* TCC 0.9.27 x86_64 backend emits these conversion helper names (tccgen.c
+   gen_cvt_itof1/gen_cvt_ftoi1); older TCC used __ullt*. Provide all so any
+   int<->float conversion links against this runtime. */
+unsigned long long __fixunssfdi (float a1);
+unsigned long long __fixunsdfdi (double a1);
+unsigned long long __fixunsxfdi (long double a1);
+
+float __floatundisf(unsigned long long a)
+{
+    DWunion uu;
+    XFtype r;
+    uu.ll = a;
+    if (uu.s.high >= 0) {
+        return (float)uu.ll;
+    } else {
+        r = (XFtype)uu.ll;
+        r += 18446744073709551616.0;
+        return (float)r;
+    }
+}
+
+double __floatundidf(unsigned long long a)
+{
+    DWunion uu;
+    XFtype r;
+    uu.ll = a;
+    if (uu.s.high >= 0) {
+        return (double)uu.ll;
+    } else {
+        r = (XFtype)uu.ll;
+        r += 18446744073709551616.0;
+        return (double)r;
+    }
+}
+
+long double __floatundixf(unsigned long long a)
+{
+    DWunion uu;
+    XFtype r;
+    uu.ll = a;
+    if (uu.s.high >= 0) {
+        return (long double)uu.ll;
+    } else {
+        r = (XFtype)uu.ll;
+        r += 18446744073709551616.0;
+        return (long double)r;
+    }
+}
+
+long long __fixsfdi (float a1)
+{
+    long long ret; int s;
+    ret = __fixunssfdi((s = a1 >= 0) ? a1 : -a1);
+    return s ? ret : -ret;
+}
+
+long long __fixdfdi (double a1)
+{
+    long long ret; int s;
+    ret = __fixunsdfdi((s = a1 >= 0) ? a1 : -a1);
+    return s ? ret : -ret;
+}
+
+long long __fixxfdi (long double a1)
+{
+    long long ret; int s;
+    ret = __fixunsxfdi((s = a1 >= 0) ? a1 : -a1);
+    return s ? ret : -ret;
+}
+
 unsigned long long __fixunssfdi (float a1)
 {
     register union float_long fl1;
@@ -601,4 +671,61 @@ unsigned long long __fixunsxfdi (long double a1)
     else
         return 0;
 }
+
+/* TinyCC 0.9.27 x86_64 va_list helpers (see include/stdarg.h). */
+#if defined(__x86_64__)
+extern void *memset(void *s, int c, unsigned long n);
+extern void abort(void);
+
+enum __va_arg_type {
+    __va_gen_reg, __va_float_reg, __va_stack
+};
+
+typedef struct {
+    unsigned int gp_offset;
+    unsigned int fp_offset;
+    union {
+        unsigned int overflow_offset;
+        char *overflow_arg_area;
+    };
+    char *reg_save_area;
+} __va_list_struct;
+
+void __va_start(__va_list_struct *ap, void *fp)
+{
+    memset(ap, 0, sizeof(__va_list_struct));
+    *ap = *(__va_list_struct *)((char *)fp - 16);
+    ap->overflow_arg_area = (char *)fp + ap->overflow_offset;
+    ap->reg_save_area = (char *)fp - 176 - 16;
+}
+
+void *__va_arg(__va_list_struct *ap, int arg_type, int size, int align)
+{
+    size = (size + 7) & ~7;
+    align = (align + 7) & ~7;
+    switch (arg_type) {
+    case __va_gen_reg:
+        if (ap->gp_offset + size <= 48) {
+            ap->gp_offset += size;
+            return ap->reg_save_area + ap->gp_offset - size;
+        }
+        goto use_overflow_area;
+    case __va_float_reg:
+        if (ap->fp_offset < 128 + 48) {
+            ap->fp_offset += 16;
+            return ap->reg_save_area + ap->fp_offset - 16;
+        }
+        size = 8;
+        goto use_overflow_area;
+    case __va_stack:
+    use_overflow_area:
+        ap->overflow_arg_area += size;
+        ap->overflow_arg_area =
+            (char *)((long long)(ap->overflow_arg_area + align - 1) & -align);
+        return ap->overflow_arg_area - size;
+    default:
+        abort();
+    }
+}
+#endif
 

@@ -13,7 +13,7 @@ extern void *memset(void *s, int c, unsigned int n);
 extern void *memcpy(void *d, const void *s, unsigned int n);
 extern char *strcpy(char *d, const char *s);
 
-#define RAMDISK_SECTORS   16384  /* 8 MiB — enough for tccboot sources + output */
+#define RAMDISK_SECTORS   16384  /* 8 MiB — tccboot / kbuild sources */
 #define RAMDISK_SECSIZE   512
 #define RAMDISK_BYTES     (RAMDISK_SECTORS * RAMDISK_SECSIZE)
 
@@ -62,7 +62,7 @@ static void ramdisk_format_fat16(void)
    int reserved = 1;
    int fats = 2;
    int root_ents = 512;
-   int fat_secs = 32;
+   int fat_secs = 64;  /* 16384 FAT16 entries — covers 8 MiB at 512B/cluster */
 
    memset(b, 0, RAMDISK_BYTES);
 

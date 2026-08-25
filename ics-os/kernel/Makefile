@@ -28,7 +28,16 @@ kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		stdlib/time.c stdlib/time.h \
 		hardware/keyboard/keyboard.c console/dex_DDL.c \
 		console/foreground.c process/dex_taskmgr.c process/pdispatch.c \
-		console/console.c
+		console/console.c console/selfhost.c console/tty.c console/tty.h\
+	hardware/chips/ports.c hardware/vga/dexvga.c stdlib/qsort.c \
+		hardware/dexapm.c hardware/chips/irqhandlers.c memory/dlmalloc.c \
+		memory/bsdmallo.c vfs/vfs_core.c module/module.c module/elf_module.c console/dexio.c \
+		stdlib/stdlib.c hardware/keyboard/mouse.c hardware/exceptions.c \
+		hardware/hardware.c hardware/chips/speaker.c devmgr/dex32_devmgr.c \
+		devmgr/extension.c process/environment.c devmgr/bridges.c \
+		process/sync.c console/script.c process/process.c dexapi/dex32API.c \
+		hardware/ATA/ide.c vfs/vfs_aux.c memory/kheap.c memory/dexmalloc.c \
+		vmm/vmm.c
 	$(CC) $(CFLAGS) -o kernel32.o kernel32.c 
 	
 scheduler.o: process/scheduler.c

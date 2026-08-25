@@ -121,24 +121,20 @@ int close(int fd)
 
 ssize_t read(int fd, void *buf, size_t n)
 {
-   FILE *f = mapfd(fd);
+   FILE *f;
    int r;
+   if (fd >= 0 && fd < 3) {
+      long got = dexsdk_systemcall(0xA4, fd, (long)buf, (long)n, 0, 0);
+      if (got < 0) {
+         errno = 4;
+         return -1;
+      }
+      return (ssize_t)got;
+   }
+   f = mapfd(fd);
    if (!f) {
       errno = 9;
       return -1;
-   }
-   if (f == stdin) {
-      size_t i;
-      char *p = (char *)buf;
-      for (i = 0; i < n; i++) {
-         int c = getchar();
-         p[i] = (char)c;
-         if (c == '\n' || c == '\r') {
-            i++;
-            break;
-         }
-      }
-      return (ssize_t)i;
    }
    r = fread(buf, 1, (int)n, f);
    return r;
@@ -146,17 +142,19 @@ ssize_t read(int fd, void *buf, size_t n)
 
 ssize_t write(int fd, const void *buf, size_t n)
 {
-   FILE *f = mapfd(fd);
-   const char *p = (const char *)buf;
-   size_t i;
+   FILE *f;
+   if (fd >= 0 && fd < 3) {
+      long put = dexsdk_systemcall(0xA5, fd, (long)buf, (long)n, 0, 0);
+      if (put < 0) {
+         errno = 9;
+         return -1;
+      }
+      return (ssize_t)put;
+   }
+   f = mapfd(fd);
    if (!f) {
       errno = 9;
       return -1;
-   }
-   if (f == stdout || f == stderr) {
-      for (i = 0; i < n; i++)
-         charputc(p[i]);
-      return (ssize_t)n;
    }
    return fwrite(buf, 1, (int)n, f);
 }

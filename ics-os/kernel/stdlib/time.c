@@ -3,7 +3,7 @@ aux_time2=0;   //since the OS has the timer set to interrupt 200 times a second
                //an auxillary counter is required so that it increments time_count
                //if it reaches 200
                
-int time_monthdays[12]= {0,31,59,90,120,151,181,212,243,273,304,334,365}; 
+int time_monthdays[]= {0,31,59,90,120,151,181,212,243,273,304,334,365}; 
 
 //the tme returned by the timer chip is in BCD, so we have to
 //perform some conversions to binary
@@ -151,9 +151,8 @@ void time_incrementtime()
    
 //the timer handler used by the task switcher
 void time_handler()
- {
-
-   //update the real-time clock
+  {
+    //update the real-time clock
    //DEX32 is programmed to switch process every
    // 1/200 of a second so we use a counter that counts
    //up to 200 and then increments time_count which

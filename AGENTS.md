@@ -46,6 +46,12 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 - Kernel objects: freestanding (`-ffreestanding -fno-pic -mno-red-zone -mcmodel=large`).
 - User apps: `sdk/app.mk` (`-m64`, link `crt1.c` + `tccsdk.c`).
 - Document non-obvious long-mode/SMP behavior in `ics-os/docs/smp-longmode.md`.
+- When designing system architectures, use state of the art and/or industry standard mechanisms. Ensure the system is easy to use, stable and intuitive in its design. This system will eventually be used in datacenters and production grade use cases so take this into consideration.
+- Ensure tests are created so that there are no regressions.
+
+## Development blog
+
+Use develpment_blog.md as your diary of activities, what was done, difficulties faced and solutions to problems. Organize this by hour and date.
 
 ## Do not commit
 

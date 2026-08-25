@@ -660,7 +660,7 @@ void  setinterruptvector(DWORD index,idtentry *t,unsigned char attr,
 
 DWORD obtainpage()
     {
-      print("DEX 32: out of memory error\n");
+      // print("DEX 32: out of memory error\n");
       return 0;
     };
 
@@ -755,6 +755,17 @@ void *dex32_sbrk(unsigned int amt)
         used by the in-OS compiler can grow beyond the initial heap. */
      dex32_commit((DWORD)ret, pages,
                   (DWORD*)current_process->pagedirloc, PG_USER | PG_WR);
+
+     /* Zero the newly committed user memory before handing it out.
+        The x86_64 user window is a reserved identity-mapped range, so
+        dex32_commit() does not allocate/clear physical frames; without
+        this, sbrk() would return stale RAM. That breaks any libc whose
+        malloc relies on zeroed fresh pages (ICS-OS SDK malloc hands the
+        raw sbrk() bytes to the caller), which made the in-OS TinyCC
+        linker read uninitialized memory and emit a non-deterministic,
+        corrupted tccnew.exe. Zeroing matches Linux brk()/mmap()
+        semantics and prevents leaking stale process memory. */
+     memset(ret, 0, (size_t)(pages * 4096));
 
      current_process->knext+=pages*4096;
      dex32_restoreints(flags);

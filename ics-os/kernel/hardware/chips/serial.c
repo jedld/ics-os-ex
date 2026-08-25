@@ -46,3 +46,12 @@ void serial_puts(const char *s)
     while (*s)
         serial_putc(*s++);
 };
+
+int serial_getc(void)
+{
+    if (!serial_ready)
+        return -1;
+    if ((inportb(SERIAL_COM1 + 5) & 1) == 0)
+        return -1;
+    return (int)inportb(SERIAL_COM1);
+};

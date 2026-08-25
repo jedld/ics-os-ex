@@ -62,15 +62,15 @@ int extension_override(devmgr_generic *ext,devmgr_generic **prev)
       printf("extension: warning sizes of scheduler interfaces not consistent!\n");
       
       if (current_sched!=0&&prev!=0)
-                *prev = extension_table[CURRENT_SCHEDULER].iface;	
-	        
+                *prev = extension_table[CURRENT_SCHEDULER].iface;
+         
             //Tell the current scheduler to get ready to be removed
             if (current_sched!=0)
             if (current_sched->exthdr.pre_remove!=0)
-            current_sched->exthdr.pre_remove();           
-                                         	         
-	        //wait for the process manager to finish its task
-	        sync_entercrit(&processmgr_busy);
+            current_sched->exthdr.pre_remove();
+                                          	          
+         //wait for the process manager to finish its task
+         sync_entercrit(&processmgr_busy);
 
 	        storeflags(&cpuflags);
 	        stopints();

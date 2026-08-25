@@ -180,6 +180,9 @@ void api_init(){
    api_addsystemcall(0xA1,dex32_thread_join,0,API_REQUIRE_INTS); //join a thread of the current process
    api_addsystemcall(0xA2,rename,0,API_REQUIRE_INTS);
    api_addsystemcall(0xA3,machine_reboot,0,0);
+   api_addsystemcall(0xA4,sys_read,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xA5,sys_write,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xA6,sys_kcmd,0,API_REQUIRE_INTS);
 };
 
 

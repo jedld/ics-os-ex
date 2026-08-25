@@ -46,6 +46,11 @@ PCB386 *scheduler(PCB386 *lastprocess){
    if (!lastprocess)
       return lastprocess;
 
+   /* ready_lock is held with interrupts disabled: scheduler() runs from
+      the timer IRQ (IF=0) and from voluntary taskswitch/waitpid paths
+      (IF=1).  Without stopints(), a timer IRQ inside the ready-list walk
+      re-enters scheduler() and spins forever on the held ready_lock. */
+   { DWORD fl; storeflags(&fl); stopints();
    spin_lock(&ready_lock);
 
    start = lastprocess->next;
@@ -82,6 +87,7 @@ PCB386 *scheduler(PCB386 *lastprocess){
    }
 
    spin_unlock(&ready_lock);
+   restoreflags(fl); }
    return best ? best : lastprocess;
 };
 
@@ -108,6 +114,7 @@ void sched_enqueue(PCB386 *process){
    PCB386 *temp;
    process->size = sizeof(PCB386);
 
+   { DWORD fl; storeflags(&fl); stopints();
    spin_lock(&ready_lock);
 	 
    //no processes in memory yet?
@@ -126,19 +133,22 @@ void sched_enqueue(PCB386 *process){
       process->next = temp;
       process->before = sched_phead;
 
-      //fill up temp's connections
-      temp->before = process;
+   //fill up temp's connections
+   temp->before = process;
    };
    spin_unlock(&ready_lock);
+   restoreflags(fl); }
    smp_reschedule_others();
 };
 
 //removes a process with the specified pid from a doubly-linked list process queue
 int sched_dequeue(PCB386 *ptr){
+   { DWORD fl; storeflags(&fl); stopints();
    spin_lock(&ready_lock);
    ptr->before->next=ptr->next;
    ptr->next->before=ptr->before;
    spin_unlock(&ready_lock);
+   restoreflags(fl); }
    return 1;
 };
 

@@ -36,6 +36,38 @@ void GPFhandler(DWORD address)
     while (1) {};
 
   };
+
+/* x86_64 #13 handler with full fault context (RIP, CR2, error code, CS/SS/RSP, CR3).
+   The legacy saveregs in the PCB is not populated by the software context switch,
+   so this prints live values captured in the wrapper instead. */
+void GPFhandler64(struct gpf_info *fi)
+  {
+    unsigned int err = fi->err;
+    const char *what = "unknown";
+
+    if (err & 2)
+       what = (err & 1) ? "reserved-bit" : "segment-not-present";
+    else if (err & 4)
+       what = (err & 1) ? "TSS-invalid" : (err & 2) ? "stack" : "TSS-bad";
+    else
+       what = (err & 1) ? "base/limit" : "segment-index";
+
+    {
+       char line[220];
+       sprintf(line,
+               "GPF64: err=0x%x(%s) rip=0x%llx cr2=0x%llx cs=0x%x ss=0x%x rsp=0x%llx cr3=0x%llx proc=%s\n",
+               (unsigned)err, what, fi->rip, fi->cr2,
+               (unsigned)fi->cs, (unsigned)fi->ss, fi->rsp, fi->cr3,
+               current_process ? current_process->name : "?");
+       serial_puts(line);
+    }
+
+    /* Also route through the legacy dumper so any VGA/DDL path still fires. */
+    exc_showdump((DWORD)(uintptr)fi->rip, GENERAL_PROTECTION_FAULT, 0);
+    exc_recover();
+
+    while (1) {};
+  };
   
 void exc_invalidtss(DWORD address)
   {
@@ -201,10 +233,24 @@ void exc_showdump(DWORD location,int type,DWORD pf_info)
 DWORD pagefaulthandler(DWORD location,DWORD fault_info)
   {
    DWORD ret,mm,i;
+   unsigned long long rip64;
    stopints();
    pfoccured=1;//set the pfoccured register of the task scheduler
 
+   /* Always report the live faulting RIP (legacy saveregs are not
+      populated by the software context switch) so headless tests can
+      tell WHERE a user process faulted, not just that it faulted. */
    mm=getphys(location,current_process->pagedirloc);
+   {
+      char line[160];
+      __asm__ __volatile__("movq (%%rsp),%0" : "=r"(rip64));
+      sprintf(line,
+              "PF64: rip=0x%llx cr2=0x%llx mm=0x%x proc=%s\n",
+              rip64, (unsigned long long)location,
+              (unsigned)mm,
+              current_process ? current_process->name : "?");
+      serial_puts(line);
+   }
    
    if (mm&PG_DEMANDLOAD)
          {

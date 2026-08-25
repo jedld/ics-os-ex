@@ -36,6 +36,7 @@ typedef struct _fg_processinfo {
    int keyboardfocus;
    int ignore;
    int pid; //process id of process that created this foreground info
+   struct _tty *tty;
    struct _fg_processinfo *next;
    struct _fg_processinfo *prev;
 } fg_processinfo;
@@ -67,4 +68,6 @@ void fg_set_state(int state);
 void fg_showmenu(int choice);
 int fg_toggle();
 void fg_updateinfo();
+int fg_mux_key(int c);
+void fg_status(const char *msg);
 
