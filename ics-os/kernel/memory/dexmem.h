@@ -225,6 +225,14 @@ DWORD xmaplineartophysical(const DWORD linearmemory,const DWORD physicalmemory,
    DWORD *pagedir,const DWORD attb);
 void mem_init();
 void dex32_restore_identity_map(void);
+#ifdef __x86_64__
+/* Per-process user page directory (see dexmem.c). */
+extern u64 *userpd_create(void);
+void userpd_map_region(u64 *pml4, unsigned long long base,
+                       unsigned long long size, unsigned long attb);
+u64 *userpd_map_page(u64 *pml4, unsigned long long vaddr, unsigned long attb);
+void userpd_free(u64 *pml4);
+#endif
 DWORD *mempop();
 void mempush(DWORD mem);
 DWORD obtainpage();

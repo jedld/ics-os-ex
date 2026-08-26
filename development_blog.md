@@ -252,3 +252,63 @@ sources, links `tccnew.exe` deterministically, and boots it into `main()` —
 a large advance. The remaining blocker is the pre-existing shared-address-space
 GPF (root cause #2), which is a ring-3 / memory-isolation task, not a memory
 initialisation bug.
+
+## 2026-08-26 (Manila, UTC+8)
+
+### 15:00–16:20 — test-tccboot: user ELF process GPFs at entry (per-process page tables fixed)
+
+Task: the in-OS TinyCC pipeline (`make test-tccboot`) compiled and linked
+`tccnew.exe`/`hello.exe` but the executed user process died with a GPF at its
+ELF entry (`RIP=0x4040C6`, the real entry of `hello.exe`) — the "root cause #2"
+(shared address space / per-process paging) flagged at the end of 2026-08-23.
+Goal: make user ELFs run under their private PML4 so `test-tccboot` can run
+user processes without clobbering the kernel/other processes.
+
+Method: the new `GPFhandler64` dumper (added 2026-08-23) gave RIP, CR3 and the
+current process. CR3 pointed at a *private* PML4, so I dumped the full
+PML4→PDPT→PD→PTE chain from the kernel for the process's entry page
+(`0x404000`). The block-2 (0x400000–0x5FFFFF) PTE *table* frame existed but
+contained **zero present PTEs** even though the loader's segment list was
+correct. That pointed at the `userpd_*` pool allocator in `memory/dexmem.c`.
+
+### Two root causes found and fixed
+
+1. **In-frame free list was corruptible (design flaw).** The 32MiB dedicated
+   pool (`[0x6000000,0x8000000)`) kept its free list *inside the free frames*:
+   each frame's first 8 bytes held the next-free pointer. But the same pool
+   holds the live PML4/PDPT/PD/PTE table pages and the process code/stack/heap,
+   and it is identity-mapped, so any stray write into the pool range clobbered
+   the allocator's own bookkeeping — `upop()` then returned a wrong frame or
+   NULL mid-load. Replaced with the **standard bitmap allocator**: a 1024-byte
+   bitmap in `.bss` (bit=1 → allocated), highest-first scan, **no metadata in
+   the allocated frames**, so stray frame writes can never corrupt allocator
+   state. `upop`/`upush` rewritten around it (`userpd_init_frames`,
+   `up_bitmap`).
+
+2. **Leaf PTEs written without the Present bit.** `userpd_map_page()` set
+   `pte[gi] = frame | attb`, but every caller passes only `PG_WR|PG_USER`
+   (=6) — `PG_PRESENT` (1) was never ORed in. Every mapped page (image, heap,
+   stack, syscall stack) was therefore *not present*, so the very first
+   instruction fetch of the user process faulted. Fix: force `PG_PRESENT` in
+   `userpd_map_page()` (`pte[gi] = frame | (attb | PG_PRESENT)`); the PD-table
+   entry already used `| 0x03`. Also normalized the PD leaf-PTE physical mask
+   to the canonical `0x000FFFFFFFFF000`.
+
+**Verification (serial, QEMU):** the process now runs to completion — its
+`putcEX` stream emits the contiguous `Hello World from ICS-OS!` followed by
+`EXEC_TEST_PASS`. All temporary DIAG instrumentation (PML4/PTE dumps, `UPOP`
+trace, `SCD` syscall trace, `elf64SEG`/`elf64POOL`/`userpdCREATE` prints,
+`userpd_last_mapfail` hook) was added to find these bugs and removed again.
+
+**Regression (all PASS after cleanup + rebuild):**
+- `test-boot` PASS
+- `test-smp` PASS
+- `test-exec` PASS
+- `test-integration` PASS
+- `test-selfhost` PASS (in-OS TinyCC still compiles + runs `min.c`/`hello.c`)
+
+**Net state of `make test-tccboot`:** the "root cause #2" blocker (user ELFs
+sharing/clobbering address space, GPF at entry) is resolved — user processes
+now genuinely run under a per-process private PML4 backed by private pool
+frames. Any residual tccboot issue is now downstream of process execution
+(e.g. the full in-OS TinyCC rebuild path), not process memory isolation.

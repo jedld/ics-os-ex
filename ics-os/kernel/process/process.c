@@ -880,6 +880,17 @@ DWORD kill_process(DWORD processid){
           */
          if (!(ptr->status & PS_ATTB_THREAD) && (ptr->accesslevel != ACCESS_SYS) ) {
 
+#ifdef __x86_64__
+            /* A user process owns a private PML4 (userpd_create). Free it
+               with userpd_free(), which walks the 4-level tables and
+               returns every private frame to the dedicated pool. Do NOT
+               call dex32_freeuserpagetable(): it is a 32-bit 2-level walk
+               (pagedir[1..3071]) and would write far past the 16-entry
+               PML4, corrupting adjacent memory. The shared pagedir1 is
+               not a private frame, so there is nothing to reclaim. */
+            if ((u64)(uintptr)ptr->pagedirloc != (u64)(uintptr)pagedir1)
+               userpd_free((u64 *)(uintptr)ptr->pagedirloc);
+#else
             //free the page tables used by the application
             dex32_freeuserpagetable((DWORD*)ptr->pagedirloc);
 
@@ -888,6 +899,7 @@ DWORD kill_process(DWORD processid){
 #endif
             //return it back for others to use
             mempush(ptr->pagedirloc);
+#endif
          };
          
          //free command line arguments 

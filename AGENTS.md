@@ -4,9 +4,17 @@ Guidance for humans and coding agents working in this tree.
 
 ## What this repo is
 
-Instructional OS forked from DEX-OS. The active kernel path is **x86-64 long mode** (Multiboot2), with software context switching, LAPIC/SMP, ISO9660 CD root, and ELF64 user executables.
+Instructional OS forked from DEX-OS. While being instructional this should not prevent this operating system from being
+a state of the art, performant system and showcases the best practices in operating system design. This system should
+be good enough to be operational and deployable in critical production settings.
+
+ The active kernel path is **x86-64 long mode** (Multiboot2), with software context switching, LAPIC/SMP, ISO9660 CD root, and ELF64 user executables.
 
 Primary code lives under `ics-os/`. Course labs are under `labs/`.
+
+A Kernel developer guide live here, update when necessary:
+
+wiki/Kernel-Developer's-Guide.md
 
 ## Build & test (start here)
 
@@ -46,12 +54,24 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 - Kernel objects: freestanding (`-ffreestanding -fno-pic -mno-red-zone -mcmodel=large`).
 - User apps: `sdk/app.mk` (`-m64`, link `crt1.c` + `tccsdk.c`).
 - Document non-obvious long-mode/SMP behavior in `ics-os/docs/smp-longmode.md`.
-- When designing system architectures, use state of the art and/or industry standard mechanisms. Ensure the system is easy to use, stable and intuitive in its design. This system will eventually be used in datacenters and production grade use cases so take this into consideration.
 - Ensure tests are created so that there are no regressions.
+
+## Design considerations
+
+- When designing system architectures, use state-of-the-art, best practices and/or industry standard mechanisms. Ensure the system is easy to use, stable and intuitive in its design. This system will eventually be used in datacenters and production grade use cases so take this into consideration.
+
+- While Intel x86 32-bit and 64-bit amd64 is the focus at the moment, do consider design that does not impede support for other processors and systems like arm/arm64 that may be incorporated in the future.
+
+- backwards compatibility from a user application prespective is not a concern at the moment, however if there are necessary kernel changes (e.g. system call enhancements or redesign)
+that will affect applications, ensure the sample applications, SDK and tools that are provided in this repository are appropriately maintained to support these changes.
+
+- When there are system related errors encountered during development - ensure the debugging, introspection and monitoring tools are sufficient and incorporate them as necessary. Maintainability, debugging and monitoring should be part of the feature set of the operating system.
 
 ## Development blog
 
 Use develpment_blog.md as your diary of activities, what was done, difficulties faced and solutions to problems. Organize this by hour and date.
+
+Make sure it contains the current problem and the activity currently being performed to solve it.
 
 ## Do not commit
 

@@ -316,7 +316,16 @@ itself".
 User ELFs currently run at ring 0 in kernel CS. Proper isolation:
 1. Wire `TSS.rsp0` + `iretq` so `context_load` drops to DPL3 using the existing
    user code/data GDT entries (`0x18`/`0x20`).
-2. Give each process its own PML4 (currently `pagedir1` is shared).
+2. ~~Give each process its own PML4 (currently `pagedir1` is shared).~~
+   **Done (2026-08-26):** user ELFs now run under a per-process private PML4
+   (`userpd_create`, `memory/dexmem.c`) backed by a dedicated 32 MiB frame
+   pool. Two latent bugs in that path were fixed the same day: the pool's
+   in-frame free list was replaced with a `.bss` bitmap (the in-frame
+   next-pointers were clobberable because the pool is identity-mapped), and
+   `userpd_map_page` now forces `PG_PRESENT` on leaf PTEs (callers pass only
+   `PG_WR|PG_USER`). Verified: `hello.exe` runs to completion under its
+   private CR3 (`test-exec`, `test-integration`, `test-selfhost` all PASS).
+   The remaining gap is purely the ring-3 privilege drop (item 1).
 3. Re-validate all of the above under ring 3.
 This is the long-term correctness fix; Phases 0–5 do not depend on it.
 

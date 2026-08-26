@@ -361,38 +361,99 @@ int elf_loadmodule(char *module_name,char *elf_image,
          ph64 = (Elf64_Phdr *)(elf_image + eh64->e_phoff);
          pagedir = pagedir1;
          if (mode == ELF_USERO || mode == ELF_SYSO || eh64->e_type == ET_EXEC) {
+            u64 *upml4 = userpd_create();   /* private per-process page directory */
+            if (upml4)
+               printf("elf64: private PML4 @0x%llX for %s\n", (unsigned long long)(uintptr)upml4, module_name);
+            unsigned long long img_min = 0, img_max = 0;
+            int i;
+
+            /* PER-PROCESS USER PAGE DIRECTORY.
+               Previously every user ELF ran with pagedir1 (the shared kernel
+               identity map), so ALL user processes shared the same physical
+               stack/heap/syscall-stack/ELF memory. A preempted user process's
+               stack was clobbered by the next user process; on resume the
+               saved frame was garbage and the CPU raised #13 (GPF) with RAX ==
+               CR3. This process gets a private PML4 (userpd_create) that
+               shares the kernel's 1GiB superpage tables but maps its user
+               window (ELF image, syscall stack, heap, stack) to private,
+               zeroed frames. context.S switches CR3 per task (ctx.cr3) and
+               createprocess() seeds ctx.cr3 = pagedir. */
+            for (i = 0; i < eh64->e_phnum; i++) {
+               if (ph64[i].p_type == PT_LOAD && ph64[i].p_memsz > 0) {
+                  unsigned long long lo = ph64[i].p_vaddr;
+                  unsigned long long hi = lo + ph64[i].p_memsz;
+                  if (img_min == 0 || lo < img_min) img_min = lo;
+                  if (hi > img_max) img_max = hi;
+               }
+            }
+            if (upml4) {
+               pagedir = (DWORD *)(uintptr)upml4;
+               /* Map the whole user window with private, zeroed frames. */
+               if (img_max > img_min)
+                  userpd_map_region(upml4, img_min & ~0xFFFULL,
+                                    img_max - (img_min & ~0xFFFULL),
+                                    (unsigned long)(PG_WR | PG_USER));
+               userpd_map_region(upml4, (unsigned long long)(uintptr)syscallstack,
+                                 SYSCALL_STACK, (unsigned long)PG_WR);
+               userpd_map_region(upml4, (unsigned long long)(uintptr)userheap,
+                                 ELF_HEAP_COMMIT,
+                                 (unsigned long)(PG_WR | PG_USER));
+               userpd_map_region(upml4,
+                                 (unsigned long long)(uintptr)(userstackloc - ELF_STACK_COMMIT),
+                                 ELF_STACK_COMMIT,
+                                 (unsigned long)(PG_WR | PG_USER));
+            } else {
+               printf("elf64: no userpd frames for %s; shared map\n", module_name);
+               pagedir = pagedir1;
+            }
+
             stackloc=(DWORD*)dex32_commitblock((DWORD)(uintptr)userstackloc-ELF_STACK_COMMIT,
                        ELF_STACK_COMMIT,&pages,
                        pagedir,PG_WR | PG_USER);
             addmemusage(&memptr,stackloc,pages);
             stackloc = (DWORD*)((uintptr)userstackloc - 8);
             dex32_commitblock((DWORD)(uintptr)userheap, ELF_HEAP_COMMIT, &pages,
-                        pagedir, PG_WR | PG_USER );
+                       pagedir, PG_WR | PG_USER );
             addmemusage(&memptr,userheap,pages);
-            /* Zero the freshly committed user stack + initial heap. On the
-               x86_64 identity map dex32_commitblock() only records usage —
-               the physical frames are reused across processes, so without
-               zeroing, a process's stack/heap (and every malloc served from
-               the ELF_HEAP_COMMIT initial heap, e.g. the in-OS TinyCC's
-               compile/link working set) would read stale data from whatever
-               ran here before. That made in-OS tcc.exe emit a
-               non-deterministic, corrupt tccnew.exe. Zeroing matches Linux
-               brk()/mmap() semantics and prevents leaking one user process's
-               memory to another. Parameters arrive via the getparameters
-               syscall, so zeroing the stack before first run is safe. */
-            memset((void *)(uintptr)(userstackloc - ELF_STACK_COMMIT), 0,
-                   ELF_STACK_COMMIT);
-            memset((void *)(uintptr)userheap, 0, ELF_HEAP_COMMIT);
          }
          for (phi = 0; phi < eh64->e_phnum; phi++) {
             if (ph64[phi].p_type == PT_LOAD && ph64[phi].p_memsz > 0) {
-               char *dst = (char *)(uintptr)ph64[phi].p_vaddr;
-               dex32_commitblock((DWORD)(uintptr)dst, (int)ph64[phi].p_memsz, &pages,
-                                 pagedir, PG_WR | PG_USER);
-               memcpy(dst, elf_image + ph64[phi].p_offset, (unsigned long)ph64[phi].p_filesz);
-               if (ph64[phi].p_memsz > ph64[phi].p_filesz)
-                  memset(dst + ph64[phi].p_filesz, 0,
-                         (unsigned long)(ph64[phi].p_memsz - ph64[phi].p_filesz));
+               unsigned long long v = ph64[phi].p_vaddr;
+               unsigned long long fsz = ph64[phi].p_filesz;
+               unsigned long long msz = ph64[phi].p_memsz;
+               if (pagedir != pagedir1) {
+                  /* Private PML4: copy the image into the child's private
+                     frames via the identity alias of the frame pool (the
+                     kernel runs under pagedir1, which identity-maps the
+                     pool range). No CR3 switch, so a timer preemption here
+                     cannot corrupt the copy. */
+                  unsigned long long va;
+                  for (va = v & ~0xFFFULL; va < v + msz; va += 0x1000) {
+                     u64 *fr = userpd_map_page((u64 *)(uintptr)pagedir, va,
+                                               (unsigned long)(PG_WR | PG_USER));
+                     if (!fr) break;
+                     /* First virtual address of the segment data in this
+                        page (the segment may start mid-page). */
+                     unsigned long long x = (va > v) ? va : v;
+                     if (x >= v + fsz)
+                        continue;   /* BSS: frame stays zeroed */
+                     {
+                        unsigned long long dstoff = x & 0xFFF;
+                        unsigned long long len = 0x1000 - dstoff;
+                        unsigned long long avail = (v + fsz) - x;
+                        if (len > avail) len = avail;
+                        memcpy((char *)fr + dstoff,
+                               (char *)elf_image + ph64[phi].p_offset + (x - v),
+                               len);
+                     }
+                  }
+               } else {
+                  char *dst = (char *)(uintptr)v;
+                  dex32_commitblock((DWORD)v, (int)msz, &pages, pagedir, PG_WR | PG_USER);
+                  memcpy(dst, elf_image + ph64[phi].p_offset, (unsigned long)fsz);
+                  if (msz > fsz)
+                     memset(dst + fsz, 0, (unsigned long)(msz - fsz));
+               }
             }
          }
          printf("elf64: loaded %s entry=0x%X\n", module_name, (DWORD)(uintptr)entrypoint);
