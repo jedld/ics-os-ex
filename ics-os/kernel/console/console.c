@@ -1155,6 +1155,9 @@ int console_execute(const char *str){
    if (strcmp(u,"tccboot") == 0){  //-- Rebuild TinyCC with the in-OS tcc.
       tccboot_run();
    }else
+   if (strcmp(u,"makeboot") == 0){  //-- TinyCC builds GNU make onto /work.
+      makeboot_run();
+   }else
    if (u[0] == '$'){                      //-- Sends message to a device.
       int i, devid;
       char devicename[255],*cmd;

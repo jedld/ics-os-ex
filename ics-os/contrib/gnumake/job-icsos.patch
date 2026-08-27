@@ -1,0 +1,41 @@
+--- a/job.c
++++ b/job.c
+@@ -19,6 +19,9 @@
+ #include "make.h"
+ 
++#ifdef ICSOS
++# include <spawn.h>
++#endif
+ #include <assert.h>
+ 
+ #ifdef HAVE_FCNTL_H
+@@ -1321,6 +1324,24 @@
+ 	fcntl (job_rfd, F_SETFD, 0);
+ 
+ #else  /* !__EMX__ */
++#ifdef ICSOS
++      {
++        pid_t spid;
++        int se;
++        se = posix_spawn (&spid, argv[0] ? argv[0] : "", 0, 0, argv,
++                          child->environment);
++        unblock_sigs ();
++        if (se != 0)
++          {
++            perror_with_name ("posix_spawn", argv[0] ? argv[0] : "");
++            goto error;
++          }
++        child->pid = spid;
++      }
++#else
+ 
+       child->pid = vfork ();
+       environ = parent_environ;	/* Restore value child may have clobbered.  */
+@@ -1355,6 +1376,7 @@
+ 	  perror_with_name ("vfork", "");
+ 	  goto error;
+ 	}
++#endif /* !ICSOS */
+ # endif  /* !__EMX__ */
+ #endif /* !VMS */
+     }

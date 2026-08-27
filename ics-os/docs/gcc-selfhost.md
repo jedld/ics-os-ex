@@ -10,9 +10,13 @@ TinyCC → GNU make → binutils (as, ld, ar) → GCC 4.7.4 (C only) → ICS-OS 
 GCC 4.7.4 is the last GCC that TinyCC can build (no C++). A full GCC build
 needs gigabytes of disk and a driver that `fork`s `as`/`ld`.
 
-This document is the map for that work. The current round only lands the
-OS prerequisites (`posix_spawn` / `waitpid` and a writable virtio volume).
-It does **not** download or compile GCC.
+This document is the map for that work.
+
+**Current round:** in-OS TinyCC builds GNU make 3.82 onto `/work` (`make test-make`).
+Stock make `fork`s recipes; ICS-OS uses `posix_spawn` in a patched `job.c` until x86_64
+fork works. `waitpid(-1)` / `WNOHANG` and `dirent` are in. Overlay:
+`contrib/gnumake/`. Stage with `scripts/stage-make-short.sh` (host `tcc -E`, then
+in-OS per-file `-c` + link against host-built `sdkobj/`).
 
 ## Why TinyCC-kbuild is deferred
 
@@ -68,16 +72,16 @@ FS issue.
 
 ## Later rounds (not this one)
 
-1. In-OS TinyCC builds **GNU make**.
-2. Then **binutils** (`as`, `ld`, `ar`).
-3. Then **GCC 4.7.4** (`--enable-languages=c --disable-multilib`).
-4. That GCC compiles ICS-OS; kexec as today.
+1. Then **binutils** (`as`, `ld`, `ar`).
+2. Then **GCC 4.7.4** (`--enable-languages=c --disable-multilib`).
+3. That GCC compiles ICS-OS; kexec as today.
 
 ## Tests
 
 ```
 cd ics-os
 make -C kernel bzImage
+make test-make           # MAKE_PASS (in-OS tcc → make.exe → hello.exe)
 make test-spawn          # SPAWN_PASS + WORK_DISK_PASS
 make test-posixio        # still green (unformatted vblk → no /work)
 make test-virtio

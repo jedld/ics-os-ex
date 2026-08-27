@@ -15,6 +15,8 @@
 #include <sys/uio.h>
 #include <sys/io_uring.h>
 #include <sys/wait.h>
+#include <dirent.h>
+#include <pwd.h>
 #include <spawn.h>
 #include <signal.h>
 #include <time.h>
@@ -55,6 +57,7 @@ extern void exit(int status);
 #define FXN_WAITPID  0xB1
 #define FXN_SPAWN    0xB2
 #define FXN_EXECVE   0xB3
+#define FXN_GETDENTS 0xB4
 
 static long ics_sys(int n, long a, long b, long c, long d, long e)
 {
@@ -846,4 +849,252 @@ void io_uring_cqe_seen(struct io_uring *ring, struct io_uring_cqe *cqe)
    (void)cqe;
    if (ring)
       *ring->cq_head = *ring->cq_head + 1;
+}
+
+static char *ics_env_empty[] = { 0 };
+char **environ = ics_env_empty;
+
+DIR *opendir(const char *path)
+{
+   DIR *d;
+   char *buf;
+   long n;
+
+   if (!path) {
+      errno = EINVAL;
+      return 0;
+   }
+   buf = (char *)malloc(4096);
+   if (!buf)
+      return 0;
+   n = ics_sys(FXN_GETDENTS, (long)path, (long)buf, 4096, 0, 0);
+   if (n < 0) {
+      free(buf);
+      return 0;
+   }
+   d = (DIR *)malloc(sizeof(DIR));
+   if (!d) {
+      free(buf);
+      return 0;
+   }
+   d->packed = buf;
+   d->off = 0;
+   return d;
+}
+
+struct dirent *readdir(DIR *dir)
+{
+   const char *s;
+   int n;
+
+   if (!dir || !dir->packed)
+      return 0;
+   s = dir->packed + dir->off;
+   if (s[0] == 0)
+      return 0;
+   n = (int)strlen(s);
+   dir->de.d_ino = 1;
+   if (n > 255)
+      n = 255;
+   memcpy(dir->de.d_name, s, (size_t)n);
+   dir->de.d_name[n] = 0;
+   dir->off += (int)strlen(s) + 1;
+   return &dir->de;
+}
+
+int closedir(DIR *dir)
+{
+   if (!dir)
+      return 0;
+   free(dir->packed);
+   free(dir);
+   return 0;
+}
+
+int umask(int mask)
+{
+   (void)mask;
+   return 022;
+}
+
+int getuid(void) { return 0; }
+int geteuid(void) { return 0; }
+int getgid(void) { return 0; }
+int getegid(void) { return 0; }
+
+int dup2(int oldfd, int newfd)
+{
+   (void)oldfd;
+   (void)newfd;
+   errno = ENOSYS;
+   return -1;
+}
+
+void perror(const char *s)
+{
+   if (s && s[0])
+      printf("%s: errno=%d\n", s, errno);
+   else
+      printf("errno=%d\n", errno);
+}
+
+int pipe(int fd[2])
+{
+   (void)fd;
+   errno = ENOSYS;
+   return -1;
+}
+
+int flock(int fd, int op)
+{
+   (void)fd;
+   (void)op;
+   return 0;
+}
+
+int mkstemp(char *template)
+{
+   static int n;
+   int i, len, fd;
+   if (!template)
+      return -1;
+   len = (int)strlen(template);
+   n++;
+   for (i = len - 1; i >= 0 && i >= len - 6; i--) {
+      if (template[i] == 'X')
+         template[i] = '0' + (n % 10);
+      n /= 10;
+      if (n == 0)
+         n = 1;
+   }
+   fd = open(template, O_RDWR | O_CREAT | O_TRUNC, 0600);
+   return fd;
+}
+
+struct passwd *getpwnam(const char *name)
+{
+   (void)name;
+   return 0;
+}
+
+struct passwd *getpwuid(uid_t uid)
+{
+   (void)uid;
+   return 0;
+}
+
+int atexit(void (*fn)(void))
+{
+   (void)fn;
+   return 0;
+}
+
+int kill(int pid, int sig)
+{
+   if (pid == getpid() || pid <= 0) {
+      _exit(sig ? (128 + (sig & 127)) : 1);
+   }
+   (void)sig;
+   return 0;
+}
+
+int fcntl(int fd, int cmd, ...)
+{
+   (void)fd;
+   (void)cmd;
+   return 0;
+}
+
+int setvbuf(FILE *f, char *buf, int mode, size_t size)
+{
+   (void)f;
+   (void)buf;
+   (void)mode;
+   (void)size;
+   return 0;
+}
+
+int fileno(FILE *f)
+{
+   if (!f)
+      return -1;
+   if (f == stdout)
+      return 1;
+   if (f == stderr)
+      return 2;
+   if (f == stdin)
+      return 0;
+   return 3;
+}
+
+int putc(int c, FILE *f)
+{
+   return fputc(c, f);
+}
+
+int ferror(FILE *f)
+{
+   (void)f;
+   return 0;
+}
+
+double atof(const char *s)
+{
+   return strtod(s, 0);
+}
+
+char *ctime(const time_t *t)
+{
+   static char buf[32];
+   (void)t;
+   strcpy(buf, "Thu Jan  1 00:00:00 1970\n");
+   return buf;
+}
+
+int putenv(char *string)
+{
+   char *eq;
+   char name[128];
+   int n;
+   if (!string)
+      return -1;
+   eq = strchr(string, '=');
+   if (!eq)
+      return setenv(string, "", 1);
+   n = (int)(eq - string);
+   if (n <= 0 || n >= (int)sizeof(name))
+      return -1;
+   memcpy(name, string, (size_t)n);
+   name[n] = 0;
+   return setenv(name, eq + 1, 1);
+}
+
+char *getlogin(void)
+{
+   return 0;
+}
+
+int getloadavg(double loadavg[], int nelem)
+{
+   int i;
+   if (!loadavg || nelem <= 0)
+      return -1;
+   for (i = 0; i < nelem && i < 3; i++)
+      loadavg[i] = 0.0;
+   return i > 0 ? i : -1;
+}
+
+pid_t vfork(void)
+{
+   errno = ENOSYS;
+   return -1;
+}
+
+/* TinyCC emits calls to __builtin_alloca after host tcc -E; gcc will not
+ * let us define that name. Stage script rewrites it to icsos_alloca. */
+void *icsos_alloca(unsigned long n)
+{
+   if (n == 0)
+      n = 1;
+   return malloc(n);
 }

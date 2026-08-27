@@ -6,6 +6,8 @@ ics-os-floppy.img
 ics-os-usb.img
 ics-os-livecd.iso
 vmdex
+references/**
+refernces/**
 ics-os/vmdex
 ics-os/vmdex-raw
 ics-os/kernel/Kernel32.bin

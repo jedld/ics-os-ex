@@ -39,6 +39,7 @@ Useful individual targets (from `ics-os/`):
 | `test-posixio` | POSIX fds + preadv/pwritev/fsync + io_uring; ramdisk `POSIXIO_PASS`/`URING_PASS`; virtio `/dev/vblk` `URING_VBLK_PASS` |
 | `test-virtio` | QEMU virtio-blk DMA; MSI-X completions; `VIRTIO_BLK_OK` + `VIRTIO_IRQ_OK` |
 | `test-spawn` | `posix_spawn` + `waitpid` of `hello.exe` (`SPAWN_PASS`); FAT `/work` on virtio (`WORK_DISK_PASS`) |
+| `test-make` | In-OS TinyCC builds GNU make 3.82 onto `/work`; `make -f t.mk` spawns `hello.exe` (`MAKE_PASS`) |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).
@@ -77,7 +78,7 @@ that will affect applications, ensure the sample applications, SDK and tools tha
 
 For research on documentation, third party sources, state-of-the-art and industry standard approaches you may perform web search as available
 in the current agent MCP functions as needed. You may also download any public, non-proprietary
-documentation or sources for reference (e.g. hardware specs, standards). Place all of these artifacts in the /refernces folder for later reference and retrieval, but do not commit this as part of the repo.
+documentation or sources for reference (e.g. hardware specs, standards). Place all of these artifacts in the /references folder for later reference and retrieval, but do not commit this as part of the repo.
 
 Properly index these files as needed in a file called reference.md
 
@@ -94,7 +95,7 @@ Make sure it contains the current problem and the activity currently being perfo
 
 ## Suggested next work
 
-1. GCC self-host (see `ics-os/docs/gcc-selfhost.md`): in-OS TinyCC builds GNU make, then binutils, then GCC 4.7.4 (C only); that GCC compiles ICS-OS. TinyCC `test-kbuild` is deferred.
+1. GCC self-host (see `ics-os/docs/gcc-selfhost.md`): in-OS TinyCC builds GNU make (`make test-make`), then binutils, then GCC 4.7.4 (C only); that GCC compiles ICS-OS. TinyCC `test-kbuild` is deferred.
 2. Richer io_uring (registered buffers, linked SQEs) if needed. Async virtio CQEs and `/dev/vblk` are in. `posix_spawn` / `waitpid` / `/work` are in (`make test-spawn`).
 3. Allow user processes on any CPU (harden `waitpid`/exit migration). Fix `fork` for x86_64 (today `posix_spawn` wraps GCC `pexecute`).
 4. Full ring-3 user mode (today user ELFs still enter with kernel CS).

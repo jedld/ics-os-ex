@@ -430,6 +430,7 @@ DWORD createprocess(
 
    //find the parent process and increment it's waiting state
    parent->childwait++;
+   parent->nlive++;
 
    temp->knext       = userheap; //set up the programs' initial break
    temp->pagedirloc  = pagedir;  //set the memory page dir
@@ -861,10 +862,17 @@ DWORD kill_process(DWORD processid){
 
          //locate the parent process and decrement its waiting
          //status...important for the dex32_wait() function
-         parent = ps_findprocess(ptr->owner);                  //parent should no longer wait for this process
-         if (parent != -1){
-            parent->childwait = 0;                             //set the childwait to 0
-         };
+         parent = ps_findprocess(ptr->owner);
+         if (parent != (PCB386 *)-1) {
+            parent->childwait = 0;
+            if (parent->nlive > 0)
+               parent->nlive--;
+            if (parent->waitq_n < WAITQ_MAX) {
+               parent->waitq_pid[parent->waitq_n] = (int)ptr->processid;
+               parent->waitq_st[parent->waitq_n] = 0;
+               parent->waitq_n++;
+            }
+         }
 
          if (ptr->accesslevel == ACCESS_SYS)                   //deallocate the stack pointer
             free(ptr->stackptr);
@@ -1564,8 +1572,16 @@ void schedule_from_timer(void){
          }
 
          closeallfiles(dying->processid);
-         if (parent != (PCB386*)-1)
+         if (parent != (PCB386*)-1) {
             parent->childwait = 0;
+            if (parent->nlive > 0)
+               parent->nlive--;
+            if (parent->waitq_n < WAITQ_MAX) {
+               parent->waitq_pid[parent->waitq_n] = (int)dying->processid;
+               parent->waitq_st[parent->waitq_n] = 0;
+               parent->waitq_n++;
+            }
+         }
          dying->on_cpu = -1;
          ps_dequeue(dying);
          zombie_free = dying; /* free after we leave this stack */

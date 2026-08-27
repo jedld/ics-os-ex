@@ -70,7 +70,7 @@ Kernel source directories.
 
 | **Directory** | **Description** |
 |:--------------|:----------------|
-|`console/`     |Sources for the main shell|
+|`console/`     |Kernel console (`makeboot`, `tccboot`, `spawntest`, …)|
 |`devmgr/`      |Sources for the device and extension manager|
 |`dexapi/`      |Sources for setting up the system call table|
 |`docs/`        |Documentation files for kernel|

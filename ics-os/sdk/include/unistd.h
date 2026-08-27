@@ -32,8 +32,22 @@ void *sbrk(int inc);
 unsigned int sleep(unsigned int seconds);
 void _exit(int status);
 int getpid(void);
+int kill(int pid, int sig);
+pid_t vfork(void);
+char *getlogin(void);
+int getloadavg(double loadavg[], int nelem);
 int fork(void);
 int execv(const char *path, char *const argv[]);
 int execvp(const char *file, char *const argv[]);
+int dup2(int oldfd, int newfd);
+int pipe(int fd[2]);
+int umask(int mask);
+int getuid(void);
+int geteuid(void);
+int getgid(void);
+int getegid(void);
+int mkstemp(char *template);
+
+extern char **environ;
 
 #endif

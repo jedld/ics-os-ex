@@ -2,6 +2,19 @@
 
 ## 2026-08-28 (Manila, UTC+8)
 
+### 03:30 — GNU make 3.82 bootstrap (TinyCC → make)
+
+**Current problem:** GNU make needs POSIX extras (dirent, waitpid(-1), posix_spawn
+recipes) and an in-OS compile onto `/work`.
+
+**Activity now:** Host gcc links make against the SDK. Host `tcc -E` preprocesses
+sources so in-OS tcc never parses SDK headers (`__va_arg` builtin clash). Dropped
+the `__va_arg` prototype from `sdk/include/stdarg.h`. `makeboot` extracts
+`makesrc.tar` onto FAT `/work`, compiles 26 files, links `make.exe` (`MAKE_TCC_OK`).
+The TinyCC-linked binary GPFs at `rip=0x8` (mixed tcc/gcc objects); the recipe
+run uses host-gcc `apps/make.exe` until that link is fixed. Next: green
+`make test-make`, then tcc-linked runtime.
+
 ### 02:40 — POSIX spawn + virtio `/work` (GCC self-host prerequisites)
 
 TinyCC will not compile `kernel32.c`. The self-host target is TinyCC → GNU
@@ -12,12 +25,18 @@ GCC; it lands the OS gaps that block that chain.
 always waits (console/tccboot need that), `forkprocess` is 32-bit paging,
 `/ramdisk` is 16 MiB, and `vblk` was raw with no FAT mount.
 
-**Activity:** `waitpid` (syscall 0xB1), `posix_spawn`/`sys_spawn` (0xB2,
-non-waiting ELF load), `execv` via `sys_execve` (0xB3, same-pid steal +
-switch). `user_execp` wait behavior unchanged. Fork left unused. After
-`virtio_blk_init`, a FAT BPB on `vblk` mounts at `/work` (`work: mounted`);
-zeros/no-disk skip so `test-boot`/`test-virtio`/`test-posixio` stay green.
-`make test-spawn` greps `SPAWN_PASS` and `WORK_DISK_PASS`. Tests: `test-spawn` PASS plus `test-boot`, `test-exec`, `test-virtio`, `test-posixio`.
+**Activity now:** GNU make 3.82 bootstrap. `waitpid(-1)`/`WNOHANG` wait queue +
+`getdents`/`dirent` are in. `contrib/gnumake/` + `scripts/stage-make.sh`.
+Need a green `test-make` next (in-OS tcc of make onto `/work`). Stale
+`scheduler.o` after PCB growth hung boot — `process.h` is now a scheduler
+dep.
+
+## 2026-08-28 (Manila, UTC+8) — continued
+
+### 03:05 — GNU make bootstrap (TinyCC → make)
+
+Spawn prerequisites are in. Next is in-OS TinyCC compiling GNU make,
+then binutils, then GCC 4.7.4.
 
 ## 2026-08-27 (Manila, UTC+8)
 

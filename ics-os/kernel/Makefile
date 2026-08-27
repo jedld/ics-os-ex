@@ -40,7 +40,7 @@ kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		vmm/vmm.c kexec.c kexec.h
 	$(CC) $(CFLAGS) -o kernel32.o kernel32.c 
 	
-scheduler.o: process/scheduler.c
+scheduler.o: process/scheduler.c process/process.h
 	$(CC) $(CFLAGS) -o scheduler.o process/scheduler.c
 
 fat.o: filesystem/fat12.c filesystem/fat12.h

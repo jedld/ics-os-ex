@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -73,6 +73,8 @@ apps:
 	-$(MAKE) -C contrib/sh install
 	$(MAKE) -C contrib/tcc
 	$(MAKE) -C contrib/tcc install
+	-$(MAKE) -C contrib/gnumake
+	-$(MAKE) -C contrib/gnumake install
 
 boot-floppy:
 	$(QEMU_I386) $(QEMU_NET) -fda ics-os-floppy.img -boot a -m $(QEMU_MEM)
@@ -409,6 +411,45 @@ test-spawn: kernel/Kernel64.bin apps/spawn.exe apps/hello.exe
 	@! grep -aq "SPAWN_FAIL" /tmp/icsos-spawn.log
 	@! grep -aq "WORK_DISK_FAIL" /tmp/icsos-spawn.log
 	@echo "test-spawn PASS"
+
+# In-OS TinyCC compiles GNU make 3.82 onto FAT /work, then make posix_spawns hello.exe.
+apps/make.exe:
+	$(MAKE) -C contrib/gnumake install
+
+test-make: vmdex apps/tcc.exe apps/hello.exe apps/make.exe
+	@echo "Staging GNU make sources + sdkobj (host tcc -E)..."
+	@chmod +x scripts/stage-make.sh scripts/stage-make-short.sh
+	@scripts/stage-make-short.sh /tmp/icsos-make-short
+	@tar --format=ustar -C /tmp/icsos-make-short -cf /tmp/icsos-makesrc.tar .
+	@echo "Building Multiboot2 ISO for makeboot..."
+	@rm -rf /tmp/icsos-make-iso
+	@mkdir -p /tmp/icsos-make-iso/boot/grub /tmp/icsos-make-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-make-iso/vmdex
+	@cp apps/tcc.exe /tmp/icsos-make-iso/apps/tcc.exe
+	@cp apps/hello.exe /tmp/icsos-make-iso/apps/hello.exe
+	@cp apps/make.exe /tmp/icsos-make-iso/apps/make.exe
+	@cp /tmp/icsos-makesrc.tar /tmp/icsos-make-iso/makesrc.tar
+	@printf '%s\n' 'set PATH=/icsos/apps' 'makeboot' 'reboot' \
+		> /tmp/icsos-make-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-make-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-make.iso /tmp/icsos-make-iso >/dev/null 2>&1
+	@echo "Formatting 512 MiB FAT16 virtio work disk..."
+	@truncate -s 512M /tmp/icsos-make-work.img
+	@mkfs.vfat -F 16 -s 32 /tmp/icsos-make-work.img >/dev/null
+	@echo "Running makeboot test (KVM, virtio-blk)..."
+	@-timeout 1800 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+		-cdrom /tmp/icsos-make.iso -boot d \
+		-drive file=/tmp/icsos-make-work.img,if=none,id=vd0,format=raw \
+		-device virtio-blk-pci,drive=vd0,disable-legacy=on \
+		> /tmp/icsos-make.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-make.log
+	@grep -aq "work: mounted" /tmp/icsos-make.log
+	@grep -aq "MAKE_TCC_OK" /tmp/icsos-make.log
+	@grep -aq "Hello World from ICS-OS!" /tmp/icsos-make.log
+	@grep -aq "MAKE_PASS" /tmp/icsos-make.log
+	@! grep -aq "MAKE_FAIL" /tmp/icsos-make.log
+	@echo "test-make PASS"
 
 # Full QEMU integration suite for the x86_64 / SMP / ELF64 path.
 test-integration: vmdex apps/hello.exe

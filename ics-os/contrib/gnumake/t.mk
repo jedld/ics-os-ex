@@ -1,0 +1,2 @@
+all:
+	/work/hello.exe

@@ -47,5 +47,6 @@ void *sys_fd_file(int fd);
 int sys_waitpid(int pid, int *status, int options);
 int sys_spawn(const char *path, const char *params);
 int sys_execve(const char *path, const char *params);
+int sys_getdents(const char *path, char *buf, int buflen);
 
 #endif

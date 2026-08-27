@@ -19,8 +19,13 @@ int _start(){
    } while (s!=0 && c < 99);
    p[c] = 0;
 
-   /* SysV third argument is envp. Never pass a leftover %rdx. */
-   main(c, p, 0);
+   /* SysV third argument is envp. An empty vector (not NULL): GNU make
+    * walks envp[i] until a NULL entry. Passing 0 made envp[0] read
+    * identity-map address 0 (CPL0) and then GPF on a non-canonical ptr. */
+   {
+      static char *empty_env[1] = { 0 };
+      main(c, p, empty_env);
+   }
    exit(0);
    return 0;
 }

@@ -19,7 +19,11 @@ int memcmp(const void *s1, const void *s2, size_t n);
 void *memchr(const void *s, int c, size_t n);
 
 void exit(int status);
+int atexit(void (*fn)(void));
 void abort(void);
+double atof(const char *s);
+int putenv(char *string);
+void *icsos_alloca(unsigned long n);
 int atoi(const char *s);
 long atol(const char *s);
 long strtol(const char *nptr, char **endptr, int base);

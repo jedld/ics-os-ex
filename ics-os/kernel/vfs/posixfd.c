@@ -31,8 +31,12 @@ extern int dex32_loader(char *name, char *image, char *loadaddress, int mode,
                         char *p, char *workdir, PCB386 *parent);
 extern void dex32_stopints(DWORD *flags);
 extern void dex32_restoreints(DWORD flags);
+extern unsigned int strlen(const char *s);
+extern int vfs_listdir(vfs_node *current_dir, vfs_node *buffer, int size);
+extern PCB386 *sched_gethead(void);
 
 #define SPAWN_CMDLINE 1024
+#define WNOHANG    1
 
 #define EPERM   1
 #define ENOENT  2
@@ -855,23 +859,119 @@ int sys_spawn(const char *path, const char *params)
    return spawn_load(path, params);
 }
 
+static PCB386 *waitpid_live_child(PCB386 *parent)
+{
+   PCB386 *head, *p;
+   if (!parent)
+      return (PCB386 *)-1;
+   head = sched_gethead();
+   if (!head)
+      return (PCB386 *)-1;
+   p = head;
+   do {
+      if (p->owner == parent->processid && p != parent
+          && !(p->status & PS_ATTB_THREAD)
+          && !(p->status & PS_ATTB_UNLOADABLE))
+         return p;
+      p = p->next;
+   } while (p && p != head);
+   return (PCB386 *)-1;
+}
+
 int sys_waitpid(int pid, int *status, int options)
 {
-   PCB386 *p;
+   PCB386 *me = current_process;
+   int i, wpid, wst;
 
-   (void)options;
-   if (pid <= 0)
+   if (!me)
       return -EINVAL;
-   p = ps_findprocess((DWORD)pid);
-   if (p == (PCB386 *)-1) {
-      if (status)
-         *status = 0;
-      return pid;
+
+   for (;;) {
+      if (pid < -1)
+         return -EINVAL;
+      for (i = 0; i < me->waitq_n; i++) {
+         if (pid == -1 || me->waitq_pid[i] == pid) {
+            wpid = me->waitq_pid[i];
+            wst = me->waitq_st[i];
+            me->waitq_n--;
+            for (; i < me->waitq_n; i++) {
+               me->waitq_pid[i] = me->waitq_pid[i + 1];
+               me->waitq_st[i] = me->waitq_st[i + 1];
+            }
+            if (status)
+               *status = wst;
+            return wpid;
+ mar         }
+      }
+      if (pid == 0)
+         return -EINVAL;
+      if (pid > 0) {
+         PCB386 *p = ps_findprocess((DWORD)pid);
+         if (p == (PCB386 *)-1) {
+            if (options & WNOHANG)
+               return -ECHILD;
+            return -ECHILD;
+         }
+         if (options & WNOHANG)
+            return 0;
+         dex32_waitpid(pid, 0);
+         continue;
+      }
+      /* pid == -1 */
+      if (me->nlive <= 0 && me->waitq_n == 0)
+         return -ECHILD;
+      if (options & WNOHANG)
+         return 0;
+      {
+         PCB386 *ch = waitpid_live_child(me);
+         if (ch != (PCB386 *)-1)
+            dex32_waitpid((int)ch->processid, 0);
+         else
+            taskswitch();
+      }
    }
-   dex32_waitpid(pid, 0);
-   if (status)
-      *status = 0;
-   return pid;
+}
+
+int sys_getdents(const char *path, char *ubuf, int ubuflen)
+{
+   vfs_node *dir;
+   vfs_node *list;
+   int n, i, off;
+
+   if (!path || !ubuf || ubuflen < 2)
+      return -EINVAL;
+   if (path[0] == '.' && path[1] == 0 && current_process)
+      dir = current_process->workdir;
+   else
+      dir = vfs_searchname(path);
+   if (!dir)
+      return -ENOENT;
+   n = vfs_listdir(dir, 0, 0);
+   if (n < 0)
+      return -EIO;
+   if (n == 0) {
+      ubuf[0] = 0;
+      return 1;
+   }
+   list = (vfs_node *)malloc((unsigned)n * sizeof(vfs_node));
+   if (!list)
+      return -ENOMEM;
+   n = vfs_listdir(dir, list, n * (int)sizeof(vfs_node));
+   off = 0;
+   for (i = 0; i < n; i++) {
+      const char *nm = list[i].name;
+      int l;
+      if (!nm)
+         continue;
+      l = (int)strlen(nm);
+      if (off + l + 2 > ubuflen)
+         break;
+      memcpy(ubuf + off, nm, (unsigned)l + 1);
+      off += l + 1;
+   }
+   ubuf[off++] = 0;
+   free(list);
+   return off;
 }
 
 int sys_execve(const char *path, const char *params)

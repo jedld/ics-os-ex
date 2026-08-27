@@ -212,6 +212,12 @@ typedef struct _PCB386 {
    DWORD childwait;    /*used by dex32_wait to check if a child has terminated
                         or not, incremented by 1 when a child process is spawned*/
 
+#define WAITQ_MAX 8
+   int nlive;          /* live children (posix waitpid) */
+   int waitq_n;
+   int waitq_pid[WAITQ_MAX];
+   int waitq_st[WAITQ_MAX];
+
    DWORD syscallsize;  //stores the size of the system call stack
 
    DWORD lastcputime, totalcputime; /*the taskswitcher increments this value every time

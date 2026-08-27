@@ -9,6 +9,10 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 #define BUFSIZ 1024
+#define L_tmpnam 64
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
 
 typedef unsigned int FILE;
 
@@ -46,5 +50,10 @@ int getchar(void);
 char *gets(char *buf);
 int remove(const char *path);
 int rename(const char *oldpath, const char *newpath);
+void perror(const char *s);
+int setvbuf(FILE *f, char *buf, int mode, size_t size);
+int fileno(FILE *f);
+int putc(int c, FILE *f);
+int ferror(FILE *f);
 
 #endif
