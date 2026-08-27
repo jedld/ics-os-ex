@@ -183,6 +183,16 @@ void api_init(){
    api_addsystemcall(0xA4,sys_read,0,API_REQUIRE_INTS);
    api_addsystemcall(0xA5,sys_write,0,API_REQUIRE_INTS);
    api_addsystemcall(0xA6,sys_kcmd,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xA7,sys_open,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xA8,sys_close,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xA9,sys_lseek,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xAA,sys_preadv,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xAB,sys_pwritev,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xAC,sys_fsync,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xAD,sys_io_uring_setup,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xAE,sys_io_uring_enter,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xAF,sys_fstat_fd,0,API_REQUIRE_INTS);
+   api_addsystemcall(0xB0,sys_fd_file,0,API_REQUIRE_INTS);
 };
 
 
@@ -240,21 +250,22 @@ api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,
 api_arg_t syscallentry64(api_arg_t sysno, api_arg_t a0, api_arg_t a1,
                          api_arg_t a2, api_arg_t a3, api_arg_t a4)
 {
-   (void)a3;
-   (void)a4;
+   struct k_iovec iov;
    switch ((unsigned)sysno) {
    case 0:  /* read(fd, buf, n) */
       return api_syscall(0xA4, a0, a1, a2, 0, 0);
    case 1:  /* write(fd, buf, n) */
       return api_syscall(0xA5, a0, a1, a2, 0, 0);
-   case 2:  /* open(path, flags, mode) — DEX openfilex(path, mode) */
-      return api_syscall(4, a0, a1, 0, 0, 0);
-   case 3:  /* close */
-      return api_syscall(5, a0, 0, 0, 0, 0);
+   case 2:  /* open(path, flags, mode) */
+      return api_syscall(0xA7, a0, a1, a2, 0, 0);
+   case 3:  /* close(fd) */
+      return api_syscall(0xA8, a0, 0, 0, 0, 0);
    case 4:  /* stat */
       return api_syscall(36, a0, a1, 0, 0, 0);
-   case 5:  /* fstat */
-      return api_syscall(0x58, a0, a1, 0, 0, 0);
+   case 5:  /* fstat(fd, buf) */
+      return api_syscall(0xAF, a0, a1, 0, 0, 0);
+   case 8:  /* lseek */
+      return api_syscall(0xA9, a0, a1, a2, 0, 0);
    case 12: /* brk */
       if (a0 == 0)
          return (api_arg_t)(uintptr)current_process->knext;
@@ -265,15 +276,55 @@ api_arg_t syscallentry64(api_arg_t sysno, api_arg_t a0, api_arg_t a1,
             api_syscall(9, (api_arg_t)(want - cur), 0, 0, 0, 0);
          return (api_arg_t)(uintptr)current_process->knext;
       }
+   case 17: /* pread64 */
+      iov.iov_base = (void *)(uintptr)a1;
+      iov.iov_len = (unsigned long)a2;
+      return (api_arg_t)sys_preadv((int)a0, &iov, 1, (long)a3);
+   case 18: /* pwrite64 */
+      iov.iov_base = (void *)(uintptr)a1;
+      iov.iov_len = (unsigned long)a2;
+      return (api_arg_t)sys_pwritev((int)a0, &iov, 1, (long)a3);
+   case 19: /* readv — treat as preadv at current offset */
+      {
+         long off = sys_lseek((int)a0, 0, 1);
+         long n = sys_preadv((int)a0, (const struct k_iovec *)(uintptr)a1,
+                             (int)a2, off);
+         if (n > 0)
+            sys_lseek((int)a0, off + n, 0);
+         return (api_arg_t)n;
+      }
+   case 20: /* writev */
+      {
+         long off = sys_lseek((int)a0, 0, 1);
+         long n = sys_pwritev((int)a0, (const struct k_iovec *)(uintptr)a1,
+                              (int)a2, off);
+         if (n > 0)
+            sys_lseek((int)a0, off + n, 0);
+         return (api_arg_t)n;
+      }
    case 39: /* getpid */
       return api_syscall(2, 0, 0, 0, 0, 0);
    case 60: /* exit */
       return api_syscall(3, a0, 0, 0, 0, 0);
+   case 74: /* fsync */
+      return api_syscall(0xAC, a0, 0, 0, 0, 0);
    case 79: /* getcwd */
       return api_syscall(0x43, a0, a1, 0, 0, 0);
    case 201: /* time */
       return api_syscall(0x55, a0, 0, 0, 0, 0);
+   case 257: /* openat(dirfd, path, flags, mode) */
+      (void)a0;
+      return api_syscall(0xA7, a1, a2, a3, 0, 0);
+   case 295: /* preadv */
+      return api_syscall(0xAA, a0, a1, a2, a3, 0);
+   case 296: /* pwritev */
+      return api_syscall(0xAB, a0, a1, a2, a3, 0);
+   case 425: /* io_uring_setup */
+      return api_syscall(0xAD, a0, a1, 0, 0, 0);
+   case 426: /* io_uring_enter */
+      return api_syscall(0xAE, a0, a1, a2, a3, 0);
    default:
+      (void)a4;
       return (api_arg_t)(long)-38; /* -ENOSYS */
    }
 }

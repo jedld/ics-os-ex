@@ -133,7 +133,12 @@ across ATA PIO. `IOrequest.lba` is 64-bit. `disk_mgr` sleeps (`sleep(1)` +
 `hlt`) between flush passes; `iomgr_request_flush()` clears its `waiting`
 flag. `make test-iobench` maps `/icsos/apps/tcc.exe` from the CD.
 
-**P2 page cache:** `iomgr/blkcache.c` is a 512×4KiB write-back cache indexed
+**P3 POSIX / uring:** Per-process fd table (`FD_MAX` 16). `sys_open` / `sys_close` /
+`sys_read` / `sys_write` / `sys_lseek` / `sys_preadv` / `sys_pwritev` /
+`sys_fsync` wrap `file_PCB`. DEX `fopen`/`fread` stay as compat. `io_uring_setup`
++ `io_uring_enter` run a NOP/READ/WRITE/READV/WRITEV/FSYNC/OPENAT/CLOSE subset
+synchronously; ring VA is `params.sq_off.user_addr` (identity map, no mmap).
+`make test-posixio` writes `/ramdisk/piotest.dat`.
 by `(device, byte_offset >> 12)`. CD 2048-byte sectors occupy two per page
 (the old `cd*` skip is gone). Misses merge into aligned 4KiB device reads.
 `bio_submit_sync()` is the internal submit path. Dirty pages flush from
@@ -155,7 +160,7 @@ The page allocator skips that reserved-range table; the linker
 closed 32MiB interval; `sbrk` must not `mempop`. Add new regions to
 the header first.
 
-Next: POSIX fds / io_uring (P3).
+Next: async uring completions; POSIX fds / io_uring subset are in.
 
 ## Key files
 

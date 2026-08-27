@@ -1094,6 +1094,11 @@ int console_execute(const char *str){
       else
          printf("EXEC_TEST_PASS\n");
    }else
+   if (strcmp(u,"posixio") == 0){
+      printf("posixio: running /icsos/apps/posixio.exe\n");
+      if (!user_execp("/icsos/apps/posixio.exe", 0, "/icsos/apps/posixio.exe"))
+         printf("POSIXIO_FAIL\n");
+   }else
    if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
       char cmd[512];
       int ok = 1;

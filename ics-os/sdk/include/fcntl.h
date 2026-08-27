@@ -12,6 +12,7 @@
 #define O_TRUNC         0x0800
 #define O_APPEND        0x1000
 #define O_NONBLOCK      0x2000
+#define O_DIRECT        0x4000
 
 int open(const char *path, int flags, ...);
 int creat(const char *path, int mode);

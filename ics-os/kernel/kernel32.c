@@ -87,6 +87,7 @@ extern void textcolor(unsigned char c);
 #include "memory/dexmem.h"
 #include "console/dex_DDL.h"
 #include "vfs/vfs_core.h"
+#include "vfs/posixfd.h"
 #include "process/process.h"
 #include "process/pdispatch.h"
 #include "devmgr/dex32_devmgr.h"

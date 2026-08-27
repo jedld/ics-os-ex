@@ -2,6 +2,21 @@
 
 ## 2026-08-27 (Manila, UTC+8)
 
+### 20:40 — I/O P3: POSIX fds and a synchronous io_uring subset
+
+Kernel per-process fd table: `open`/`close`/`read`/`write`/`lseek`/
+`preadv`/`pwritev`/`fsync`. `io_uring_setup`/`enter` run NOP, READ/WRITE,
+READV/WRITEV, FSYNC, OPENAT, CLOSE inline into the CQ. Ring VA is
+`params.sq_off.user_addr` (identity map). DEX fopen/fread stay as compat;
+`fdopen` returns the kernel `file_PCB*` so TinyCC ELF output still uses
+DEX `fwrite`.
+
+Tests: `test-boot`, `test-smp`, `test-exec`, `test-virtio`, `test-iobench`,
+`test-posixio`, `test-selfhost` PASS (`POSIXIO_PASS`, `URING_PASS`).
+
+**Activity now:** P3 landed. Next is async uring completions or
+`test-kbuild`.
+
 ### 20:15 — I/O P2: bio + 4KiB page cache
 
 P2 is in. 512×4KiB write-back cache, `bio_submit_sync`, one hctx per

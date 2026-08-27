@@ -57,6 +57,16 @@
 #define FXN_SYSREAD  0xA4
 #define FXN_SYSWRITE 0xA5
 #define FXN_KCMD     0xA6
+#define FXN_SYSOPEN  0xA7
+#define FXN_SYSCLOSE 0xA8
+#define FXN_SYSLSEEK 0xA9
+#define FXN_PREADV   0xAA
+#define FXN_PWRITEV  0xAB
+#define FXN_FSYNC    0xAC
+#define FXN_URING_SETUP 0xAD
+#define FXN_URING_ENTER 0xAE
+#define FXN_FSTATFD  0xAF
+#define FXN_FDFILE   0xB0
 
 /*============DEX constants for files===========*/
 #define FILE_READ 0
@@ -80,6 +90,7 @@
 #define O_TRUNC		0x0800
 #define O_APPEND	0x1000
 #define O_NONBLOCK	0x2000
+#define O_DIRECT	0x4000
 
 /*============constants defined in limits.h============*/
 #define CHAR_BIT 8

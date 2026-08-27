@@ -248,6 +248,7 @@ typedef struct _PCB386 {
 #define FD_NONE  0
 #define FD_TTY   1
 #define FD_VFS   2
+#define FD_URING 3
 #define FD_MAX   16
    struct {
       int type;

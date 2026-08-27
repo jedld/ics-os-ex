@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
+#include <sys/io_uring.h>
 #include <signal.h>
 #include <time.h>
 #include <stdarg.h>
@@ -36,144 +38,134 @@ extern void exit(int status);
 #define FXN_FSTAT    0x58
 #define FXN_STAT     36
 #define FXN_TIME     0x55
+#define FXN_SYSREAD  0xA4
+#define FXN_SYSWRITE 0xA5
+#define FXN_SYSOPEN  0xA7
+#define FXN_SYSCLOSE 0xA8
+#define FXN_SYSLSEEK 0xA9
+#define FXN_PREADV   0xAA
+#define FXN_PWRITEV  0xAB
+#define FXN_FSYNC    0xAC
+#define FXN_URING_SETUP 0xAD
+#define FXN_URING_ENTER 0xAE
+#define FXN_FSTATFD  0xAF
+#define FXN_FDFILE   0xB0
 
-/* Kernel FILE* handles live around 0xC0000000. Casting them to int makes
-   every successful open look like fd < 0 to TinyCC. Keep a small table of
-   non-negative descriptors instead. */
-#define ICSOS_FD_MAX 64
-#define ICSOS_FD_BASE 3
-
-static FILE *icsos_fdtab[ICSOS_FD_MAX];
-
-static int fd_alloc(FILE *f)
+static long ics_sys(int n, long a, long b, long c, long d, long e)
 {
-   int i;
-   for (i = 0; i < ICSOS_FD_MAX; i++) {
-      if (!icsos_fdtab[i]) {
-         icsos_fdtab[i] = f;
-         return ICSOS_FD_BASE + i;
-      }
+   long r = (long)dexsdk_systemcall(n, a, b, c, d, e);
+   if (r < 0) {
+      errno = (int)(-r);
+      return -1;
    }
-   errno = 24; /* EMFILE */
-   return -1;
-}
-
-static FILE *mapfd(int fd)
-{
-   if (fd == 0) return stdin;
-   if (fd == 1) return stdout;
-   if (fd == 2) return stderr;
-   if (fd >= ICSOS_FD_BASE && fd < ICSOS_FD_BASE + ICSOS_FD_MAX)
-      return icsos_fdtab[fd - ICSOS_FD_BASE];
-   return 0;
-}
-
-static void fd_free(int fd)
-{
-   if (fd >= ICSOS_FD_BASE && fd < ICSOS_FD_BASE + ICSOS_FD_MAX)
-      icsos_fdtab[fd - ICSOS_FD_BASE] = 0;
+   return r;
 }
 
 int open(const char *path, int flags, ...)
 {
-   FILE *f;
-   const char *mode;
-   int fd;
-
-   if ((flags & O_ACCMODE) == O_RDONLY)
-      mode = "r";
-   else if (flags & O_APPEND)
-      mode = "a";
-   else if ((flags & O_ACCMODE) == O_RDWR)
-      mode = (flags & O_CREAT) ? "w" : "r";
-   else
-      mode = "w";
-
-   f = fopen(path, mode);
-   if (!f) {
-      errno = 2;
-      return -1;
-   }
-   fd = fd_alloc(f);
-   if (fd < 0) {
-      fclose(f);
-      return -1;
-   }
-   return fd;
+   va_list ap;
+   int mode = 0666;
+   long r;
+   va_start(ap, flags);
+   if (flags & O_CREAT)
+      mode = va_arg(ap, int);
+   va_end(ap);
+   r = ics_sys(FXN_SYSOPEN, (long)path, flags, mode, 0, 0);
+   return (int)r;
 }
 
 int creat(const char *path, int mode)
 {
-   (void)mode;
-   return open(path, O_WRONLY | O_CREAT | O_TRUNC);
+   return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
 int close(int fd)
 {
-   FILE *f = mapfd(fd);
-   int r;
-   if (!f || f == stdin || f == stdout || f == stderr)
+   if (fd >= 0 && fd < 3)
       return 0;
-   r = fclose(f);
-   fd_free(fd);
-   return r;
+   return (int)ics_sys(FXN_SYSCLOSE, fd, 0, 0, 0, 0);
 }
 
 ssize_t read(int fd, void *buf, size_t n)
 {
-   FILE *f;
-   int r;
-   if (fd >= 0 && fd < 3) {
-      long got = dexsdk_systemcall(0xA4, fd, (long)buf, (long)n, 0, 0);
-      if (got < 0) {
-         errno = 4;
-         return -1;
-      }
-      return (ssize_t)got;
-   }
-   f = mapfd(fd);
-   if (!f) {
-      errno = 9;
-      return -1;
-   }
-   r = fread(buf, 1, (int)n, f);
-   return r;
+   return (ssize_t)ics_sys(FXN_SYSREAD, fd, (long)buf, (long)n, 0, 0);
 }
 
 ssize_t write(int fd, const void *buf, size_t n)
 {
-   FILE *f;
-   if (fd >= 0 && fd < 3) {
-      long put = dexsdk_systemcall(0xA5, fd, (long)buf, (long)n, 0, 0);
-      if (put < 0) {
-         errno = 9;
-         return -1;
-      }
-      return (ssize_t)put;
-   }
-   f = mapfd(fd);
-   if (!f) {
-      errno = 9;
-      return -1;
-   }
-   return fwrite(buf, 1, (int)n, f);
+   return (ssize_t)ics_sys(FXN_SYSWRITE, fd, (long)buf, (long)n, 0, 0);
 }
 
 long lseek(int fd, long off, int whence)
 {
-   FILE *f = mapfd(fd);
-   if (!f) {
-      errno = 9;
+   return ics_sys(FXN_SYSLSEEK, fd, off, whence, 0, 0);
+}
+
+ssize_t preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset)
+{
+   return (ssize_t)ics_sys(FXN_PREADV, fd, (long)iov, iovcnt, (long)offset, 0);
+}
+
+ssize_t pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset)
+{
+   return (ssize_t)ics_sys(FXN_PWRITEV, fd, (long)iov, iovcnt, (long)offset, 0);
+}
+
+ssize_t pread(int fd, void *buf, size_t n, off_t offset)
+{
+   struct iovec iov;
+   iov.iov_base = buf;
+   iov.iov_len = n;
+   return preadv(fd, &iov, 1, offset);
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t n, off_t offset)
+{
+   struct iovec iov;
+   iov.iov_base = (void *)buf;
+   iov.iov_len = n;
+   return pwritev(fd, &iov, 1, offset);
+}
+
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt)
+{
+   long off = lseek(fd, 0, SEEK_CUR);
+   ssize_t n;
+   if (off < 0)
       return -1;
-   }
-   fseek(f, off, whence);
-   return ftell(f);
+   n = preadv(fd, iov, iovcnt, off);
+   if (n > 0)
+      lseek(fd, off + (long)n, SEEK_SET);
+   return n;
+}
+
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt)
+{
+   long off = lseek(fd, 0, SEEK_CUR);
+   ssize_t n;
+   if (off < 0)
+      return -1;
+   n = pwritev(fd, iov, iovcnt, off);
+   if (n > 0)
+      lseek(fd, off + (long)n, SEEK_SET);
+   return n;
+}
+
+int fsync(int fd)
+{
+   return (int)ics_sys(FXN_FSYNC, fd, 0, 0, 0, 0);
 }
 
 FILE *fdopen(int fd, const char *mode)
 {
+   long p;
    (void)mode;
-   return mapfd(fd);
+   if (fd == 0) return stdin;
+   if (fd == 1) return stdout;
+   if (fd == 2) return stderr;
+   /* Kernel file_PCB* so DEX fwrite/fclose still work (TinyCC ELF output). */
+   p = (long)dexsdk_systemcall(FXN_FDFILE, fd, 0, 0, 0, 0);
+   return p ? (FILE *)p : 0;
 }
 
 int unlink(const char *path)
@@ -235,30 +227,24 @@ int rename(const char *oldpath, const char *newpath)
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, long offset)
 {
-   FILE *f;
    void *p;
-   long old;
-   size_t n;
+   ssize_t n;
    (void)addr;
    (void)prot;
 
    if ((flags & MAP_ANONYMOUS) || fd < 0)
       return malloc(length);
 
-   /* Eager file-backed map: populate from the open fd (benefits from
-      kernel coalesced FAT reads + block cache). */
-   f = mapfd(fd);
-   if (!f)
-      return MAP_FAILED;
    p = malloc(length);
    if (!p)
       return MAP_FAILED;
-   old = ftell(f);
-   fseek(f, offset, 0 /* SEEK_SET */);
-   n = fread(p, 1, length, f);
-   fseek(f, old, 0);
-   if (n < length)
-      memset((char*)p + n, 0, length - n);
+   n = pread(fd, p, length, offset);
+   if (n < 0) {
+      free(p);
+      return MAP_FAILED;
+   }
+   if ((size_t)n < length)
+      memset((char *)p + n, 0, length - n);
    return p;
 }
 
@@ -352,56 +338,24 @@ clock_t clock(void)
    return (clock_t)time(0);
 }
 
-static int fstat_file(FILE *f, struct stat *buf)
+int fstat(int fd, struct stat *buf)
 {
-   struct {
-      int size;
-      int st_dev;
-      int st_ino;
-      int st_mode;
-      short st_nlink;
-      short st_uid;
-      short st_gid;
-      int st_rdev;
-      int st_size;
-      int st_atime;
-      int st_mtime;
-      int st_ctime;
-   } vs;
-   memset(buf, 0, sizeof(*buf));
-   memset(&vs, 0, sizeof(vs));
-   vs.size = (int)sizeof(vs);
-   if (dexsdk_systemcall(FXN_FSTAT, (long)f, (long)&vs, 0, 0, 0) < 0)
+   if (!buf) {
+      errno = 22;
       return -1;
-   buf->st_size = vs.st_size;
-   buf->st_mode = S_IFREG | 0777;
-   buf->st_atime = vs.st_atime;
-   buf->st_mtime = vs.st_mtime;
-   buf->st_ctime = vs.st_ctime;
-   return 0;
+   }
+   return (int)ics_sys(FXN_FSTATFD, fd, (long)buf, 0, 0, 0);
 }
 
 int stat(const char *path, struct stat *buf)
 {
-   FILE *f = fopen(path, "r");
-   int r;
-   if (!f) {
-      errno = 2;
+   int fd, r;
+   fd = open(path, O_RDONLY);
+   if (fd < 0)
       return -1;
-   }
-   r = fstat_file(f, buf);
-   fclose(f);
+   r = fstat(fd, buf);
+   close(fd);
    return r;
-}
-
-int fstat(int fd, struct stat *buf)
-{
-   FILE *f = mapfd(fd);
-   if (!f) {
-      errno = 9;
-      return -1;
-   }
-   return fstat_file(f, buf);
 }
 
 void abort(void)
@@ -681,4 +635,98 @@ char *getenv(const char *name)
 int machine_reboot(void)
 {
    return dexsdk_systemcall(FXN_REBOOT, 0, 0, 0, 0, 0);
+}
+
+int io_uring_setup(unsigned entries, struct io_uring_params *p)
+{
+   return (int)ics_sys(FXN_URING_SETUP, (long)entries, (long)p, 0, 0, 0);
+}
+
+int io_uring_enter(int fd, unsigned to_submit, unsigned min_complete, unsigned flags)
+{
+   return (int)ics_sys(FXN_URING_ENTER, fd, (long)to_submit,
+                       (long)min_complete, (long)flags, 0);
+}
+
+int io_uring_queue_init(unsigned entries, struct io_uring *ring, unsigned flags)
+{
+   struct io_uring_params p;
+   char *base;
+   int fd;
+   if (!ring)
+      return -1;
+   memset(&p, 0, sizeof(p));
+   p.flags = flags;
+   fd = io_uring_setup(entries, &p);
+   if (fd < 0)
+      return -1;
+   base = (char *)(unsigned long)p.sq_off.user_addr;
+   ring->ring_fd = fd;
+   ring->sq_entries = p.sq_entries;
+   ring->cq_entries = p.cq_entries;
+   ring->sq_head = (uint32_t *)(base + p.sq_off.head);
+   ring->sq_tail = (uint32_t *)(base + p.sq_off.tail);
+   ring->sq_mask = (uint32_t *)(base + p.sq_off.ring_mask);
+   ring->sq_array = (uint32_t *)(base + p.sq_off.array);
+   ring->sqes = (struct io_uring_sqe *)(base + p.resv[0]);
+   ring->cq_head = (uint32_t *)(base + p.cq_off.head);
+   ring->cq_tail = (uint32_t *)(base + p.cq_off.tail);
+   ring->cq_mask = (uint32_t *)(base + p.cq_off.ring_mask);
+   ring->cqes = (struct io_uring_cqe *)(base + p.cq_off.cqes);
+   return 0;
+}
+
+void io_uring_queue_exit(struct io_uring *ring)
+{
+   if (ring && ring->ring_fd >= 0)
+      close(ring->ring_fd);
+}
+
+struct io_uring_sqe *io_uring_get_sqe(struct io_uring *ring)
+{
+   unsigned tail, head, mask, idx;
+   if (!ring)
+      return 0;
+   tail = *ring->sq_tail;
+   head = *ring->sq_head;
+   mask = *ring->sq_mask;
+   if (tail - head >= ring->sq_entries)
+      return 0;
+   idx = ring->sq_array[tail & mask];
+   *ring->sq_tail = tail + 1;
+   memset(&ring->sqes[idx], 0, sizeof(struct io_uring_sqe));
+   return &ring->sqes[idx];
+}
+
+int io_uring_submit(struct io_uring *ring)
+{
+   unsigned head, tail;
+   if (!ring)
+      return -1;
+   head = *ring->sq_head;
+   tail = *ring->sq_tail;
+   if (tail == head)
+      return 0;
+   return io_uring_enter(ring->ring_fd, tail - head, 0, 0);
+}
+
+int io_uring_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe)
+{
+   unsigned head, tail, mask;
+   if (!ring || !cqe)
+      return -1;
+   head = *ring->cq_head;
+   tail = *ring->cq_tail;
+   if (head == tail)
+      return -1;
+   mask = *ring->cq_mask;
+   *cqe = &ring->cqes[head & mask];
+   return 0;
+}
+
+void io_uring_cqe_seen(struct io_uring *ring, struct io_uring_cqe *cqe)
+{
+   (void)cqe;
+   if (ring)
+      *ring->cq_head = *ring->cq_head + 1;
 }

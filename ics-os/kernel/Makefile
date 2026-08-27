@@ -18,7 +18,7 @@ bzImage: all
 
 all: obj Kernel64.bin
 
-obj: scheduler.o fat.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o devmgr_error.o kernel32.o \
+obj: scheduler.o fat.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o posixfd.o devmgr_error.o kernel32.o \
 		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o virtio_blk.o
 		
 kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
@@ -35,7 +35,7 @@ kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		stdlib/stdlib.c hardware/keyboard/mouse.c hardware/exceptions.c \
 		hardware/hardware.c hardware/chips/speaker.c devmgr/dex32_devmgr.c \
 		devmgr/extension.c process/environment.c devmgr/bridges.c \
-		process/sync.c console/script.c process/process.c dexapi/dex32API.c \
+		process/sync.c console/script.c process/process.c process/process.h dexapi/dex32API.c \
 		hardware/ATA/ide.c vfs/vfs_aux.c memory/kheap.c memory/dexmalloc.c \
 		vmm/vmm.c kexec.c kexec.h
 	$(CC) $(CFLAGS) -o kernel32.o kernel32.c 
@@ -60,6 +60,9 @@ iomgr.o: iomgr/iosched.c iomgr/iosched.h iomgr/bio.h stdlib/time.h iomgr/blkcach
 
 blkcache.o: iomgr/blkcache.c iomgr/blkcache.h
 	$(CC) $(CFLAGS) -o blkcache.o iomgr/blkcache.c
+
+posixfd.o: vfs/posixfd.c vfs/posixfd.h
+	$(CC) $(CFLAGS) -o posixfd.o vfs/posixfd.c
 	
 devmgr_error.o:
 	$(CC) $(CFLAGS) -o devmgr_error.o devmgr/devmgr_error.c
@@ -88,11 +91,11 @@ virtio_blk.o: hardware/virtio/virtio_blk.c hardware/virtio/virtio_blk.h hardware
 lapic.o: cpu/lapic.c cpu/lapic.h
 	$(CC) $(CFLAGS) -o lapic.o cpu/lapic.c
 
-smp.o: cpu/smp.c cpu/smp.h
+smp.o: cpu/smp.c cpu/smp.h process/process.h
 	$(CC) $(CFLAGS) -o smp.o cpu/smp.c
 	
 Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
-		scheduler.o iomgr.o blkcache.o fat.o iso9660.o ramdisk.o \
+		scheduler.o iomgr.o blkcache.o posixfd.o fat.o iso9660.o ramdisk.o \
 		devfs.o irqwrap.o devmgr_error.o kexec.o virtio_blk.o
 	ld $(LDFLAGS) -Map mapfile.txt
 

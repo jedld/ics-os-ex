@@ -243,42 +243,6 @@ int tty_write(tty_t *t, const char *buf, int n)
    return n;
 }
 
-static tty_t *fd_tty(int fd)
-{
-   if (!current_process || fd < 0 || fd >= FD_MAX)
-      return 0;
-   if (current_process->fds[fd].type != FD_TTY)
-      return 0;
-   return (tty_t *)current_process->fds[fd].ptr;
-}
-
-int sys_read(int fd, char *buf, int n)
-{
-   tty_t *t = fd_tty(fd);
-   if (t)
-      return tty_read(t, buf, n);
-   if (current_process && current_process->ctty && fd == 0)
-      return tty_read(current_process->ctty, buf, n);
-   return 0;
-}
-
-int sys_write(int fd, const char *buf, int n)
-{
-   tty_t *t = fd_tty(fd);
-   if (t)
-      return tty_write(t, buf, n);
-   if (current_process && current_process->ctty && (fd == 1 || fd == 2))
-      return tty_write(current_process->ctty, buf, n);
-   /* Fallback: kernel console. */
-   if (buf && n > 0) {
-      int i;
-      for (i = 0; i < n; i++)
-         putc(buf[i]);
-      return n;
-   }
-   return 0;
-}
-
 int sys_kcmd(char *cmd)
 {
    if (!cmd)

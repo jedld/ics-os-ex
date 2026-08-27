@@ -40,8 +40,6 @@ int tty_read(tty_t *t, char *buf, int n);
 int tty_write(tty_t *t, const char *buf, int n);
 void tty_signal_int(tty_t *t);
 tty_t *tty_serial(void);
-int sys_read(int fd, char *buf, int n);
-int sys_write(int fd, const char *buf, int n);
 int sys_kcmd(char *cmd);
 
 #endif

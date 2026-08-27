@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -65,6 +65,8 @@ usb: apps prep_image
 apps:
 	-$(MAKE) -C contrib/hello
 	-$(MAKE) -C contrib/hello install
+	-$(MAKE) -C contrib/posixio
+	-$(MAKE) -C contrib/posixio install
 	-$(MAKE) -C contrib/sh
 	-$(MAKE) -C contrib/sh install
 	$(MAKE) -C contrib/tcc
@@ -350,6 +352,26 @@ test-exec: kernel/Kernel64.bin apps/hello.exe
 	@grep -aq "Hello World from ICS-OS!" /tmp/icsos-exec.log
 	@grep -aq "EXEC_TEST_PASS" /tmp/icsos-exec.log
 	@echo "test-exec PASS"
+
+# POSIX fds, preadv/pwritev/fsync, and a synchronous io_uring subset.
+test-posixio: kernel/Kernel64.bin apps/posixio.exe
+	@echo "Building Multiboot2 ISO for POSIX I/O..."
+	@mkdir -p /tmp/icsos-posixio-iso/boot/grub /tmp/icsos-posixio-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-posixio-iso/vmdex
+	@cp apps/posixio.exe /tmp/icsos-posixio-iso/apps/posixio.exe
+	@printf '%s\n' 'posixio' 'reboot' > /tmp/icsos-posixio-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-posixio-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-posixio.iso /tmp/icsos-posixio-iso >/dev/null 2>&1
+	@echo "Running POSIX I/O test (KVM)..."
+	@-timeout 55 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-posixio.iso -boot d > /tmp/icsos-posixio.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-posixio.log
+	@grep -aq "ramdisk: mounted" /tmp/icsos-posixio.log
+	@grep -aq "POSIXIO_PASS" /tmp/icsos-posixio.log
+	@grep -aq "URING_PASS" /tmp/icsos-posixio.log
+	@! grep -aq "POSIXIO_FAIL" /tmp/icsos-posixio.log
+	@echo "test-posixio PASS"
 
 # Full QEMU integration suite for the x86_64 / SMP / ELF64 path.
 test-integration: vmdex apps/hello.exe

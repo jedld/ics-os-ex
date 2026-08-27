@@ -36,7 +36,7 @@ Useful individual targets (from `ics-os/`):
 | `test-selfhost` | In-OS TinyCC compiles/runs `min.c` + `hello.c` |
 | `test-tccboot` | In-OS TinyCC rebuilds itself (`tccnew.exe`) and compiles `min.c` |
 | `test-iobench` | CD sequential map; 4KiB page cache hits; `IOBENCH_PASS` + `IOBENCH_CACHE_OK` |
-| `test-virtio` | QEMU virtio-blk DMA R/W; `VIRTIO_BLK_OK` |
+| `test-posixio` | POSIX fds + preadv/pwritev/fsync + io_uring subset; `POSIXIO_PASS` + `URING_PASS` |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).
@@ -93,6 +93,6 @@ Make sure it contains the current problem and the activity currently being perfo
 ## Suggested next work
 
 1. `test-kbuild` / `test-fullhost`: in-OS kernel compile + kexec.
-2. I/O P3: POSIX fds (`preadv`/`pwritev`/`fsync`), then io_uring-style SQ/CQ. P0–P2 (unlock, virtio-blk, 4KiB page cache) are in.
+2. I/O P3 follow-on: async completions into the uring CQ (today enter runs SQEs inline). POSIX fds, preadv/pwritev/fsync, and a setup/enter subset are in.
 3. Allow user processes on any CPU (harden `waitpid`/exit migration).
 4. Full ring-3 user mode (today user ELFs still enter with kernel CS).

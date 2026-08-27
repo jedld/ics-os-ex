@@ -300,7 +300,7 @@ static int kbuild_run(const char *cc)
    static const char *cfiles[] = {
       "tcccompat.c", "process/scheduler.c", "filesystem/fat12.c",
       "filesystem/iso9660.c", "filesystem/ramdisk.c", "filesystem/devfs.c",
-      "iomgr/iosched.c", "iomgr/blkcache.c", "devmgr/devmgr_error.c",
+      "iomgr/iosched.c", "iomgr/blkcache.c", "vfs/posixfd.c", "devmgr/devmgr_error.c",
       "cpu/lapic.c", "cpu/smp.c", "kernel32.c",
       0
    };
@@ -385,7 +385,7 @@ static int kbuild_run(const char *cc)
            "/ramdisk/kasm/context.o /ramdisk/kasm/aptramp.o "
            "/ramdisk/k/lapic.o /ramdisk/k/smp.o "
            "/ramdisk/k/kernel32.o /ramdisk/k/scheduler.o /ramdisk/k/iosched.o "
-           "/ramdisk/k/blkcache.o /ramdisk/k/fat12.o /ramdisk/k/iso9660.o "
+           "/ramdisk/k/blkcache.o /ramdisk/k/posixfd.o /ramdisk/k/fat12.o /ramdisk/k/iso9660.o "
            "/ramdisk/k/ramdisk.o /ramdisk/k/devfs.o /ramdisk/kasm/irqwrap.o "
            "/ramdisk/k/devmgr_error.o /ramdisk/k/tcccompat.o /ramdisk/kasm/tccva.o "
            "/ramdisk/kasm/kexec.o",
