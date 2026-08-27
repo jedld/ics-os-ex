@@ -98,11 +98,12 @@ PCB386   mousePCB;                        //mouse PCB
 /* current_process is a macro over smp_this_cpu()->current */
 
 #ifdef __x86_64__
-/* Keep kernel stacks out of BSS near 0x200000 (free-page freelist). */
-#define KSTACK_DISPATCHER_BASE  0x02800000UL
-#define KSTACK_SCHED_BASE       0x02810000UL
-#define KSTACK_PF_BASE          0x02820000UL
-#define KSTACK_SIZE             0x10000UL
+/* Kernel stacks live in .bss (same pattern as AP stacks).  A fixed PA
+   next to the kernel image is what kept colliding with the frame stack. */
+#define KSTACK_SIZE  0x10000UL
+static unsigned char kstack_dispatcher[KSTACK_SIZE] __attribute__((aligned(16)));
+static unsigned char kstack_sched[KSTACK_SIZE] __attribute__((aligned(16)));
+static unsigned char kstack_pf[KSTACK_SIZE] __attribute__((aligned(16)));
 DWORD dispatcher_stack_loc;
 DWORD sched_stack_loc;
 DWORD pagefault_stack_loc;
@@ -1874,9 +1875,9 @@ void process_init(){
    PCB386 *kernel;
 
 #ifdef __x86_64__
-   dispatcher_stack_loc = (DWORD)(KSTACK_DISPATCHER_BASE + KSTACK_SIZE);
-   sched_stack_loc = (DWORD)(KSTACK_SCHED_BASE + KSTACK_SIZE);
-   pagefault_stack_loc = (DWORD)(KSTACK_PF_BASE + KSTACK_SIZE);
+   dispatcher_stack_loc = (DWORD)(uintptr)(kstack_dispatcher + KSTACK_SIZE);
+   sched_stack_loc = (DWORD)(uintptr)(kstack_sched + KSTACK_SIZE);
+   pagefault_stack_loc = (DWORD)(uintptr)(kstack_pf + KSTACK_SIZE);
 #endif
     
    //initialize the FPU

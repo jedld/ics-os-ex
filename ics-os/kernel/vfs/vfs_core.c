@@ -1332,7 +1332,7 @@ int fclose(file_PCB *fhandle)
             free(fhandle);
             
             /*tell the I/O manager to commit all writes to the disk*/
-            forceflush=1; 
+            iomgr_request_flush(); 
             
             return 0;
         };

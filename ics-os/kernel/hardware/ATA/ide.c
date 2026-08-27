@@ -475,7 +475,7 @@ int ide_uni_get_total_sectors()
 
 
 //A universal read block function for all ATA devices
-int ide_uni_read_block(int block,char *blockbuff,int numblocks)
+int ide_uni_read_block(u64 block,char *blockbuff,DWORD numblocks)
 {
  int info_index = -1;
  int i;
@@ -499,15 +499,15 @@ int ide_uni_read_block(int block,char *blockbuff,int numblocks)
   /*Check if it is an IDE device, if it is we use an IDE call*/
   if (!ide_drivelist[info_index].atapi)
        return ide_readsectors(ide_drivelist[info_index].interface, 
-       ide_drivelist[info_index].dev,block,numblocks,blockbuff);
+       ide_drivelist[info_index].dev,(DWORD)block,(DWORD)numblocks,blockbuff);
   else
   /*Use the ATAPI interface*/
        return ide_cdromreadsectors(ide_drivelist[info_index].interface, 
-       ide_drivelist[info_index].dev,block,numblocks,blockbuff);
+       ide_drivelist[info_index].dev,(DWORD)block,(DWORD)numblocks,blockbuff);
 };
 
 //A universal write block function for all ATA devices
-int ide_uni_write_block(int block,char *blockbuff,int numblocks)
+int ide_uni_write_block(u64 block,char *blockbuff,DWORD numblocks)
 {
  int info_index = -1;
  int i;
@@ -533,7 +533,7 @@ int ide_uni_write_block(int block,char *blockbuff,int numblocks)
   };  
   /*Check if it is an IDE device, if it is we use an IDE call*/
   return ide_writesectors(ide_drivelist[info_index].interface, 
-       ide_drivelist[info_index].dev, block, numblocks, blockbuff);
+       ide_drivelist[info_index].dev, (DWORD)block, (DWORD)numblocks, blockbuff);
 };
 
 
@@ -541,7 +541,7 @@ int ide_total_partition = 0;
 ide_partition_info ide_partitions[10];
 
 //read block with partition adjustments
-int ide_read_block_partition(int block, char *blockbuff,int numblocks)
+int ide_read_block_partition(u64 block, char *blockbuff,DWORD numblocks)
 {
     int i;
     //determine which partition was accessed by the io manager based on the
@@ -571,7 +571,7 @@ int ide_read_block_partition(int block, char *blockbuff,int numblocks)
 };
 
 //write block with partition adjustments
-int ide_write_block_partition(int block, char *blockbuff,int numblocks)
+int ide_write_block_partition(u64 block, char *blockbuff,DWORD numblocks)
 {
     int i;
     //determine which partition was accessed by the io manager based on the

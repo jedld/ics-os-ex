@@ -48,22 +48,86 @@ void mem_interpretmemory(mmap *map,int size){
 /*using the memory map provided by grub, create the stack of physical frames.
   On modern machines the map can describe many gigabytes; a 32-bit kernel can
   only use the first 4GB and we cap usable RAM at 256MB so the free-page stack
-  at 0x200000 cannot overrun the identity-mapped region.*/
+  cannot overrun the identity-mapped region. The stack itself sits just after
+  kernel BSS — a fixed 0x200000 address overlaps .bss once the kernel grows
+  (virtio-blk, userpd meta, ...). */
 #define MEM_MIN_FRAME   0x00300000
 #define MEM_MAX_PHYS    0x10000000
 
-/* Dedicated per-process user page-directory frame pool (x86_64). See the
-   userpd_* section below for why the pool must stay BELOW the identity-
-   mapped user window [0x08000000,0x10000000). */
-#define UPD_POOL_BASE   0x06000000
-#define UPD_POOL_TOP    0x08000000
+#define UPD_POOL_BASE   MEM_USERPD_BASE
+#define UPD_POOL_TOP    MEM_USERPD_END
 #define USERPD_MAXFRAMES ((UPD_POOL_TOP - UPD_POOL_BASE) >> 12)
+
+#ifdef __x86_64__
+typedef struct {
+   unsigned long base;
+   unsigned long end;
+   const char *name;
+} mem_range;
+
+/* Every range the page allocator must never hand out. */
+static const mem_range mem_reserved[] = {
+   { 0,                    MEM_LOW_END,         "low/firmware" },
+   { MEM_KERNEL_LOAD,      MEM_KERNEL_LIMIT,    "kernel+framestack" },
+   { MEM_USER_ELF_BASE,    MEM_USER_ELF_END,    "user-elf" },
+   { MEM_KEXEC_STAGE,      MEM_KEXEC_STAGE_END, "kexec-stage" },
+   { MEM_KHEAP_BASE,       MEM_KHEAP_END,       "kheap" },
+   { MEM_KMODE_BASE,       MEM_KMODE_END,       "kmode" },
+   { MEM_USERPD_BASE,      MEM_USERPD_END,      "userpd-pool" },
+   { MEM_USER_WIN_BASE,    MEM_USER_WIN_END,    "user-windows" },
+};
+
+int mem_is_reserved(unsigned long phys)
+{
+   unsigned i;
+   for (i = 0; i < sizeof(mem_reserved) / sizeof(mem_reserved[0]); i++) {
+      if (phys >= mem_reserved[i].base && phys < mem_reserved[i].end)
+         return 1;
+   }
+   return 0;
+}
+
+extern void serial_puts(const char *s);
+extern int printf(const char *fmt, ...);
+
+void mem_layout_dump(void)
+{
+   unsigned i;
+   extern char bssEnd[];
+   printf("MEM layout (identity, phys==virt):\n");
+   printf("  kernel  %p .. bssEnd=%p  limit=%p\n",
+          (void *)MEM_KERNEL_LOAD, (void *)&bssEnd, (void *)MEM_KERNEL_LIMIT);
+   printf("  framestk %p  heap %p-%p  userpd %p-%p\n",
+          (void *)stackbase, (void *)MEM_KHEAP_BASE, (void *)MEM_KHEAP_END,
+          (void *)MEM_USERPD_BASE, (void *)MEM_USERPD_END);
+   for (i = 0; i < sizeof(mem_reserved) / sizeof(mem_reserved[0]); i++)
+      printf("  reserve %s  %p-%p\n", mem_reserved[i].name,
+             (void *)mem_reserved[i].base, (void *)mem_reserved[i].end);
+}
+#else
+int mem_is_reserved(unsigned long phys) { (void)phys; return 0; }
+void mem_layout_dump(void) {}
+#endif
 
 DWORD mem_detectmemory(mmap *grub_meminfo , int size ){
    DWORD mem_size = 0;
    unsigned char *cursor;
    unsigned char *end;
+#ifdef __x86_64__
+   extern char bssEnd[];
+   volatile DWORD *fps;
+   uintptr stack_phys = ((uintptr)&bssEnd + 0xFFF) & ~((uintptr)0xFFF);
+
+   if (stack_phys + MEM_FRAME_STACK_SIZE > MEM_KERNEL_LIMIT) {
+      serial_puts("MEM: kernel+frame stack overlaps user ELF window\n");
+      for (;;)
+         __asm__ volatile ("hlt");
+   }
+   fps = (volatile DWORD *)stack_phys;
+#else
    volatile DWORD *fps = (volatile DWORD *)0x200000UL;
+   stackbase = (DWORD *)0x200000UL;
+#endif
 
    fps[0]=0;
 
@@ -73,31 +137,18 @@ DWORD mem_detectmemory(mmap *grub_meminfo , int size ){
       DWORD count = 0;
       (void)grub_meminfo;
       (void)size;
-      /* Seed free frames up to 128MiB (QEMU default). Skip kernel stacks,
-         heap, the dedicated per-process userpd frame pool, and fixed user
-         windows (ELF/stack/heap) that stay identity-mapped —
-         maplineartophysical2 is still 32-bit and must not touch PML4. */
-      for (page = 0x00400000; page < 0x08000000; page += 0x1000) {
-         if (page >= 0x02800000 && page < 0x02900000)
-            continue;
-         if (page >= 0x03000000 && page < 0x03400000)
-            continue;
-         /* Dedicated per-process user page-directory frame pool
-            (see userpd_* below): owned by upop()/upush(), not mempop(). */
-         if (page >= UPD_POOL_BASE && page < UPD_POOL_TOP)
-            continue;
-         /* userspace ELF load window */
-         if (page >= 0x00400000 && page < 0x00800000)
-            continue;
-         /* syscall stack / user heap / user stack */
-         if (page >= 0x09000000 && page < 0x0C000000)
+      /* Seed mempop from the first page after the kernel slot up to the
+         default 128MiB machine, skipping every reserved range. */
+      for (page = (DWORD)MEM_KERNEL_LIMIT; page < (DWORD)MEM_FREE_SCAN_END;
+           page += 0x1000) {
+         if (mem_is_reserved(page))
             continue;
          count++;
          fps[count] = page;
          mem_size += 0x1000;
       }
       fps[0] = count;
-      stackbase = (DWORD *)0x200000UL;
+      stackbase = (DWORD *)(uintptr)fps;
       totalpages = count;
       return mem_size;
    }
@@ -779,19 +830,30 @@ void *sbrk(int amt)
      int pages=(amt/4096)+1;
      char *ret=0;
      
-     //cannot handle negative values as of the moment
-     if (amt<0) return -1;
+     if (amt<0) return (void*)-1;
      
-     //return location of break
      if (amt==0) return knext-1;
      
      if (amt%4096==0) pages=amt/4096;
-     
-     ret=commit((DWORD)knext,pages);
 
+#ifdef __x86_64__
+     /* Identity map already covers the kernel heap.  Do not mempop() —
+        that drained unrelated frames and let knext walk into the old
+        4MiB hole. */
+     {
+        unsigned long next = (unsigned long)(uintptr)knext +
+                             (unsigned long)pages * 4096UL;
+        if (next > MEM_KHEAP_END)
+           return (void*)-1;
+        ret = knext;
+        knext = (char *)next;
+        return (void*)ret;
+     }
+#else
+     ret=commit((DWORD)knext,pages);
      knext+=(pages)*4096;
-     
      return (void*)ret;
+#endif
    };
 
 
@@ -1079,6 +1141,61 @@ void dex32copyblock(DWORD vdest,DWORD vsource,DWORD pages,DWORD *pagedir)
    };
 
 
+#define MMIO_UC_MAX 16
+static u64 mmio_uc_base[MMIO_UC_MAX];
+static u64 mmio_uc_len[MMIO_UC_MAX];
+static int mmio_uc_n;
+
+static void mmio_apply_one(u64 phys, u64 len)
+{
+#ifdef __x86_64__
+   extern u64 boot_pd0[], boot_pd1[], boot_pd2[], boot_pd3[];
+   u64 *pds[4];
+   u64 addr, end;
+
+   pds[0] = boot_pd0;
+   pds[1] = boot_pd1;
+   pds[2] = boot_pd2;
+   pds[3] = boot_pd3;
+   end = phys + len;
+   addr = phys & ~0x1FFFFFULL;
+   for (; addr < end; addr += 0x200000ULL) {
+      unsigned pd = (unsigned)(addr >> 30);
+      unsigned idx = (unsigned)((addr >> 21) & 0x1FF);
+      if (pd > 3)
+         continue;
+      pds[pd][idx] |= (u64)(PG_WRITETHROUGH | PG_PCD);
+   }
+#else
+   (void)phys;
+   (void)len;
+#endif
+}
+
+void mmio_mark_uncacheable(u64 phys, u64 len)
+{
+#ifdef __x86_64__
+   extern u64 boot_pml4[];
+   if (len && mmio_uc_n < MMIO_UC_MAX) {
+      mmio_uc_base[mmio_uc_n] = phys;
+      mmio_uc_len[mmio_uc_n] = len;
+      mmio_uc_n++;
+   }
+   mmio_apply_one(phys, len);
+   __asm__ volatile ("mov %0, %%cr3" :: "r"((unsigned long)(uintptr)boot_pml4) : "memory");
+#else
+   (void)phys;
+   (void)len;
+#endif
+}
+
+void mmio_reapply_uncacheable(void)
+{
+   int i;
+   for (i = 0; i < mmio_uc_n; i++)
+      mmio_apply_one(mmio_uc_base[i], mmio_uc_len[i]);
+}
+
 void dex32_restore_identity_map(void)
 {
 #ifdef __x86_64__
@@ -1100,6 +1217,7 @@ void dex32_restore_identity_map(void)
          phys += 0x200000ULL;
       }
    }
+   mmio_reapply_uncacheable();
    __asm__ volatile ("mov %0, %%cr3" :: "r"((unsigned long)(uintptr)boot_pml4) : "memory");
 #endif
 }
@@ -1164,10 +1282,9 @@ void dex32_restore_identity_map(void)
  * stale frame contents are irrelevant. */
 static u8 up_bitmap[USERPD_MAXFRAMES / 8] = {0};
 /* Owner table lives in the first 16 pool frames (64KiB), not in .bss:
-   kernel BSS already ends just below the free-page stack at 0x200000,
-   and a 64KiB array there overlaps mempop()'s stack (boot hang in
+   a large .bss array overlapped mempop()'s stack (boot hang in
    device manager). Physical 0x06000000 is identity-mapped and carved
-   out of mempop. */
+   out of mempop. The free-page stack follows kernel bssEnd. */
 #define UP_META_FRAMES  16
 #define UP_OWNER_BASE   UPD_POOL_BASE
 static int up_inited = 0;

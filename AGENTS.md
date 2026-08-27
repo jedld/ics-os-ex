@@ -35,6 +35,8 @@ Useful individual targets (from `ics-os/`):
 | `test-exec` | `hello.exe` → `Hello World` + `EXEC_TEST_PASS` |
 | `test-selfhost` | In-OS TinyCC compiles/runs `min.c` + `hello.c` |
 | `test-tccboot` | In-OS TinyCC rebuilds itself (`tccnew.exe`) and compiles `min.c` |
+| `test-iobench` | CD sequential map; `IOBENCH_PASS` or `IOBENCH_WARN` |
+| `test-virtio` | QEMU virtio-blk DMA R/W; `VIRTIO_BLK_OK` |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).
@@ -43,7 +45,8 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 
 - **SysV AMD64 ABI** in kernel C and IRQ wrappers (`irqwrap.S`). After `PUSH_ALL`, saved `rax` is at offset **112**, not `0` (that slot is `r15`).
 - **DEX `int 0x30` ABI** still uses `rax/rbx/rcx/rdx/rsi/rdi` for syscall args; the wrapper maps them to SysV for `api_syscall`. Args are **pointer-width** (`api_arg_t`).
-- **Identity map** covers low 4GiB; do not rebuild classic 2-level user PTs for that range on x86_64.
+- **Identity map** covers low 4GiB; do not rebuild classic 2-level user PTs for that range on x86_64. PCI MMIO pages need PCD|PWT (`mmio_mark_uncacheable`); `dex32_restore_identity_map` reapplies those bits.
+- **Memory map** is `kernel/memory/memlayout.h`. Kernel image must stay below 4MiB (user ELF). Frame stack follows `bssEnd`. Do not invent a new fixed PA; add a reserved range so `mempop` skips it.
 - **SMP**: APs load the kernel GDT (`ap_load_kernel_gdt`), use LAPIC timer vector **0x41**, claim tasks with `on_cpu`, and honor `cpu_affinity`. Console / `fg_mgr` / user processes are BSP-pinned today.
 - **Serial** is the headless oracle. Prefer `serial_puts` / putc mirroring for QEMU `-nographic` tests.
 - **x86_64 in-OS TinyCC** can compile/run `min.c`/`hello.c` (`make test-selfhost`) and rebuild itself (`make test-tccboot`). `test-kbuild` / `test-fullhost` (in-OS kernel compile + kexec) are the next gate.
@@ -90,6 +93,6 @@ Make sure it contains the current problem and the activity currently being perfo
 ## Suggested next work
 
 1. `test-kbuild` / `test-fullhost`: in-OS kernel compile + kexec.
-2. Allow user processes on any CPU (harden `waitpid`/exit migration).
-3. Full ring-3 user mode (today user ELFs still enter with kernel CS).
-4. Stabilize `disk_mgr` / richer live images for `test-iobench`.
+2. I/O P2: blk-mq lite + 4KiB page cache. P0 (per-device lock, 64-bit LBA) and P1 (virtio-blk MSI-X + DMA) are in.
+3. Allow user processes on any CPU (harden `waitpid`/exit migration).
+4. Full ring-3 user mode (today user ELFs still enter with kernel CS).

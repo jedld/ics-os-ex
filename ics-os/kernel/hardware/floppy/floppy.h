@@ -37,6 +37,8 @@
 #define FALSE 0
 #define BOOL int
 
+#include "../../types.h"
+
 #define ALLOCSIZE 512
 #define CACHESIZE 1000
 
@@ -152,8 +154,8 @@ void motoroff(void);
 void recalibrate(void);
 BOOL seek(int track);
 BOOL log_disk(DrvGeom *g);
-BOOL read_block(int block,BYTE *blockbuff,DWORD numblocks);
-BOOL write_block(int block,BYTE *blockbuff,DWORD numblocks);
+BOOL read_block(u64 block,BYTE *blockbuff,DWORD numblocks);
+BOOL write_block(u64 block,BYTE *blockbuff,DWORD numblocks);
 BOOL fdc_rw(int block,BYTE *blockbuff,BOOL read);
 BOOL fdc_rw_hts(int head,int track,int sector,BYTE *blockbuff,BOOL read);
 BOOL format_track(BYTE track,DrvGeom *g);

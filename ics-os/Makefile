@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-smp test-boot test-integration
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -189,10 +189,47 @@ test-selfhost: apps vmdex
 	@! grep -aq "SELFHOST_TEST_FAIL" /tmp/icsos-selfhost.log
 	@echo "test-selfhost PASS"
 
-# Boot and run the I/O / block-cache microbenchmark.
-test-iobench: apps
-	@echo "SKIP: iobench needs stable disk_mgr on x86_64 (follow-up)"
-	@false
+# Boot and run the I/O / block-cache microbenchmark (CD sequential map).
+test-iobench: kernel/Kernel64.bin apps/tcc.exe
+	@echo "Building Multiboot2 ISO for iobench..."
+	@rm -rf /tmp/icsos-iobench-iso
+	@mkdir -p /tmp/icsos-iobench-iso/boot/grub /tmp/icsos-iobench-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-iobench-iso/vmdex
+	@cp apps/tcc.exe /tmp/icsos-iobench-iso/apps/tcc.exe
+	@printf '%s\n' 'iobench' 'reboot' > /tmp/icsos-iobench-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-iobench-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-iobench.iso /tmp/icsos-iobench-iso >/dev/null 2>&1
+	@echo "Running iobench (KVM)..."
+	@-timeout 90 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-iobench.iso -boot d > /tmp/icsos-iobench.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-iobench.log
+	@grep -aq "iobench: size=" /tmp/icsos-iobench.log
+	@grep -aqE "IOBENCH_PASS|IOBENCH_WARN" /tmp/icsos-iobench.log
+	@! grep -aq "iobench: FAIL" /tmp/icsos-iobench.log
+	@echo "test-iobench PASS"
+
+# virtio-blk DMA round-trip (modern PCI + MSI-X). ATA-only boots stay on
+# "virtio-blk: none"; this target attaches a QEMU virtio disk.
+test-virtio: kernel/Kernel64.bin
+	@echo "Building Multiboot2 ISO for virtio-blk..."
+	@mkdir -p /tmp/icsos-virtio-iso/boot/grub
+	@cp kernel/Kernel64.bin /tmp/icsos-virtio-iso/vmdex
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-virtio-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-virtio.iso /tmp/icsos-virtio-iso >/dev/null 2>&1
+	@dd if=/dev/zero of=/tmp/icsos-vblk.img bs=1M count=8 status=none
+	@echo "Running virtio-blk test (KVM)..."
+	@-timeout 45 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-virtio.iso -boot d \
+		-drive file=/tmp/icsos-vblk.img,if=none,id=vd0,format=raw \
+		-device virtio-blk-pci,drive=vd0,disable-legacy=on \
+		> /tmp/icsos-virtio.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-virtio.log
+	@grep -aq "VIRTIO_BLK_OK" /tmp/icsos-virtio.log
+	@! grep -aq "VIRTIO_BLK_FAIL" /tmp/icsos-virtio.log
+	@! grep -aq "General Protection fault" /tmp/icsos-virtio.log
+	@echo "test-virtio PASS"
 
 # Boot, rebuild TinyCC with itself inside ICS-OS (Multiboot2 ISO).
 # Packs an 8.3-renamed TinyCC tree as one ustar so staging is a single CD read.

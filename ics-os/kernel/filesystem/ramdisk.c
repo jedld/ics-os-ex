@@ -20,24 +20,26 @@ extern char *strcpy(char *d, const char *s);
 static unsigned char *ramdisk_data;
 static int ramdisk_devid = -1;
 
-static int ramdisk_read_block(int block, char *buf, int numblocks)
+static int ramdisk_read_block(u64 block, char *buf, int numblocks)
 {
    DWORD off;
-   if (!ramdisk_data || block < 0 || numblocks <= 0)
+   if (!ramdisk_data || numblocks <= 0)
       return -1;
-   if ((DWORD)block + (DWORD)numblocks > RAMDISK_SECTORS)
+   if (block >= RAMDISK_SECTORS ||
+       block + (u64)numblocks > RAMDISK_SECTORS)
       return -1;
    off = (DWORD)block * RAMDISK_SECSIZE;
    memcpy(buf, ramdisk_data + off, (DWORD)numblocks * RAMDISK_SECSIZE);
    return 1;
 }
 
-static int ramdisk_write_block(int block, char *buf, int numblocks)
+static int ramdisk_write_block(u64 block, char *buf, int numblocks)
 {
    DWORD off;
-   if (!ramdisk_data || block < 0 || numblocks <= 0)
+   if (!ramdisk_data || numblocks <= 0)
       return -1;
-   if ((DWORD)block + (DWORD)numblocks > RAMDISK_SECTORS)
+   if (block >= RAMDISK_SECTORS ||
+       block + (u64)numblocks > RAMDISK_SECTORS)
       return -1;
    off = (DWORD)block * RAMDISK_SECSIZE;
    memcpy(ramdisk_data + off, buf, (DWORD)numblocks * RAMDISK_SECSIZE);

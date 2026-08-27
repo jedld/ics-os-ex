@@ -1,0 +1,118 @@
+#ifndef ICSOS_MEMLAYOUT_H
+#define ICSOS_MEMLAYOUT_H
+
+/*
+ * ICS-OS x86-64 identity-map layout (physical == virtual in the low 4GiB).
+ *
+ * This is the single source of truth.  Add a region here first; the page
+ * allocator (mempop) skips every reserved range automatically.
+ *
+ *            4GiB identity (2MiB pages)
+ *  +------------------+ 0x00000000
+ *  | firmware / IVT   |          never allocated
+ *  | GDT 0x1000       |
+ *  | IDT 0x2000       |
+ *  | AP tramp 0x8000  |
+ *  | kexec tramp      |
+ *  +------------------+ 0x00100000  MEM_KERNEL_LOAD
+ *  | kernel ELF       |          linker .text/.data/.bss (grows down)
+ *  |  + kstacks in BSS|
+ *  |  + frame-stack   |          immediately after bssEnd
+ *  +------------------+ 0x00400000  MEM_KERNEL_LIMIT / MEM_USER_ELF_BASE
+ *  | user ELF window  |          TinyCC ELF_START_ADDR; private PTEs
+ *  +------------------+ 0x01000000  MEM_KEXEC_STAGE
+ *  | kexec staging    |          16MiB, not in mempop
+ *  +------------------+ 0x02000000  MEM_KHEAP_BASE
+ *  | kernel heap      |          sbrk/dlmalloc; identity; 32MiB cap
+ *  +------------------+ 0x04000000  MEM_KMODE_BASE
+ *  | kmode / spare    |          kernel-mode process VA
+ *  +------------------+ 0x05000000
+ *  | mempop frames    |          anonymous 4KiB pages (PF, legacy PT)
+ *  +------------------+ 0x06000000  MEM_USERPD_BASE
+ *  | userpd pool      |          private user frames (bitmap allocator)
+ *  +------------------+ 0x08000000  MEM_USER_WIN_BASE
+ *  | linux_userspace  |
+ *  | sharedmem        |
+ *  | syscall stack    | 0x09000000
+ *  | user heap        | 0x0A000000  grows up
+ *  | user stack       | 0x0E000000  grows down
+ *  +------------------+ 0x10000000  MEM_LMODE_BASE
+ *  | lmode / modules  |
+ *  +------------------+ 0xFE000000  PCI MMIO (PCD|PWT)
+ *
+ * Rules:
+ *  1. Kernel image + frame stack MUST stay below MEM_KERNEL_LIMIT (linker
+ *     ASSERT + boot halt).  TinyCC user ELFs start at 4MiB.
+ *  2. Kernel stacks live in .bss (like AP stacks), not at a magic PA.
+ *  3. Kernel heap is a closed interval; sbrk must not mempop and must not
+ *     walk past MEM_KHEAP_END.
+ *  4. userpd pool must not overlap any identity range the kernel writes
+ *     (heap, image, user windows).
+ *  5. New consumers: add a MEM_* range and a mem_reserved[] entry.
+ */
+
+#define MEM_PAGE_SHIFT         12
+#define MEM_PAGE_SIZE          0x1000UL
+
+#define MEM_LOW_END            0x00100000UL
+#define MEM_GDT                0x00001000UL
+#define MEM_IDT                0x00002000UL
+#define MEM_AP_TRAMP           0x00008000UL
+#define MEM_MB_STASH           0x00009000UL
+#define MEM_KEXEC_TRAMP        0x00080000UL
+#define MEM_KEXEC_MB2          0x00091000UL
+
+#define MEM_KERNEL_LOAD        0x00100000UL
+#define MEM_KERNEL_LIMIT       0x00400000UL   /* TinyCC ELF_START_ADDR */
+
+#define MEM_FRAME_STACK_SIZE   0x00040000UL   /* 256KiB of page pointers */
+
+#define MEM_USER_ELF_BASE      0x00400000UL
+#define MEM_USER_ELF_END       0x01000000UL   /* 12MiB for large EXEs */
+
+#define MEM_KEXEC_STAGE        0x01000000UL
+#define MEM_KEXEC_STAGE_SIZE   0x01000000UL   /* 16MiB */
+#define MEM_KEXEC_STAGE_END    (MEM_KEXEC_STAGE + MEM_KEXEC_STAGE_SIZE)
+
+#define MEM_KHEAP_BASE         0x02000000UL
+#define MEM_KHEAP_SIZE         0x02000000UL   /* 32MiB */
+#define MEM_KHEAP_END          (MEM_KHEAP_BASE + MEM_KHEAP_SIZE)
+
+#define MEM_KMODE_BASE         0x04000000UL
+#define MEM_KMODE_END          0x05000000UL
+
+#define MEM_USERPD_BASE        0x06000000UL
+#define MEM_USERPD_END         0x08000000UL
+
+#define MEM_SHARED_BASE        0x08000000UL
+#define MEM_LINUX_USER_BASE    0x08000000UL
+#define MEM_SYSCALL_STACK      0x09000000UL
+#define MEM_USER_HEAP          0x0A000000UL
+#define MEM_USER_STACK         0x0E000000UL
+#define MEM_USER_WIN_BASE      0x08000000UL
+#define MEM_USER_WIN_END       0x10000000UL
+
+#define MEM_LMODE_BASE         0x10000000UL
+
+#define MEM_FREE_SCAN_END      0x08000000UL   /* 128MiB: default QEMU -m */
+
+/* Compile-time overlap checks (gnu89: negative array size on failure). */
+typedef char memlayout_kernel_below_userelf[
+   (MEM_KERNEL_LIMIT == MEM_USER_ELF_BASE) ? 1 : -1];
+typedef char memlayout_kexec_after_elf[
+   (MEM_KEXEC_STAGE == MEM_USER_ELF_END) ? 1 : -1];
+typedef char memlayout_heap_after_kexec[
+   (MEM_KHEAP_BASE == MEM_KEXEC_STAGE_END) ? 1 : -1];
+typedef char memlayout_kmode_after_heap[
+   (MEM_KMODE_BASE == MEM_KHEAP_END) ? 1 : -1];
+typedef char memlayout_userpd_after_kmode[
+   (MEM_USERPD_BASE >= MEM_KMODE_END) ? 1 : -1];
+typedef char memlayout_userwin_after_pool[
+   (MEM_USER_WIN_BASE == MEM_USERPD_END) ? 1 : -1];
+typedef char memlayout_shared_not_in_pool[
+   (MEM_SHARED_BASE >= MEM_USERPD_END) ? 1 : -1];
+
+int  mem_is_reserved(unsigned long phys);
+void mem_layout_dump(void);
+
+#endif

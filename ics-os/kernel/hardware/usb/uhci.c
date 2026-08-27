@@ -539,14 +539,14 @@ static int usb_scsi_rw(int write, DWORD lba, DWORD nblocks, char *buf)
     return 1;
 }
 
-static int usb_read_block(int block, char *blockbuff, DWORD numblocks)
+static int usb_read_block(u64 block, char *blockbuff, DWORD numblocks)
 {
     if (!usb_drive.present)
         return 0;
     return usb_scsi_rw(0, (DWORD)block, numblocks, blockbuff);
 }
 
-static int usb_write_block(int block, char *blockbuff, DWORD numblocks)
+static int usb_write_block(u64 block, char *blockbuff, DWORD numblocks)
 {
     if (!usb_drive.present)
         return 0;
@@ -577,32 +577,32 @@ static int usb_part_total_blocks(void)
     return 0;
 }
 
-static int usb_read_block_partition(int block, char *blockbuff, DWORD numblocks)
+static int usb_read_block_partition(u64 block, char *blockbuff, DWORD numblocks)
 {
     int i;
     int device_context = devmgr_getcontext();
     for (i = 0; i < usb_part_count; i++) {
         if (usb_parts[i].mydeviceid == device_context) {
             if (usb_parts[i].endlba &&
-                (DWORD)block + usb_parts[i].startlba >= usb_parts[i].endlba)
+                block + usb_parts[i].startlba >= usb_parts[i].endlba)
                 return 0;
-            return usb_read_block((int)(block + usb_parts[i].startlba),
+            return usb_read_block(block + usb_parts[i].startlba,
                                   blockbuff, numblocks);
         }
     }
     return 0;
 }
 
-static int usb_write_block_partition(int block, char *blockbuff, DWORD numblocks)
+static int usb_write_block_partition(u64 block, char *blockbuff, DWORD numblocks)
 {
     int i;
     int device_context = devmgr_getcontext();
     for (i = 0; i < usb_part_count; i++) {
         if (usb_parts[i].mydeviceid == device_context) {
             if (usb_parts[i].endlba &&
-                (DWORD)block + usb_parts[i].startlba >= usb_parts[i].endlba)
+                block + usb_parts[i].startlba >= usb_parts[i].endlba)
                 return 0;
-            return usb_write_block((int)(block + usb_parts[i].startlba),
+            return usb_write_block(block + usb_parts[i].startlba,
                                    blockbuff, numblocks);
         }
     }

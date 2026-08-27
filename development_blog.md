@@ -2,6 +2,76 @@
 
 ## 2026-08-27 (Manila, UTC+8)
 
+### 19:50 — Memory map: one table, no more clobber-by-growth
+
+The 0x200000 frame-stack collision was the same class of bug as the
+userpd owner-table-in-BSS hang: magic PAs that the kernel image grows
+into. Layout is now `kernel/memory/memlayout.h`.
+
+- Linker `ASSERT(bssEnd <= 0x3C0000)` — kernel stays below TinyCC's
+  4MiB ELF window; frame stack sits in the remainder.
+- Kernel dispatcher/sched/PF stacks moved into `.bss` (same as AP
+  stacks). No more 0x2800000 island.
+- `mempop` seeds [4MiB, 128MiB) minus a reserved-range table. Adding a
+  region means adding one table entry.
+- Kernel heap is a closed 32MiB window at 32–64MiB; `sbrk` identity-
+  bumps `knext` and must not `mempop` (that leaked frames and let the
+  heap walk out of a 4MiB hole).
+- kexec staging moved to 16–32MiB. `sharedmem` moved out of the userpd
+  pool (it sat at 0x7000000 inside 96–128MiB).
+
+`test-boot`, `test-exec`, `test-virtio`, `test-iobench` PASS.
+
+**Activity now:** layout is the source of truth. Next still P2 blk-mq or
+kbuild.
+
+### 19:30 — I/O P0 green, P1 virtio-blk green
+
+P0 tests: `test-boot`, `test-exec`, `test-iobench` PASS. iobench
+cold/warm on the CD is still ~1.1x (ISO path bypasses blkcache);
+the target is a regression oracle, not a cache proof.
+
+P1: modern virtio-pci + virtio-blk (`vblk`). One DMA request queue,
+MSI-X vector 0x42, 512-byte LBAs, FEATURES_OK + DRIVER_OK. Self-test
+writes/reads the last sector. `test-virtio` PASS:
+`capacity=16384 sectors msix=1` and `VIRTIO_BLK_OK`. ATA PIO stays as
+the non-VM fallback.
+
+**Hang along the way:** adding `virtio_blk.o` grew kernel `.bss` past
+`0x200000`, which was the free-page stack. `mempop()` metadata was
+clobbered → boot stuck at `Initializing the device manager...` (first
+`malloc` after `extension_init` uses a second sbrk). Fix: place the
+frame stack just after linker `bssEnd`. PCI MMIO is marked PCD|PWT;
+`dex32_restore_identity_map` reapplies those bits so exec does not
+turn BARs write-back again.
+
+**Activity now:** P0+P1 landed. Next is P2 (blk-mq lite + 4KiB page
+cache) or `test-kbuild`.
+
+### 18:00 — I/O P0: drop the global lock across device I/O
+
+Approved plan: unlock the hot path before virtio. `dex32_requestIO` no
+longer holds `IOrequest_busy` or `disable_taskswitching()` during
+`read_block`/`write_block`. Per-device `io_devlock[]` still serializes
+ATA PIO. `IOrequest.lba` is `u64`. `disk_mgr` `sleep(1)+hlt`; fclose
+calls `iomgr_request_flush()`. `test-iobench` is a real QEMU target again.
+
+**Activity now:** build kernel, `make test-boot test-exec test-iobench`.
+
+### 17:50 — I/O architecture review
+
+Reviewed the live I/O path (VFS → FAT/ISO → iosched → ATA PIO / UHCI
+poll). It is still a 2003 single-queue, global-lock, busy-wait design.
+disk_mgr is a safety-net flusher because inline `dex32_requestIO` was
+required to avoid priority starvation.
+
+Recommended path: unlock completions (P0), virtio-blk as the VM disk
+(P1), blk-mq lite + 4 KiB page cache (P2), POSIX fds then io_uring (P3).
+Keep FAT/ISO; do not invent a new on-disk FS first.
+
+**Activity now:** architecture review delivered; kbuild kernel32.c
+compile remains the self-host blocker.
+
 ### 15:30 — `test-tccboot` PASS
 
 Root cause was not `s==NULL` in main. Static TinyCC EXEs still emit a

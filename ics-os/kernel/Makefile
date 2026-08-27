@@ -19,12 +19,12 @@ bzImage: all
 all: obj Kernel64.bin
 
 obj: scheduler.o fat.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o devmgr_error.o kernel32.o \
-		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o
+		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o virtio_blk.o
 		
 kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		hardware/chips/serial.c hardware/ATA/ide.c \
 		hardware/floppy/floppy.c hardware/floppy/floppy.h \
-		memory/dexmem.c memory/dexmem.h \
+		memory/dexmem.c memory/dexmem.h memory/memlayout.h \
 		stdlib/time.c stdlib/time.h \
 		hardware/keyboard/keyboard.c console/dex_DDL.c \
 		console/foreground.c process/dex_taskmgr.c process/pdispatch.c \
@@ -82,6 +82,9 @@ ap_trampoline.o: cpu/ap_trampoline.S
 kexec.o: kexec.S
 	$(CC) $(CFLAGS) -o kexec.o kexec.S
 
+virtio_blk.o: hardware/virtio/virtio_blk.c hardware/virtio/virtio_blk.h hardware/virtio/virtio.h
+	$(CC) $(CFLAGS) -o virtio_blk.o hardware/virtio/virtio_blk.c
+
 lapic.o: cpu/lapic.c cpu/lapic.h
 	$(CC) $(CFLAGS) -o lapic.o cpu/lapic.c
 
@@ -90,7 +93,7 @@ smp.o: cpu/smp.c cpu/smp.h
 	
 Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
 		scheduler.o iomgr.o blkcache.o fat.o iso9660.o ramdisk.o \
-		devfs.o irqwrap.o devmgr_error.o kexec.o
+		devfs.o irqwrap.o devmgr_error.o kexec.o virtio_blk.o
 	ld $(LDFLAGS) -Map mapfile.txt
 
 clean:

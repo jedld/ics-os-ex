@@ -75,7 +75,8 @@
 
 //defines the location of the stacks used by some of the kernel modules
 #ifdef __x86_64__
-/* Low fixed addresses (0x1xFFF0) collide with the free-page stack at 0x200000. */
+/* Kernel stacks are .bss arrays (see process.c). Low 0x1xFFF0 collided
+   with the old 0x200000 frame stack. */
 extern DWORD dispatcher_stack_loc;
 extern DWORD sched_stack_loc;
 extern DWORD pagefault_stack_loc;

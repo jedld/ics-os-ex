@@ -360,16 +360,15 @@ int elf_loadmodule(char *module_name,char *elf_image,
          entrypoint = (void *)(uintptr)eh64->e_entry;
          ph64 = (Elf64_Phdr *)(elf_image + eh64->e_phoff);
          pagedir = pagedir1;
-         /* User image must stay below the private-frame pool (96MiB)
-            and the heap/stack/syscall windows. TinyCC's old 2MiB
-            ELF_PAGE_SIZE placed .data on 0x0E000000 (user stack). */
+         /* User image must stay in MEM_USER_ELF_BASE..END (TinyCC
+            ELF_START_ADDR). The old 96MiB cap overlapped kexec/heap/userpd. */
          for (phi = 0; phi < eh64->e_phnum; phi++) {
             if (ph64[phi].p_type == PT_LOAD && ph64[phi].p_memsz > 0) {
                unsigned long long v = ph64[phi].p_vaddr;
                unsigned long long e = v + ph64[phi].p_memsz;
                printf("elf64: PT_LOAD v=0x%X memsz=0x%X\n",
                       (DWORD)v, (DWORD)ph64[phi].p_memsz);
-               if (e > 0x06000000ULL) {
+               if (e > (unsigned long long)MEM_USER_ELF_END) {
                   printf("elf64: PT_LOAD overlaps reserved window\n");
                   return 0;
                }

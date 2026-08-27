@@ -219,7 +219,7 @@ void process_dispatcher(){
             printf("Kernel received MES_SHUTDOWN.\n");
                              
             printf("Sending all processes the SHUTDOWN MESSAGE..\n");
-            forceflush = 1;
+            iomgr_request_flush();
             broadcastmessage(0, MES_SHUTDOWN,0);
             total = get_processlist(&ptr);
             printf("Killing all processes\n");

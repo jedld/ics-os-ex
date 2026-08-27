@@ -20,7 +20,7 @@ extern void *memset(void*, int, unsigned int);
 
 typedef struct {
    int    deviceid;
-   DWORD  lba;
+   u64    lba;
    DWORD  age;
    BYTE   valid;
    BYTE   data[BLKCACHE_BSIZE];
@@ -47,15 +47,14 @@ void blkcache_init(void)
    blkcache_hits = blkcache_misses = blkcache_fills = 0;
 }
 
-static int blkcache_slot(int deviceid, DWORD lba)
+static int blkcache_slot(int deviceid, u64 lba)
 {
-   /* Mix device id into the hash so partitions do not collide. */
-   DWORD h = lba * 2654435761u + (DWORD)deviceid * 40503u;
+   DWORD h = (DWORD)lba * 2654435761u + (DWORD)(lba >> 32) * 2246822519u
+             + (DWORD)deviceid * 40503u;
    return (int)(h % BLKCACHE_SIZE);
 }
 
-/* Return 1 if all requested sectors were copied from cache. */
-int blkcache_get(int deviceid, DWORD sector, DWORD numblocks, void *buf)
+int blkcache_get(int deviceid, u64 sector, DWORD numblocks, void *buf)
 {
    DWORD i;
    char *dst = (char*)buf;
@@ -90,7 +89,7 @@ int blkcache_get(int deviceid, DWORD sector, DWORD numblocks, void *buf)
 }
 
 /* Store sectors into the cache (after a media read or write). */
-int blkcache_put(int deviceid, DWORD sector, DWORD numblocks, void *buf)
+int blkcache_put(int deviceid, u64 sector, DWORD numblocks, void *buf)
 {
    DWORD i;
    char *src = (char*)buf;

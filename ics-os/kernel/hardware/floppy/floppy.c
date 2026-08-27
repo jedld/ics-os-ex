@@ -560,7 +560,7 @@ BOOL log_disk(DrvGeom *g)
 }
 
 /* read block (blockbuff is 512 byte buffer) */
-BOOL read_block(int block,BYTE *blockbuff,DWORD numblocks)
+BOOL read_block(u64 block,BYTE *blockbuff,DWORD numblocks)
 {
     int retry=0;
     BOOL res=0;
@@ -568,7 +568,7 @@ BOOL read_block(int block,BYTE *blockbuff,DWORD numblocks)
     char temp[513];
    
     
-    if (getcache(blockbuff,block,numblocks)) 
+    if (getcache(blockbuff,(DWORD)block,numblocks)) 
     {return 1;};
 
     for (i=0;i<numblocks;i++)
@@ -580,10 +580,10 @@ BOOL read_block(int block,BYTE *blockbuff,DWORD numblocks)
 
        while (retry<3&&res==0)
         {
-              if (fdc_rw(block + i ,temp,TRUE))
+              if (fdc_rw((int)block + i ,temp,TRUE))
               {
                if (usecache)
-               storecache(temp,block + i,0);
+               storecache(temp,(DWORD)block + i,0);
                res=1;
                break;
               };
@@ -601,7 +601,7 @@ BOOL read_block(int block,BYTE *blockbuff,DWORD numblocks)
 
 /*June 22 update: Added support for delayed writes*/
 /* write block (blockbuff is a 512 byte buffer) */
-BOOL write_block(int block,BYTE *blockbuff, DWORD numblocks)
+BOOL write_block(u64 block,BYTE *blockbuff, DWORD numblocks)
 {
   int res=0;
   int retry=0;
@@ -609,11 +609,11 @@ BOOL write_block(int block,BYTE *blockbuff, DWORD numblocks)
   for (i=0; i<numblocks; i++)
   {
           res=1;
-          if (!storecache(blockbuff + ofs, block+ i,1))
+          if (!storecache(blockbuff + ofs, (DWORD)block+ i,1))
           {
                   res=0;
                   for (retry=0;retry<3&&res==0;retry++) 
-                  res=fdc_rw(block + i,blockbuff + ofs,FALSE);
+                  res=fdc_rw((int)block + i,blockbuff + ofs,FALSE);
           };
           if (res==0) return 0; 
      ofs += 512;

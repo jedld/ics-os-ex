@@ -294,8 +294,8 @@ DWORD pagefaulthandler(DWORD location, DWORD fault_info, unsigned long rip)
    if ((mm & PG_PRESENT) == 0) {
       DWORD *pd = (DWORD *)(uintptr)current_process->pagedirloc;
       if (pd && pd != pagedir1
-          && (unsigned)location >= 0x400000u
-          && (unsigned)location < 0x10000000u) {
+          && (unsigned)location >= (unsigned)MEM_USER_ELF_BASE
+          && (unsigned)location < (unsigned)MEM_USER_WIN_END) {
          u64 *fr = userpd_map_page((u64 *)(uintptr)pd,
                                    (unsigned long long)(unsigned)location,
                                    (unsigned long)(PG_WR | PG_USER));

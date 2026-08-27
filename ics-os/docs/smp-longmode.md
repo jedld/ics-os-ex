@@ -125,6 +125,32 @@ Ring-3: user CS is recorded as `USER_CODE` (64-bit DPL=3 GDT). Software
 context switch still uses kernel CS until TSS.rsp0 + `iretq` is wired;
 `int 0x30` already has DPL=3.
 
+## Block I/O (P0 + P1)
+
+`dex32_requestIO` runs the device transfer in the caller under a
+**per-device lock**, not `IOrequest_busy`. Task switching stays enabled
+across ATA PIO. `IOrequest.lba` is 64-bit. `disk_mgr` sleeps (`sleep(1)` +
+`hlt`) between flush passes; `iomgr_request_flush()` clears its `waiting`
+flag. `make test-iobench` maps `/icsos/apps/tcc.exe` from the CD.
+
+**virtio-blk** (`hardware/virtio/virtio_blk.c`) is the VM production path:
+modern virtio-pci caps, one DMA request queue, MSI-X vector **0x42**,
+512-byte LBAs, registered as block device `vblk`. ATA PIO remains the
+bare-metal fallback. PCI MMIO BARs are marked uncacheable (PCD|PWT on the
+shared `boot_pd3` 2MiB pages). `make test-virtio` attaches
+`virtio-blk-pci,disable-legacy=on` and greps `VIRTIO_BLK_OK`.
+
+## Memory map
+
+Identity-mapped low 4GiB. **Source of truth:** `kernel/memory/memlayout.h`.
+The page allocator skips that reserved-range table; the linker
+`ASSERT`s `bssEnd <= 0x3C0000` so the kernel cannot grow into TinyCC's
+4MiB ELF window. Kernel stacks are `.bss` arrays. Kernel heap is a
+closed 32MiB interval; `sbrk` must not `mempop`. Add new regions to
+the header first.
+
+Next: blk-mq lite + 4KiB page cache (P2), then POSIX fds / io_uring (P3).
+
 ## Key files
 
 | Area | Path |
@@ -136,4 +162,6 @@ context switch still uses kernel CS until TSS.rsp0 + `iretq` is wired;
 | LAPIC / SMP | `kernel/cpu/lapic.c`, `smp.c`, `ap_trampoline.S` |
 | TTY | `kernel/console/tty.c` |
 | Userland shell | `contrib/sh/sh.c` |
-| Linker | `kernel/lscript64.ld` |
+| Block I/O | `kernel/iomgr/iosched.c`, `blkcache.c` |
+| virtio-blk | `kernel/hardware/virtio/virtio_blk.c` |
+| Memory map | `kernel/memory/memlayout.h` |

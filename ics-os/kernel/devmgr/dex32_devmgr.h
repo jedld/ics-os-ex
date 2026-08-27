@@ -129,7 +129,7 @@ devmgr_generic hdr;
 DWORD (*init)();
 int   (*complete)(DWORD handle);
 void  (*close)(DWORD handle);
-DWORD (*request)(int,int,DWORD,DWORD,void*);
+DWORD (*request)(int,int,u64,DWORD,void*);
 } devmgr_iomgr;
 
 typedef struct _devmgr_mem {
@@ -175,8 +175,8 @@ devmgr_generic hdr;
 int (*init_device)();
 int (*invalidate_cache)();
 int (*getcache)(char *buf,DWORD sectornumber,DWORD numblocks);
-int (*read_block)(int block,char *blockbuff, DWORD numblocks);
-int (*write_block)(int block,char *blockbuff,DWORD numblocks);
+int (*read_block)(u64 block,char *blockbuff, DWORD numblocks);
+int (*write_block)(u64 block,char *blockbuff,DWORD numblocks);
 int (*total_blocks) ();
 int (*flush_device)();
 int (*get_block_size)();

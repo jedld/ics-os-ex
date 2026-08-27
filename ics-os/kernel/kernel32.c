@@ -124,6 +124,7 @@ extern void textcolor(unsigned char c);
 #include "vfs/vfs_aux.h"
 #include "hardware/usb/usb.h"
 #include "iomgr/iosched.h"
+#include "hardware/virtio/virtio_blk.h"
 #include "kexec.h"
 
 //structure to hold the boot info
@@ -372,11 +373,10 @@ void main(){
    memamount = mem_detectmemory(memory_map, map_length);
    current_process = &sPCB;
    {
-      char buf[80];
-      /* crude: print totalpages via printf after console exists — use serial for now */
       extern DWORD totalpages;
       serial_puts("ICS-OS: mem detect done\n");
       printf("Memory: %d KB, free pages=%d\n", memamount/1024, totalpages);
+      mem_layout_dump();
    }
 
     
@@ -611,6 +611,9 @@ void dex_init(){
    ide_init();
    printf("[OK]\n");
 
+   printf("Initializing virtio-blk...\n");
+   virtio_blk_init();
+
    printf("Initializing USB (UHCI) mass-storage driver...\n");
    usb_init();
    if (usb_storage_available())
@@ -653,8 +656,10 @@ void dex_init(){
    printf("Initializing the disk manager...");
    {
       DWORD dpid = createkthread((void*)iomgr_diskmgr,"disk_mgr",200000);
-      if (dpid)
+      if (dpid) {
+         iomgr_register_diskmgr(dpid);
          ps_set_affinity((int)dpid, 0);
+      }
    }
    printf("[OK]\n");   
 

@@ -19,6 +19,7 @@
 .extern schedule_from_timer
 .extern lapic_eoi
 .extern smp_reschedule_ipi
+.extern virtio_blk_irq
 
 .macro PUSH_ALL
     pushq %rax
@@ -321,5 +322,13 @@ irq12wrapper:
     PUSH_ALL
     movq $12, %rdi
     call irq_activate
+    POP_ALL
+    iretq
+
+.globl virtio_msixwrapper
+virtio_msixwrapper:
+    cli
+    PUSH_ALL
+    call virtio_blk_irq
     POP_ALL
     iretq

@@ -26,6 +26,9 @@
 
 
 /*This constants define the selector values used by DEX */
+#include "types.h"
+#include "memory/memlayout.h"
+
 #ifdef __x86_64__
 #define LINEAR_SEL     0x10
 #define SYS_CODE_SEL   0x08
@@ -75,7 +78,9 @@
 #define PG_WR 2
 #define PG_USER 4
 #define PG_WRITETHROUGH 8
+#define PG_PCD 16
 #define PG_DIRTY  64
+#define PG_PAGESIZE 0x80
 #define PG_DEMANDLOAD 0x200
 #define PG_COPYWRITE 0x400
 
@@ -130,22 +135,19 @@ DWORD totalgdtentries=10;
 /*====================The DEX Memory Map==========================================*/
 
 #ifdef __x86_64__
-/* Identity-mapped long mode: keep kernel heap inside physical RAM.
-   User heap grows up from userheap; user stack grows down from
-   userstackloc. Leave a gap so large compilers (TinyCC) do not collide. */
-char *kbaseheap=(char*)0x03000000;
-char *kmodeproc=(char*)0x05000000,
-     *kmodeproc_next=(char*)0x05000000;
-/* Keep above ELF64's default 2MiB-aligned .data at 0x600000 (TCC). */
-char *lmodeproc=(char*)0x10000000,
-     *lmodeproc_next= (char*)0x10000000;
-char *knext=          (char*)0x03000000;
-char *userstackloc=   (char*)0x0E000000;  /* stack grows down (2MB) */
-char *userheap=       (char*)0x0A000000;  /* heap grows up; ~64MB before stack */
-char *syscallstack=   (char*)0x09000000;
-char *linux_userspace=(char*)0x08000000;
-char *sharedmemloc=   (char*)0x07000000;
-char *userspace=      (char*)0x00400000;
+/* Identity-mapped long mode. Values come from memory/memlayout.h. */
+char *kbaseheap=(char*)MEM_KHEAP_BASE;
+char *kmodeproc=(char*)MEM_KMODE_BASE,
+     *kmodeproc_next=(char*)MEM_KMODE_BASE;
+char *lmodeproc=(char*)MEM_LMODE_BASE,
+     *lmodeproc_next=(char*)MEM_LMODE_BASE;
+char *knext=          (char*)MEM_KHEAP_BASE;
+char *userstackloc=   (char*)MEM_USER_STACK;
+char *userheap=       (char*)MEM_USER_HEAP;
+char *syscallstack=   (char*)MEM_SYSCALL_STACK;
+char *linux_userspace=(char*)MEM_LINUX_USER_BASE;
+char *sharedmemloc=   (char*)MEM_SHARED_BASE;
+char *userspace=      (char*)MEM_USER_ELF_BASE;
 #else
 char *kbaseheap=(char*)0xC0000000;          //marks the location of the kernel heap
 char *kmodeproc=(char*)0xD0000000,
@@ -163,10 +165,10 @@ char *linux_userspace=(char*)0x80000000;    //marks the base where linux executa
 char *sharedmemloc=   (char*)0x70000000;    //marks the location of the user shared memory area
 char *userspace=      (char*)0x00400000;    //marks the location of the user base address
 #endif
-DWORD *stackbase=    (DWORD*)0x00200000;    //marks the location of the stack pages
-DWORD *kernelbase=   (DWORD*)0x00100000;    //marks the location of the kernel
-idtentry *dex_idtbase=(idtentry*)0x2000;    //marks the location of the IDT
-gdtentry *dex_gdtbase=(gdtentry*)0x1000;    //marks the location of the GDT
+DWORD *stackbase=    0;                     /* set in mem_detectmemory() */
+DWORD *kernelbase=   (DWORD*)MEM_KERNEL_LOAD;
+idtentry *dex_idtbase=(idtentry*)MEM_IDT;
+gdtentry *dex_gdtbase=(gdtentry*)MEM_GDT;
 /*=================================================================================*/
 
 /*Stores the total number of pages and memory respectively*/                
@@ -225,6 +227,8 @@ DWORD xmaplineartophysical(const DWORD linearmemory,const DWORD physicalmemory,
    DWORD *pagedir,const DWORD attb);
 void mem_init();
 void dex32_restore_identity_map(void);
+void mmio_mark_uncacheable(u64 phys, u64 len);
+void mmio_reapply_uncacheable(void);
 #ifdef __x86_64__
 /* Per-process user page directory (see dexmem.c). */
 extern u64 *userpd_create(void);

@@ -1,15 +1,16 @@
 /*
  * kexec: load a freshly compiled ELF64 kernel and jump to it.
- * Staging lives at 32MiB so it does not overlap the running image (1MiB)
- * or the userpd pool (96–128MiB). The trampoline at 0x80000 survives the
- * copy over 0x100000.
+ * Staging lives at MEM_KEXEC_STAGE so it does not overlap the running
+ * image or the userpd pool. The trampoline at MEM_KEXEC_TRAMP survives
+ * the copy over MEM_KERNEL_LOAD.
  */
 #include "kexec.h"
+#include "memory/memlayout.h"
 
-#define KEXEC_STAGE   0x02000000ULL
-#define KEXEC_TRAMP   0x00080000ULL
-#define KEXEC_MB2     0x00091000ULL
-#define KEXEC_MAX     (16u * 1024u * 1024u)
+#define KEXEC_STAGE   MEM_KEXEC_STAGE
+#define KEXEC_TRAMP   MEM_KEXEC_TRAMP
+#define KEXEC_MB2     MEM_KEXEC_MB2
+#define KEXEC_MAX     MEM_KEXEC_STAGE_SIZE
 
 extern void kexec_tramp(void);
 extern char kexec_tramp_end[];
@@ -65,13 +66,13 @@ int kexec_load(const char *path)
       vaddr  = *(unsigned long *)(ph + 16);
       filesz = *(unsigned long *)(ph + 32);
       memsz  = *(unsigned long *)(ph + 40);
-      if (vaddr < 0x100000UL) {
-         printf("kexec: PT_LOAD vaddr 0x%lx below 1MiB\n", vaddr);
+      if (vaddr < MEM_KERNEL_LOAD) {
+         printf("kexec: PT_LOAD vaddr 0x%lx below kernel load\n", vaddr);
          free(img);
          return -1;
       }
-      dst = KEXEC_STAGE + (vaddr - 0x100000UL);
-      if ((vaddr - 0x100000UL) + memsz > KEXEC_MAX) {
+      dst = KEXEC_STAGE + (vaddr - MEM_KERNEL_LOAD);
+      if ((vaddr - MEM_KERNEL_LOAD) + memsz > KEXEC_MAX) {
          printf("kexec: image too large (%lu)\n", (unsigned long)memsz);
          free(img);
          return -1;
@@ -91,7 +92,7 @@ int kexec_load(const char *path)
       printf("kexec: no PT_LOAD segments\n");
       return -1;
    }
-   kexec_span = max_va - 0x100000UL;
+   kexec_span = max_va - MEM_KERNEL_LOAD;
    if (kexec_span < 4096)
       kexec_span = 4096;
    kexec_ready = 1;
