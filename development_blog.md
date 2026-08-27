@@ -32,8 +32,18 @@ the in-OS-rebuilt tccnew) — A/B verified identical with the `tccsdk.c`
 change reverted, so not a regression.
 
 **Activity now:** `test-make` green. Next: the tcc-linked `make.exe`
-still GPFs at `rip=0x8` (mixed in-OS-tcc + host-gcc SDK objects, same
-class as tccnew); fix that so makeboot runs the in-OS-built make.
+still GPFs at `rip=0x8` (a `call` through a near-null pointer, i.e. a
+corrupted/uninitialized function pointer — the "mixed in-OS-tcc +
+host-gcc `sdkobj/`" class, same as tccnew). Two constraints for the
+next session: (1) the GPF64 handler **halts the VM**
+(`kernel/hardware/exceptions.c` `GPFhandler64` -> `while(1){}`), so an
+in-OS run of the tcc-linked make just hangs — capture the fault with a
+non-halting dump (record RIP/CR2/RAX/RSP + set the child-faulted flag
+and return) or (2) build make **fully with in-OS tcc** (including the
+SDK) so there are no mixed objects — currently blocked because in-OS tcc
+chokes on the raw SDK headers (`va_list`/`size_t` clashes), which is why
+`sdkobj/` is host-gcc. Fix whichever unblocks makeboot running the
+in-OS-built make.
 
 ### 03:30 — GNU make 3.82 bootstrap (TinyCC → make)
 
