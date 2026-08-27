@@ -2207,6 +2207,13 @@ static int elf_output_file(TCCState *s1, const char *filename)
                     sym->st_value += s1->sections[sym->st_shndx]->sh_addr;
                 }
             }
+        } else if (s1->plt && file_type == TCC_OUTPUT_EXE) {
+            /* Static binaries still get a .plt when TCC emitted
+               R_X86_64_PLT32 for cross-TU calls. relocate_plt() was
+               only run when a PT_DYNAMIC existed, so the RIP-relative
+               jmp slots kept the raw GOT offset (e.g. 0x120) and the
+               in-OS tccnew.exe #GP'd on a non-canonical indirect jump. */
+            relocate_plt(s1);
         }
 
         /* if building executable or DLL, then relocate each section

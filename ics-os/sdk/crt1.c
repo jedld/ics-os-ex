@@ -1,6 +1,6 @@
 #include "dexsdk.h"
 
-extern int main(int argc, char **argv);
+extern int main(int argc, char **argv, char **envp);
 
 int _start(){
    char *s;
@@ -19,7 +19,8 @@ int _start(){
    } while (s!=0 && c < 99);
    p[c] = 0;
 
-   main(c,p);
+   /* SysV third argument is envp. Never pass a leftover %rdx. */
+   main(c, p, 0);
    exit(0);
    return 0;
 }

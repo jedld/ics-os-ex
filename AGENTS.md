@@ -67,6 +67,14 @@ that will affect applications, ensure the sample applications, SDK and tools tha
 
 - When there are system related errors encountered during development - ensure the debugging, introspection and monitoring tools are sufficient and incorporate them as necessary. Maintainability, debugging and monitoring should be part of the feature set of the operating system.
 
+## Research and Tools
+
+For research on documentation, third party sources, state-of-the-art and industry standard approaches you may perform web search as available
+in the current agent MCP functions as needed. You may also download any public, non-proprietary
+documentation or sources for reference (e.g. hardware specs, standards). Place all of these artifacts in the /refernces folder for later reference and retrieval, but do not commit this as part of the repo.
+
+Properly index these files as needed in a file called reference.md
+
 ## Development blog
 
 Use develpment_blog.md as your diary of activities, what was done, difficulties faced and solutions to problems. Organize this by hour and date.

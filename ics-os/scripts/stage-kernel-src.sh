@@ -21,6 +21,7 @@ gcc -c -m64 -o "$DST/kasm/asmlib.o" "$K/startup/asmlib.S"
 gcc -c -m64 -o "$DST/kasm/irqwrap.o" "$K/irqwrap.S"
 gcc -c -m64 -o "$DST/kasm/context.o" "$K/cpu/context.S"
 gcc -c -m64 -o "$DST/kasm/ap_trampoline.o" "$K/cpu/ap_trampoline.S"
+gcc -c -m64 -o "$DST/kasm/kexec.o" "$K/kexec.S"
 gcc -c -m64 -ffreestanding -fno-builtin -o "$DST/kasm/tccva.o" "$K/tccva.c"
 
 ( cd "$DST/src" && tar --format=ustar -cf "$DST/ksrc.tar" . )

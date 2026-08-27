@@ -19,7 +19,7 @@ bzImage: all
 all: obj Kernel64.bin
 
 obj: scheduler.o fat.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o devmgr_error.o kernel32.o \
-		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o
+		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o
 		
 kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		hardware/chips/serial.c hardware/ATA/ide.c \
@@ -37,7 +37,7 @@ kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		devmgr/extension.c process/environment.c devmgr/bridges.c \
 		process/sync.c console/script.c process/process.c dexapi/dex32API.c \
 		hardware/ATA/ide.c vfs/vfs_aux.c memory/kheap.c memory/dexmalloc.c \
-		vmm/vmm.c
+		vmm/vmm.c kexec.c kexec.h
 	$(CC) $(CFLAGS) -o kernel32.o kernel32.c 
 	
 scheduler.o: process/scheduler.c
@@ -79,6 +79,9 @@ context.o: cpu/context.S
 ap_trampoline.o: cpu/ap_trampoline.S
 	$(CC) $(CFLAGS) -o ap_trampoline.o cpu/ap_trampoline.S
 
+kexec.o: kexec.S
+	$(CC) $(CFLAGS) -o kexec.o kexec.S
+
 lapic.o: cpu/lapic.c cpu/lapic.h
 	$(CC) $(CFLAGS) -o lapic.o cpu/lapic.c
 
@@ -87,7 +90,7 @@ smp.o: cpu/smp.c cpu/smp.h
 	
 Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
 		scheduler.o iomgr.o blkcache.o fat.o iso9660.o ramdisk.o \
-		devfs.o irqwrap.o devmgr_error.o
+		devfs.o irqwrap.o devmgr_error.o kexec.o
 	ld $(LDFLAGS) -Map mapfile.txt
 
 clean:

@@ -13,7 +13,10 @@
 #define R_NUM       R_X86_64_NUM
 
 #define ELF_START_ADDR 0x400000
-#define ELF_PAGE_SIZE  0x200000
+/* ICS-OS user window is packed under 256MiB (heap 0x0A000000, stack
+   0x0E000000). TinyCC's upstream 2MiB ELF_PAGE_SIZE places later
+   PT_LOADs on top of those windows (tccnew strcpy dst=0x0E000194). */
+#define ELF_PAGE_SIZE  0x1000
 
 #define PCRELATIVE_DLLPLT 1
 #define RELOCATE_DLLPLT 1

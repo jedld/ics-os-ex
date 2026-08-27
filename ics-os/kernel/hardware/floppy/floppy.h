@@ -52,7 +52,7 @@ typedef struct _cache {
     char buf[ALLOCSIZE];
 } cache;
 
-cache *cacheptr;  //the pointer to the floppy disk cache
+extern cache *cacheptr;  //the pointer to the floppy disk cache
 
 /* drive geometry */
 typedef struct DrvGeom {

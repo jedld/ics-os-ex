@@ -5,6 +5,8 @@
 .extern kbd_irq
 .extern mouse_irq
 .extern pagefaulthandler
+.extern syscallentry64
+.extern exc_doublefault
 .extern fdchandler
 .extern api_syscall
 .extern GPFhandler
@@ -68,6 +70,28 @@ syscallwrapper:
     call api_syscall
     movq %rax, 112(%rsp)        /* return value in caller's rax */
     POP_ALL
+    iretq
+
+/* Linux x86-64 SYSCALL entry (IA32_LSTAR). SYSCALL saves next-RIP in RCX and
+   RFLAGS in R11 (no hardware stack frame). After PUSH_ALL, sysno=rax@112,
+   arg0=rdi@72, arg1=rsi@80, arg2=rdx@88, arg3=r10@40, arg4=r8@56.
+   Return via IRETQ (CPL0 / kernel CS): push RFLAGS, CS, RIP — IRETQ pops
+   RIP, CS, RFLAGS. */
+.globl syscallentry
+syscallentry:
+    PUSH_ALL
+    movq 112(%rsp), %rdi          /* sysno */
+    movq 72(%rsp), %rsi           /* user rdi */
+    movq 80(%rsp), %rdx           /* user rsi */
+    movq 88(%rsp), %rcx           /* user rdx */
+    movq 40(%rsp), %r8            /* user r10 */
+    movq 56(%rsp), %r9            /* user r8 */
+    call syscallentry64
+    movq %rax, 112(%rsp)
+    POP_ALL
+    pushq %r11                    /* RFLAGS */
+    pushq $0x08                   /* CS */
+    pushq %rcx                    /* RIP */
     iretq
 
 .globl CPUintwrapper
@@ -144,27 +168,44 @@ gpfwrapper:
     movw %ax, 20(%rsp)
     movw %ss, %ax
     movw %ax, 24(%rsp)
-    leaq 8(%rsp), %rax          /* active RSP = return frame (rip+8) */
+    movq 216(%rsp), %rax        /* user RSP from iret frame */
     movq %rax, 32(%rsp)
     movq %cr3, %rax
     movq %rax, 40(%rsp)
     movq %rsp, %rdi
+    movq 176(%rsp), %rsi        /* saved rax */
+    movq 160(%rsp), %rdx        /* saved rcx */
     call GPFhandler64
     addq $64, %rsp
     POP_ALL
     addq $8, %rsp
     iretq
 
+/* #8 double fault. Vector 8 pushes an error code. A bare C handler installed
+   directly here would see the pushed frame (rip,cs,rflags,err) under its assumed
+   return address and triple-fault. This wrapper captures the fault state, prints
+   it, then halts (a double fault is not recoverable). */
+.globl doublefaultwrapper
+doublefaultwrapper:
+    cli
+    /* On entry: 0(rsp)=err, 8(rsp)=rip, 16(rsp)=cs, 24(rsp)=rflags */
+    movq 8(%rsp), %rdi
+    movq 16(%rsp), %rsi
+    movq 24(%rsp), %rdx
+    movq %cr2, %rcx
+    call exc_doublefault
+    jmp 1f
+1:  hlt
+    jmp 1b
+
 .globl pfwrapper
 pfwrapper:
     cli
     /* On entry: 0(rsp)=error, 8(rsp)=rip, ... */
     PUSH_ALL
-    movq 128(%rsp), %rdi        /* faulting RIP / CR2 handled in C? pass rip */
-    movq 120(%rsp), %rsi        /* error code as fault_info approx */
-    /* Prefer CR2 for location — pagefaulthandler(location, fault_info) */
-    movq %cr2, %rdi
-    movq 120(%rsp), %rsi
+    movq %cr2, %rdi             /* location */
+    movq 120(%rsp), %rsi        /* error code */
+    movq 128(%rsp), %rdx        /* faulting RIP */
     call pagefaulthandler
     POP_ALL
     addq $8, %rsp

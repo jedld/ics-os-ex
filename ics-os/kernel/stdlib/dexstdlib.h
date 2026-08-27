@@ -7,7 +7,11 @@
 */
 #define unconst(__v, __t) __extension__ ({union { const __t __cp; __t __p; } __q; __q.__cp = __v; __q.__p;})
 
+#ifdef __x86_64__
+typedef unsigned long size_t;
+#else
 typedef unsigned int size_t;
+#endif
 
 void *memchr(const void *s, int c, size_t n);
 int memcmp(const void *s1, const void *s2, size_t n);

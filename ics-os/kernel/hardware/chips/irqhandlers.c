@@ -49,7 +49,7 @@ typedef struct _irq_attachments {
    struct _irq_attachments *next,*prev;
 } irq_attachments;
 
-irq_attachments *irq_attachlist[16];
+irq_attachments *irq_attachlist[16] = {0};
 
 //ticks gets incremented whenever the timer interrupt gets called.
 unsigned int ticks=0;
@@ -69,6 +69,7 @@ extern void pfwrapper(void);
 extern void switchprocess(void);
 extern void syscallwrapper(void);
 extern void gpfwrapper(void);
+extern void doublefaultwrapper(void);
 extern void copwrapper(void);
 extern void CPUintwrapper(void);
 extern void div_wrapper(void);
@@ -328,23 +329,33 @@ returns:
 ====================================================================================
 */
 int irq_addhandler(int deviceid,int irq_number,void (*handler)()){
-   irq_attachments *irqhand = (irq_attachments*)malloc(sizeof(irq_attachments));
+   irq_attachments *irqhand;
+   irq_attachments *head;
+   unsigned long hp;
+   if (irq_number < 0 || irq_number >= 16)
+      return -1;
+   irqhand = (irq_attachments*)malloc(sizeof(irq_attachments));
+   if (!irqhand)
+      return -1;
    irqhand->deviceid    = deviceid;
    irqhand->irq_handler = handler;
+   irqhand->next = 0;
+   irqhand->prev = 0;
 
-   //attach to irq handlers list using the attach to head method
-   //check if nothing is attached yet
-   if (irq_attachlist[irq_number]==0){
+   head = irq_attachlist[irq_number];
+   hp = (unsigned long)head;
+   /* Stale/non-canonical head: treat as empty. */
+   if (head && (hp < 0x100000UL || hp >= 0x100000000UL))
+      head = 0;
+
+   if (head==0){
       irq_attachlist[irq_number] = irqhand;
-      irqhand->next = 0;
-      irqhand->prev = 0;                 
       return 0;
    };
-        
-   irqhand->next = irq_attachlist[irq_number];
-   irq_attachlist[irq_number]->prev = irqhand;
+
+   irqhand->next = head;
+   head->prev = irqhand;
    irq_attachlist[irq_number]= irqhand;
-   irqhand->prev = 0;    
    return 1;
 };
 
@@ -416,8 +427,16 @@ void setdefaulthandlers(){
                         gpfwrapper,SYS_CODE_SEL);
 
    //install the page fault handler
+#ifdef __x86_64__
+   /* Long mode has no task gates. The 32-bit path used a TSS task gate
+      (handler=0, selector=PF_TSS). setinterruptvector() rewrites 0x85 to
+      an interrupt gate but kept RIP=0 and CS=TSS, so the first real #PF
+      jumped to address 0 and double-faulted (tccboot). */
+   setinterruptvector(14, dex_idtbase, 0x8E, pfwrapper, SYS_CODE_SEL);
+#else
    setinterruptvector(14,dex_idtbase,0x85,
                         0,PF_TSS);
+#endif
 
    
      //install some error handlers
@@ -449,7 +468,7 @@ void setdefaulthandlers(){
                         boundscheck,SYS_CODE_SEL);
 
    setinterruptvector(8,dex_idtbase,0x8E,
-                        double_fault,SYS_CODE_SEL);
+                       doublefaultwrapper,SYS_CODE_SEL);
 
    setinterruptvector(6,dex_idtbase,0x8E,
                         fdcwrapper,SYS_CODE_SEL);

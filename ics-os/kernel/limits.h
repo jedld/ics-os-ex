@@ -1,0 +1,20 @@
+#ifndef ICSOS_LIMITS_H
+#define ICSOS_LIMITS_H
+
+#define CHAR_BIT 8
+#define CHAR_MAX 127
+#define CHAR_MIN (-128)
+#define INT_MAX  2147483647
+#define INT_MIN  (-2147483647 - 1)
+#define UINT_MAX 0xFFFFFFFFU
+#ifdef __x86_64__
+#define LONG_MAX  9223372036854775807L
+#define LONG_MIN  (-9223372036854775807L - 1)
+#define ULONG_MAX 0xFFFFFFFFFFFFFFFFUL
+#else
+#define LONG_MAX  2147483647L
+#define LONG_MIN  (-2147483647L - 1)
+#define ULONG_MAX 0xFFFFFFFFUL
+#endif
+
+#endif

@@ -875,21 +875,23 @@ DWORD kill_process(DWORD processid){
          if (ptr->meminfo != 0)
             freeprocessmemory(ptr->meminfo,(DWORD*)ptr->pagedirloc); //
 
+#ifdef __x86_64__
+         /* Reclaim a private PML4 whenever CR3 is a pool frame.
+            User ELFs enter with kernel CS but still own the directory.
+            Threads share the parent's PML4 — only the non-thread PCB
+            frees it. */
+         if (!(ptr->status & PS_ATTB_THREAD)
+             && userpd_is_private(ptr->pagedirloc))
+            userpd_free((u64 *)(uintptr)ptr->pagedirloc);
+#endif
+
          /**
           * For user processes
           */
          if (!(ptr->status & PS_ATTB_THREAD) && (ptr->accesslevel != ACCESS_SYS) ) {
 
 #ifdef __x86_64__
-            /* A user process owns a private PML4 (userpd_create). Free it
-               with userpd_free(), which walks the 4-level tables and
-               returns every private frame to the dedicated pool. Do NOT
-               call dex32_freeuserpagetable(): it is a 32-bit 2-level walk
-               (pagedir[1..3071]) and would write far past the 16-entry
-               PML4, corrupting adjacent memory. The shared pagedir1 is
-               not a private frame, so there is nothing to reclaim. */
-            if ((u64)(uintptr)ptr->pagedirloc != (u64)(uintptr)pagedir1)
-               userpd_free((u64 *)(uintptr)ptr->pagedirloc);
+            /* userpd_free() above already returned the private tables. */
 #else
             //free the page tables used by the application
             dex32_freeuserpagetable((DWORD*)ptr->pagedirloc);
@@ -1511,6 +1513,25 @@ void schedule_from_timer(void){
    if (zombie_free && smp_cpu_id() == 0) {
       PCB386 *z = zombie_free;
       zombie_free = 0;
+#ifdef __x86_64__
+      /* Self-exit (schedule_from_timer) dequeues without kill_process()
+         so it can leave the dying stack. Reclaim the private PML4 here,
+         now that CR3 and RSP belong to another task. */
+      if (!(z->status & PS_ATTB_THREAD)
+          && userpd_is_private(z->pagedirloc)) {
+         userpd_free((u64 *)(uintptr)z->pagedirloc);
+         z->pagedirloc = pagedir1;
+      }
+#endif
+      if (z->meminfo) {
+         process_mem *m = z->meminfo;
+         while (m) {
+            process_mem *n = m->next;
+            free(m);
+            m = n;
+         }
+         z->meminfo = 0;
+      }
       if (z->parameters) free(z->parameters);
       if (z->stdout) free(z->stdout);
       free(z);

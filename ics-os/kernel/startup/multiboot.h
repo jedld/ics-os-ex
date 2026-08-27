@@ -71,4 +71,8 @@ mmap *memory_map;
 extern unsigned int multiboot_magic;
 extern unsigned long multiboothdr;
 
+/* Filled from Multiboot2 tag type 1. "kexeced" means we jumped here via kexec. */
+extern char kernel_cmdline[256];
+extern int kernel_kexeced;
+
 #endif

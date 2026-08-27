@@ -360,12 +360,27 @@ int elf_loadmodule(char *module_name,char *elf_image,
          entrypoint = (void *)(uintptr)eh64->e_entry;
          ph64 = (Elf64_Phdr *)(elf_image + eh64->e_phoff);
          pagedir = pagedir1;
+         /* User image must stay below the private-frame pool (96MiB)
+            and the heap/stack/syscall windows. TinyCC's old 2MiB
+            ELF_PAGE_SIZE placed .data on 0x0E000000 (user stack). */
+         for (phi = 0; phi < eh64->e_phnum; phi++) {
+            if (ph64[phi].p_type == PT_LOAD && ph64[phi].p_memsz > 0) {
+               unsigned long long v = ph64[phi].p_vaddr;
+               unsigned long long e = v + ph64[phi].p_memsz;
+               printf("elf64: PT_LOAD v=0x%X memsz=0x%X\n",
+                      (DWORD)v, (DWORD)ph64[phi].p_memsz);
+               if (e > 0x06000000ULL) {
+                  printf("elf64: PT_LOAD overlaps reserved window\n");
+                  return 0;
+               }
+            }
+         }
          if (mode == ELF_USERO || mode == ELF_SYSO || eh64->e_type == ET_EXEC) {
             u64 *upml4 = userpd_create();   /* private per-process page directory */
             if (upml4)
-               printf("elf64: private PML4 @0x%llX for %s\n", (unsigned long long)(uintptr)upml4, module_name);
-            unsigned long long img_min = 0, img_max = 0;
-            int i;
+               printf("elf64: private PML4 @0x%llX for %s (pool used %d)\n",
+                      (unsigned long long)(uintptr)upml4, module_name,
+                      userpd_used());
 
             /* PER-PROCESS USER PAGE DIRECTORY.
                Previously every user ELF ran with pagedir1 (the shared kernel
@@ -378,30 +393,42 @@ int elf_loadmodule(char *module_name,char *elf_image,
                window (ELF image, syscall stack, heap, stack) to private,
                zeroed frames. context.S switches CR3 per task (ctx.cr3) and
                createprocess() seeds ctx.cr3 = pagedir. */
-            for (i = 0; i < eh64->e_phnum; i++) {
-               if (ph64[i].p_type == PT_LOAD && ph64[i].p_memsz > 0) {
-                  unsigned long long lo = ph64[i].p_vaddr;
-                  unsigned long long hi = lo + ph64[i].p_memsz;
-                  if (img_min == 0 || lo < img_min) img_min = lo;
-                  if (hi > img_max) img_max = hi;
-               }
-            }
             if (upml4) {
+               int mapok = 1;
+               int segi;
                pagedir = (DWORD *)(uintptr)upml4;
-               /* Map the whole user window with private, zeroed frames. */
-               if (img_max > img_min)
-                  userpd_map_region(upml4, img_min & ~0xFFFULL,
-                                    img_max - (img_min & ~0xFFFULL),
-                                    (unsigned long)(PG_WR | PG_USER));
-               userpd_map_region(upml4, (unsigned long long)(uintptr)syscallstack,
-                                 SYSCALL_STACK, (unsigned long)PG_WR);
-               userpd_map_region(upml4, (unsigned long long)(uintptr)userheap,
+               /* Map each PT_LOAD on its own. TinyCC 2MiB-aligns .data, so
+                  [img_min, img_max) would privately map the alignment gap
+                  (megabytes of unused frames per exec). */
+               for (segi = 0; mapok && segi < eh64->e_phnum; segi++) {
+                  if (ph64[segi].p_type == PT_LOAD && ph64[segi].p_memsz > 0) {
+                     unsigned long long lo = ph64[segi].p_vaddr & ~0xFFFULL;
+                     unsigned long long sz = (ph64[segi].p_vaddr - lo) + ph64[segi].p_memsz;
+                     mapok = userpd_map_region(upml4, lo, sz,
+                                               (unsigned long)(PG_WR | PG_USER));
+                  }
+               }
+               if (!mapok) printf("elf64: map fail image\n");
+               if (mapok)
+                  mapok = userpd_map_region(upml4, (unsigned long long)(uintptr)syscallstack,
+                                 USER_SYSCALL_STACK, (unsigned long)PG_WR);
+               if (!mapok) printf("elf64: map fail syscall stack\n");
+               if (mapok)
+                  mapok = userpd_map_region(upml4, (unsigned long long)(uintptr)userheap,
                                  ELF_HEAP_COMMIT,
                                  (unsigned long)(PG_WR | PG_USER));
-               userpd_map_region(upml4,
+               if (!mapok) printf("elf64: map fail heap\n");
+               if (mapok)
+                  mapok = userpd_map_region(upml4,
                                  (unsigned long long)(uintptr)(userstackloc - ELF_STACK_COMMIT),
                                  ELF_STACK_COMMIT,
                                  (unsigned long)(PG_WR | PG_USER));
+               if (!mapok) printf("elf64: map fail stack\n");
+               if (!mapok) {
+                  printf("elf64: userpd map failed for %s; shared map\n", module_name);
+                  userpd_free(upml4);
+                  pagedir = pagedir1;
+               }
             } else {
                printf("elf64: no userpd frames for %s; shared map\n", module_name);
                pagedir = pagedir1;
@@ -458,7 +485,7 @@ int elf_loadmodule(char *module_name,char *elf_image,
          }
          printf("elf64: loaded %s entry=0x%X\n", module_name, (DWORD)(uintptr)entrypoint);
          ret = createprocess(entrypoint, module_name, pagedir, memptr, stackloc,
-                             ELF_STACK_COMMIT, SYSCALL_STACK, 0, p, workdir, parent);
+                             ELF_STACK_COMMIT, USER_SYSCALL_STACK, 0, p, workdir, parent);
          return ret;
       }
 #endif

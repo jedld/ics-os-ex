@@ -2,7 +2,7 @@
 /* ============ */
 /* qsort.c	*/
 /* ============ */
-#include <assert.h>
+#include "assert.h"
 
 /*
  * This is an implementation of quicksort that partitions the array

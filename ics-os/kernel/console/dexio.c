@@ -127,7 +127,14 @@ void putcEX(char x)
   extern void serial_putc(char c);
   if (x && x!='\t') serial_putc(x);
   #ifdef USE_CONSOLEDDL
-  Dex32PutC(Dex32GetProcessDevice(),x);
+  {
+     DEX32_DDL_INFO *d;
+     if (consoleDDL) {
+        d = Dex32GetProcessDevice();
+        if (d)
+           Dex32PutC(d,x);
+     }
+  }
   #else
    
    if (x=='\t') //automatically expand backspace characters

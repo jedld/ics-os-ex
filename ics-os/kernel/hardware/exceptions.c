@@ -40,10 +40,17 @@ void GPFhandler(DWORD address)
 /* x86_64 #13 handler with full fault context (RIP, CR2, error code, CS/SS/RSP, CR3).
    The legacy saveregs in the PCB is not populated by the software context switch,
    so this prints live values captured in the wrapper instead. */
-void GPFhandler64(struct gpf_info *fi)
+void GPFhandler64(struct gpf_info *fi, unsigned long saved_rax, unsigned long saved_rcx)
   {
+    static volatile int gpf_busy = 0;
     unsigned int err = fi->err;
     const char *what = "unknown";
+
+    if (gpf_busy) {
+       serial_puts("GPF64: re-entered -> halt\n");
+       while (1) {}
+    }
+    gpf_busy = 1;
 
     if (err & 2)
        what = (err & 1) ? "reserved-bit" : "segment-not-present";
@@ -53,20 +60,40 @@ void GPFhandler64(struct gpf_info *fi)
        what = (err & 1) ? "base/limit" : "segment-index";
 
     {
-       char line[220];
+       char line[160];
        sprintf(line,
-               "GPF64: err=0x%x(%s) rip=0x%llx cr2=0x%llx cs=0x%x ss=0x%x rsp=0x%llx cr3=0x%llx proc=%s\n",
+               "GPF64: err=0x%x(%s) rip=0x%llx cr2=0x%llx proc=%s\n",
                (unsigned)err, what, fi->rip, fi->cr2,
-               (unsigned)fi->cs, (unsigned)fi->ss, fi->rsp, fi->cr3,
                current_process ? current_process->name : "?");
        serial_puts(line);
     }
-
-    /* Also route through the legacy dumper so any VGA/DDL path still fires. */
-    exc_showdump((DWORD)(uintptr)fi->rip, GENERAL_PROTECTION_FAULT, 0);
-    exc_recover();
-
-    while (1) {};
+    serial_puts("GPF64 rax=");
+    {
+       int i;
+       for (i = 60; i >= 0; i -= 4) {
+          unsigned x = (unsigned)((saved_rax >> i) & 15);
+          serial_putc((char)(x < 10 ? '0' + x : 'a' + x - 10));
+       }
+    }
+    serial_puts(" rcx=");
+    {
+       int i;
+       for (i = 60; i >= 0; i -= 4) {
+          unsigned x = (unsigned)((saved_rcx >> i) & 15);
+          serial_putc((char)(x < 10 ? '0' + x : 'a' + x - 10));
+       }
+    }
+    serial_puts(" rsp=");
+    {
+       int i;
+       unsigned long saved_rsp = (unsigned long)fi->rsp;
+       for (i = 60; i >= 0; i -= 4) {
+          unsigned x = (unsigned)((saved_rsp >> i) & 15);
+          serial_putc((char)(x < 10 ? '0' + x : 'a' + x - 10));
+       }
+    }
+    serial_puts("\nGPF64: halt\n");
+    while (1) {}
   };
   
 void exc_invalidtss(DWORD address)
@@ -81,6 +108,20 @@ void exc_invalidtss(DWORD address)
     startints();
 
   };
+
+/* #8 double fault diagnostic. Called by doublefaultwrapper with the
+   hardware-frame RIP/CS/RFLAGS and CR2. Prints then halts. */
+void exc_doublefault(unsigned long rip, unsigned long cs,
+                     unsigned long rflags, unsigned long cr2)
+  {
+    char line[160];
+    stopints();
+    sprintf(line, "DBLFLT: rip=0x%lx cs=0x%04lx rflags=0x%lx cr2=0x%lx\n",
+            rip, cs & 0xFFFF, rflags, cr2);
+    serial_puts(line);
+    while (1) {}
+  };
+
 void divide_error(DWORD address)
   {
     stopints();
@@ -230,27 +271,60 @@ void exc_showdump(DWORD location,int type,DWORD pf_info)
 
 // the core function that handles page faults, it is also
 // dirctly linked to the virtual memory manager of the operating system
-DWORD pagefaulthandler(DWORD location,DWORD fault_info)
+DWORD pagefaulthandler(DWORD location, DWORD fault_info, unsigned long rip)
   {
    DWORD ret,mm,i;
-   unsigned long long rip64;
+   static volatile int pf_busy = 0;
    stopints();
    pfoccured=1;//set the pfoccured register of the task scheduler
 
-   /* Always report the live faulting RIP (legacy saveregs are not
-      populated by the software context switch) so headless tests can
-      tell WHERE a user process faulted, not just that it faulted. */
-   mm=getphys(location,current_process->pagedirloc);
-   {
-      char line[160];
-      __asm__ __volatile__("movq (%%rsp),%0" : "=r"(rip64));
-      sprintf(line,
-              "PF64: rip=0x%llx cr2=0x%llx mm=0x%x proc=%s\n",
-              rip64, (unsigned long long)location,
-              (unsigned)mm,
-              current_process ? current_process->name : "?");
-      serial_puts(line);
+#ifdef __x86_64__
+   if (pf_busy) {
+      serial_puts("PF64: re-entered -> halt\n");
+      while (1) {}
    }
+   pf_busy = 1;
+   if (!current_process || !(DWORD)(uintptr)current_process->pagedirloc) {
+      serial_puts("PF64: bad current_process/pagedirloc -> halt\n");
+      while (1) {}
+   }
+   mm=getphys(location,current_process->pagedirloc);
+   /* Not present: lazily map a private frame for the user window / ELF image
+      instead of dumping (dumping under the user CR3 is what double-faulted). */
+   if ((mm & PG_PRESENT) == 0) {
+      DWORD *pd = (DWORD *)(uintptr)current_process->pagedirloc;
+      if (pd && pd != pagedir1
+          && (unsigned)location >= 0x400000u
+          && (unsigned)location < 0x10000000u) {
+         u64 *fr = userpd_map_page((u64 *)(uintptr)pd,
+                                   (unsigned long long)(unsigned)location,
+                                   (unsigned long)(PG_WR | PG_USER));
+         if (fr) {
+            __asm__ __volatile__("invlpg (%0)" :: "r" ((unsigned long)(unsigned)location) : "memory");
+            pf_busy = 0;
+            return 0;
+         }
+         serial_puts("PF64: userpd_map_page failed (pool empty?)\n");
+      }
+      {
+         char line[180];
+         sprintf(line,
+                 "PF64: not-present cr2=0x%x rip=0x%lx err=0x%x proc=%s mm=0x%x\n",
+                 (unsigned)location, rip, (unsigned)fault_info,
+                 current_process->name ? current_process->name : "?",
+                 (unsigned)mm);
+         serial_puts(line);
+      }
+      pf_busy = 0;
+      exc_showdump(location, PAGE_FAULT, mm);
+      exc_recover();
+      while (1) {}
+   }
+   pf_busy = 0;
+#else
+   (void)rip;
+   mm=getphys(location,current_process->pagedirloc);
+#endif
    
    if (mm&PG_DEMANDLOAD)
          {

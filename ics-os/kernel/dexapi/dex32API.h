@@ -56,5 +56,9 @@ void api_init();
 int api_removesystemcall(DWORD function_number);
 api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,
                    api_arg_t val3, api_arg_t val4, api_arg_t val5);
+#ifdef __x86_64__
+api_arg_t syscallentry64(api_arg_t sysno, api_arg_t a0, api_arg_t a1,
+                         api_arg_t a2, api_arg_t a3, api_arg_t a4);
+#endif
 
 #endif

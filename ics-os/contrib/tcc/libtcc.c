@@ -737,6 +737,11 @@ LIBTCCAPI TCCState *tcc_new(void)
     s->nocommon = 1;
     s->warn_implicit_function_declaration = 1;
     s->ms_extensions = 1;
+#ifdef TCC_TARGET_X86_64
+    /* ICS-OS user window is packed under 96MiB. Default 4KiB PT_LOAD
+       alignment so .data cannot land on the heap/stack windows. */
+    s->section_align = 0x1000;
+#endif
 
 #ifdef CHAR_IS_UNSIGNED
     s->char_is_unsigned = 1;

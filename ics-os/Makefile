@@ -253,6 +253,9 @@ test-kbuild: apps vmdex
 		-cdrom /tmp/icsos-kbuild.iso -boot d > /tmp/icsos-kbuild.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-kbuild.log
 	@grep -aq "KBUILD_TEST_PASS" /tmp/icsos-kbuild.log
+	@grep -aq "KBUILD_KEXEC" /tmp/icsos-kbuild.log
+	@grep -aq "Build: kbuild-inos" /tmp/icsos-kbuild.log
+	@grep -aq "KEXEC_BOOT_OK" /tmp/icsos-kbuild.log
 	@! grep -aq "KBUILD_TEST_FAIL" /tmp/icsos-kbuild.log
 	@echo "test-kbuild PASS"
 
@@ -286,6 +289,9 @@ test-fullhost: apps vmdex
 		-cdrom /tmp/icsos-fullhost.iso -boot d > /tmp/icsos-fullhost.log 2>&1
 	@grep -aq "TCCBOOT_TEST_PASS" /tmp/icsos-fullhost.log
 	@grep -aq "KBUILD_TEST_PASS" /tmp/icsos-fullhost.log
+	@grep -aq "KBUILD_KEXEC" /tmp/icsos-fullhost.log
+	@grep -aq "Build: fullhost-inos" /tmp/icsos-fullhost.log
+	@grep -aq "KEXEC_BOOT_OK" /tmp/icsos-fullhost.log
 	@grep -aq "FULLHOST_TEST_PASS" /tmp/icsos-fullhost.log
 	@echo "test-fullhost PASS"
 # Faster check: boot and exec the host-built hello.exe from the CD root.

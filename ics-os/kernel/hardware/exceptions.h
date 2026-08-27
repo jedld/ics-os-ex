@@ -39,10 +39,13 @@ struct gpf_info {
    unsigned int cs, ss;      /* active segment selectors at fault */
    unsigned long long rsp;   /* active RSP at fault */
    unsigned long long cr3;   /* active page table */
+   unsigned long long rax, rcx;
 };
 void GPFhandler(DWORD address);
-void GPFhandler64(struct gpf_info *fi);
-DWORD pagefaulthandler(DWORD location,DWORD fault_info);
+void GPFhandler64(struct gpf_info *fi, unsigned long rax, unsigned long rcx);
+DWORD pagefaulthandler(DWORD location, DWORD fault_info, unsigned long rip);
+void exc_doublefault(unsigned long rip, unsigned long cs,
+                     unsigned long rflags, unsigned long cr2);
 void exc_showdump(DWORD location,int type,DWORD pf_info);
 void exc_invalidtss(DWORD address);
 void exc_recover();

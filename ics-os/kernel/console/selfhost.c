@@ -195,7 +195,7 @@ static int tccboot_run(void)
       tcc never has to parse the raw SDK headers (which hit TinyCC/SDK
       header clashes such as va_list and size_t). */
    sprintf(cmd,
-           "%s -nostdlib -static -o /ramdisk/tccnew.exe "
+           "%s -nostdlib -static -Wl,-section-alignment=1000 -o /ramdisk/tccnew.exe "
            "/ramdisk/obj/tcc.o /ramdisk/obj/libtcc.o /ramdisk/obj/tccpp.o "
            "/ramdisk/obj/tccgen.o /ramdisk/obj/tccelf.o /ramdisk/obj/tccrun.o "
            "/ramdisk/obj/tccasm.o /ramdisk/obj/x64gen.o /ramdisk/obj/x64lnk.o "
@@ -220,7 +220,8 @@ static int tccboot_run(void)
       tccnew does not, the fault is in the big core; if it also hangs, the
       TCC link / SDK crt1 / args path is the bug. */
    sprintf(cmd,
-           "/ramdisk/tcc.exe -nostdlib -static -o /ramdisk/args.exe "
+           "/ramdisk/tcc.exe -nostdlib -static -Wl,-section-alignment=1000 "
+           "-o /ramdisk/args.exe "
            "/ramdisk/args.c "
            "/ramdisk/sdkobj/tccsdk.o /ramdisk/sdkobj/posix.o "
            "/ramdisk/sdkobj/libtcc1.o /ramdisk/sdkobj/crt1.o "
@@ -235,15 +236,12 @@ static int tccboot_run(void)
       return 0;
    }
 
-   printf("tccboot: verifying /ramdisk/tccnew.exe -v\n");
-   if (!run_tcc("/ramdisk/tccnew.exe", "/ramdisk/tccnew.exe -v")) {
-      printf("TCCBOOT_TEST_FAIL tccnew -v\n");
-      return 0;
-   }
-
+   /* Skip `tccnew -v` with no input: TinyCC 0.9.27 treats that as
+      compiling stdin and blocks forever on getchar. */
    printf("tccboot: tccnew compiling min.c\n");
    sprintf(cmd,
-           "/ramdisk/tccnew.exe -nostdlib -static -o /ramdisk/min2.exe /ramdisk/min.c");
+           "/ramdisk/tccnew.exe -nostdlib -static -Wl,-section-alignment=1000 "
+           "-o /ramdisk/min2.exe /ramdisk/min.c");
    if (!run_tcc("/ramdisk/tccnew.exe", cmd)) {
       printf("TCCBOOT_TEST_FAIL tccnew min.c\n");
       return 0;
@@ -271,7 +269,7 @@ static int kbuild_run(const char *cc)
    };
    static const char *asms[] = {
       "mbhdr.o", "startup.o", "asmlib.o", "context.o", "ap_trampoline.o",
-      "irqwrap.o", "tccva.o",
+      "irqwrap.o", "tccva.o", "kexec.o",
       0
    };
    char cmd[1024], src[256], obj[256];
@@ -310,6 +308,10 @@ static int kbuild_run(const char *cc)
    }
 
    printf("kbuild: compiling kernel C with %s\n", cc);
+   tccboot_writefile("/ramdisk/k/build.h",
+      cc && strstr(cc, "tccnew")
+         ? "const char *build_id= \"fullhost-inos\";\n"
+         : "const char *build_id= \"kbuild-inos\";\n");
    for (i = 0; cfiles[i]; i++) {
       const char *base = cfiles[i];
       const char *slash = strrchr(base, '/');
@@ -318,8 +320,12 @@ static int kbuild_run(const char *cc)
       {
          char stem[64];
          c_to_o(stem, bn);
+         /* Match host kernel flags that TinyCC understands. TinyCC 0.9.27
+            has no -mcmodel=large; the kernel sits at 1MiB so small model
+            is fine. It does not use a red zone. */
          sprintf(cmd,
-                 "%s -c -nostdlib -w -ffreestanding -I/ramdisk/k "
+                 "%s -c -nostdlib -nostdinc -w -fno-common "
+                 "-I/ramdisk/k "
                  "-o /ramdisk/k/%s /ramdisk/k/%s",
                  cc, stem, cfiles[i]);
       }
@@ -339,7 +345,8 @@ static int kbuild_run(const char *cc)
            "/ramdisk/k/kernel32.o /ramdisk/k/scheduler.o /ramdisk/k/iosched.o "
            "/ramdisk/k/blkcache.o /ramdisk/k/fat12.o /ramdisk/k/iso9660.o "
            "/ramdisk/k/ramdisk.o /ramdisk/k/devfs.o /ramdisk/kasm/irqwrap.o "
-           "/ramdisk/k/devmgr_error.o /ramdisk/k/tcccompat.o /ramdisk/kasm/tccva.o",
+           "/ramdisk/k/devmgr_error.o /ramdisk/k/tcccompat.o /ramdisk/kasm/tccva.o "
+           "/ramdisk/kasm/kexec.o",
            cc);
    if (!run_tcc(cc, cmd)) {
       printf("KBUILD_TEST_FAIL link\n");
@@ -356,6 +363,14 @@ static int kbuild_run(const char *cc)
    printf("KBUILD_TEST_PASS\n");
    if (elf)
       free(elf);
+   if (cc && strstr(cc, "tccnew"))
+      printf("FULLHOST_TEST_PASS\n");
+   printf("kbuild: kexec /ramdisk/Kernel64.bin\n");
+   if (kexec_load("/ramdisk/Kernel64.bin") != 0) {
+      printf("KBUILD_TEST_FAIL kexec_load\n");
+      return 0;
+   }
+   kexec_reboot();
    return 1;
 }
 

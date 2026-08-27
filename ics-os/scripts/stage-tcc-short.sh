@@ -40,7 +40,9 @@ done
 # them in-OS hit TinyCC/SDK-header clashes (va_list, size_t) that the host
 # gcc handles fine. Build the 5 runtime objects with host gcc (APP_CFLAGS).
 SDKOBJ_CFLAGS="-m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding \
-  -fno-pie -fno-pic -fno-stack-protector -fno-strict-aliasing -mcmodel=large \
+  -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables \
+  -fno-unwind-tables -fno-stack-clash-protection \
+  -fno-strict-aliasing -mcmodel=large \
   -mno-red-zone -nostdinc -I$ROOT/sdk/include -I$ROOT/contrib/tcc \
   -DTCC_TARGET_X86_64 -DONE_SOURCE=0 -DCONFIG_TCC_STATIC"
 mkdir -p "$DST/sdkobj"

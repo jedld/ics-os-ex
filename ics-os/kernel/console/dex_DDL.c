@@ -15,24 +15,44 @@
 DEX32_DDL_INFO *ActiveDDL=0;
 int totalDDL=0;
 
+/* Identity-map kernel / heap pointers live in the low 4GiB. A non-canonical
+   or NULL DDL (stale PCB.outdev before process_init) must not be followed:
+   Dex32PutC would #GP(0) on the first VGA putc. */
+static int ddl_ptr_ok(const void *p)
+{
+   unsigned long a = (unsigned long)p;
+   return a >= 0x100000UL && a < 0x100000000UL;
+}
 
 //get the device associated to a process
 DEX32_DDL_INFO *Dex32GetProcessDevice(){
-   if (current_process->outdev == 0 || current_process == 0 ) 
-      return consoleDDL;
-   return current_process->outdev;
+   PCB386 *cp;
+   DEX32_DDL_INFO *d = 0;
+
+   cp = smp_this_cpu()->current;
+   if (ddl_ptr_ok(cp))
+      d = cp->outdev;
+   if (!ddl_ptr_ok(d))
+      d = consoleDDL;
+   if (!ddl_ptr_ok(d))
+      return 0;
+   return d;
 };
 
 
 //Create a new device
 DEX32_DDL_INFO *Dex32CreateDDL(){
    DEX32_DDL_INFO *dev=(DEX32_DDL_INFO*)malloc(sizeof(DEX32_DDL_INFO));
+   if (!dev)
+      return 0;
    memset(dev,0,sizeof(DEX32_DDL_INFO));
    dev->size = sizeof(DEX32_DDL_INFO);
    totalDDL++;
    dev->handle=totalDDL;
    dev->buf_size=80*25*2*sizeof(char);
-   dev->mem_ptr=(char*)malloc(80*25*2*sizeof(char));    
+   dev->mem_ptr=(char*)malloc(80*25*2*sizeof(char));
+   if (!dev->mem_ptr)
+      return 0; 
    memset(dev->mem_ptr,0,80*25*2*sizeof(char));
    dev->buf_ptr=dev->mem_ptr; 
    dev->hdw_ptr=(char*)0xB8000;
@@ -184,6 +204,8 @@ void Dex32UpdateCursor(DEX32_DDL_INFO *dev, int y, int x){
 //Emulates an ANSI compatible display subsystem
 void Dex32PutC(DEX32_DDL_INFO *dev, char c){
    /* Serial mirror lives in putcEX to avoid double COM1 output. */
+   if (!ddl_ptr_ok(dev))
+      return;
    if (c=='\t'){
       int i;
       for (i=0;i<3;i++)
@@ -237,7 +259,10 @@ void Dex32SetY(DEX32_DDL_INFO *dev,int y){
 //output a character at position x,y
 int Dex32PutChar(DEX32_DDL_INFO *dev,int x, int y,char c,char color){
    char *cptr;
-   DWORD vidmemloc=dev->buf_ptr;
+   DWORD vidmemloc;
+   if (!ddl_ptr_ok(dev))
+      return 0;
+   vidmemloc=dev->buf_ptr;
    
    if (x>=0&&x<80 &&y>=0&&y <25){
       cptr=(char*)(vidmemloc+ (y * 80 + x) * 2);

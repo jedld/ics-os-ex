@@ -74,8 +74,8 @@ extern void textcolor(unsigned char c);
 
 
 //order is important for some include files, DO NOT CHANGE!
-#include <stdarg.h>
-#include <limits.h>
+#include "stdarg.h"
+#include "limits.h"
 
 #include "build.h"
 #include "version.h"
@@ -124,6 +124,7 @@ extern void textcolor(unsigned char c);
 #include "vfs/vfs_aux.h"
 #include "hardware/usb/usb.h"
 #include "iomgr/iosched.h"
+#include "kexec.h"
 
 //structure to hold the boot info
 typedef struct _kernel_sysinfo {
@@ -135,6 +136,9 @@ kernel_sysinfo kernel_systeminfo;
 
 //This stores the current virtual console the kernel will use
 DEX32_DDL_INFO *consoleDDL;
+
+char kernel_cmdline[256] = {0};
+int kernel_kexeced = 0;
 
 //forward declarations.needed in process.c so must be here first 
 void dex_init();
@@ -149,6 +153,9 @@ extern int cpu_count;
 #include "console/tty.c"
 #include "hardware/dexapm.c"
 #include "hardware/chips/irqhandlers.c"
+#ifdef __x86_64__
+#define INTERNAL_SIZE_T unsigned long
+#endif
 #include "memory/dlmalloc.c"
 #include "memory/bsdmallo.c"
 #include "stdlib/time.c"
@@ -194,6 +201,7 @@ extern int cpu_count;
 #include "memory/dexmem.c"
 #include "memory/dexmalloc.c"
 #include "vmm/vmm.c"
+#include "kexec.c"
 
 //another set of forward declarations
 void dex32_startup(); 
@@ -233,6 +241,8 @@ void main(){
 
    serial_init();
    serial_puts("ICS-OS: serial console ready (x86_64)\n");
+   kernel_kexeced = 0;
+   kernel_cmdline[0] = 0;
 
    /* Prefer values stashed at 0x9000 by the 32-bit trampoline. */
    {
@@ -258,12 +268,35 @@ void main(){
                                   | ((p[1] & 0xFF) << 16)
                                   | ((p[2] & 0xFF) << 8);
          }
+         if (tag->type == 1) { /* command line */
+            unsigned n = tag->size > 8 ? tag->size - 8 : 0;
+            /* A real GRUB/kexec cmdline is short. Huge sizes mean we landed
+               on a misaligned tag and would memcpy kernel .rodata (which
+               contains the string "kexeced") into the buffer. */
+            if (tag->size < 8 || tag->size > 8 + 255)
+               n = 0;
+            if (n > 255) n = 255;
+            memcpy(kernel_cmdline, (char *)tag + 8, n);
+            kernel_cmdline[n] = 0;
+            /* Exact token, not substring — a random blob can contain
+               the letters "kexeced". */
+            if (n && (strcmp(kernel_cmdline, "kexeced") == 0
+                      || strncmp(kernel_cmdline, "kexeced ", 8) == 0))
+               kernel_kexeced = 1;
+         }
          /* mmap tag (6) uses a different entry layout — use fallback below */
          tag = (mb2_tag *)(((uintptr)tag + tag->size + 7) & ~7ULL);
       }
       mbhdr = &mb1_compat;
       memory_map = 0;
       map_length = 0;
+      if (kernel_cmdline[0]) {
+         serial_puts("ICS-OS: cmdline=");
+         serial_puts(kernel_cmdline);
+         serial_puts("\n");
+      }
+      if (kernel_kexeced)
+         serial_puts("ICS-OS: booted via kexec\n");
    } else {
       mbhdr = (multiboot_header *)(uintptr)multiboothdr;
       if (mbhdr) {
@@ -337,6 +370,7 @@ void main(){
     See dexmem.c for details*/
     
    memamount = mem_detectmemory(memory_map, map_length);
+   current_process = &sPCB;
    {
       char buf[80];
       /* crude: print totalpages via printf after console exists — use serial for now */
@@ -358,7 +392,7 @@ void main(){
    mem_init(); 
     
    /*The default values of the current_process variable, which is the kernel
-     PCB*/
+     PCB (also seeded before the first printf above). */
    current_process = &sPCB;
 
    //Program the Timer to context switch n times a second	
@@ -373,6 +407,11 @@ void main(){
     
    //Create a virtual console that the kernel will send its output to
    consoleDDL = Dex32CreateDDL();
+   /* Seed the kernel PCB before the first VGA putc. current_process is a
+      per-CPU slot; sPCB.outdev is otherwise 0/garbage and GetProcessDevice
+      must not follow a non-canonical pointer. */
+   current_process = &sPCB;
+   sPCB.outdev = consoleDDL;
    fg_kernel = fg_register(consoleDDL, 0);
    fg_setforeground(fg_kernel);
     
@@ -445,6 +484,7 @@ void dex32_startup(){
 
    //initialize the keyboard device driver
    printf("Initializing keyboard and mouse drivers...");
+   irq_init();
    init_keyboard();
    installmouse();
    init_mouse();
@@ -611,7 +651,11 @@ void dex_init(){
    //create the IO manager thread which handles all I/O to and from
    //block devices like the hard disk, floppy, CD-ROM etc. see iosched.c
    printf("Initializing the disk manager...");
-   createkthread((void*)iomgr_diskmgr,"disk_mgr",200000);
+   {
+      DWORD dpid = createkthread((void*)iomgr_diskmgr,"disk_mgr",200000);
+      if (dpid)
+         ps_set_affinity((int)dpid, 0);
+   }
    printf("[OK]\n");   
 
    

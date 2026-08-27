@@ -39,6 +39,8 @@ int flop_getblocksize()
     return 512;
 };
 
+cache *cacheptr = 0;
+
 void flop_initcache()
  {
   int i;
@@ -89,7 +91,8 @@ void freecache(DWORD sectornumber)
 int shouldflush()
  {
   int res=0,index;
-    if (cacheptr == 0)
+  unsigned long p = (unsigned long)cacheptr;
+    if (cacheptr == 0 || p < 0x100000UL || p >= 0x100000000UL)
        return 0;
     for (index=0;index<CACHESIZE;index++)
     {

@@ -77,6 +77,7 @@ gdtr64:
 .globl startup
 .globl _start
 .extern main
+.extern syscallentry
 .extern long_mode_entry
 
 .equ KERNEL_CS64, 0x08
@@ -184,6 +185,9 @@ long_mode_start:
 
     lgdt gdtr64
 
+    /* SYSCALL MSRs are programmed after the kernel stack is live (see
+       below, after zero_bss) so a #GP from WRMSR is diagnosable. */
+
     movq $boot_stack_top, %rsp
     xorq %rbp, %rbp
 
@@ -217,6 +221,25 @@ zero_bss:
     addq $4, %rsi
     cmpq %rcx, %rsi
     jne zero_bss
+
+    /* SYSCALL MSRs: WRMSR uses EDX:EAX. Also set EFER.SCE. */
+    movl  $0xC0000080, %ecx
+    rdmsr
+    orl   $(1 << 0), %eax             /* SCE */
+    wrmsr
+    xorl  %eax, %eax
+    movl  $((KERNEL_CS64 << 16) | KERNEL_CS64), %edx
+    movl  $0xC0000081, %ecx
+    wrmsr
+    movabs $syscallentry, %rax
+    movq  %rax, %rdx
+    shrq  $32, %rdx
+    movl  $0xC0000082, %ecx
+    wrmsr
+    movl  $0x3000, %eax               /* NT|IOPL — do not clear IF here */
+    xorl  %edx, %edx
+    movl  $0xC0000084, %ecx
+    wrmsr
 
     call main
 

@@ -90,6 +90,11 @@ extern DWORD pagefault_stack_loc;
 
 //defines the stack size for system calls of user process
 #define SYSCALL_STACK 0xFFFF
+/* Kernel (int 0x30 / syscall) stack for user ELFs. 64KB (SYSCALL_STACK) is too
+   small for deep syscall chains (e.g. the in-OS TinyCC self-build, which
+   overflows it and double-faults); 512KB gives ample headroom. Committed per
+   user process in its private PML4 by createprocess(). */
+#define USER_SYSCALL_STACK 0x80000
 
 /*process_mem is used to describe the memory space that is used by the process
   this is primarily used when first allocating space for a process in system

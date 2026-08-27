@@ -1073,6 +1073,13 @@ int console_execute(const char *str){
    if (strcmp(u,"kbuild") == 0){  //-- Rebuild the kernel with in-OS tcc.
       kbuild_run(0);
    }else
+   if (strcmp(u,"kexec") == 0){  //-- Boot a kernel ELF from ramdisk/path.
+      u=strtok(0," ");
+      if (!u)
+         u="/ramdisk/Kernel64.bin";
+      if (kexec_load(u) == 0)
+         kexec_reboot();
+   }else
    if (strcmp(u,"fullhost") == 0){  //-- tccboot then kbuild with tccnew.
       fullhost_run();
    }else
@@ -1211,8 +1218,14 @@ void console_main(){
    printf("console: tmux keys  C-b c/n/p/l/0-9/w/x/?  (F2 new, F12 next)\n");
    strcpy(last,"");
     
-   if (console_first == 0) 
-      script_load("/icsos/autoexec.bat");
+   if (console_first == 0) {
+      if (kernel_kexeced && strcmp(kernel_cmdline, "kexeced") == 0) {
+         printf("KEXEC_BOOT_OK\n");
+         serial_puts("KEXEC_BOOT_OK\n");
+         machine_reboot();
+      } else
+         script_load("/icsos/autoexec.bat");
+   }
     
    console_first++;
    /* Prefer userland sh.exe when present (PATH on CD / ramdisk). */

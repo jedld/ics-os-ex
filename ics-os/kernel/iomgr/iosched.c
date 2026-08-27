@@ -332,23 +332,8 @@ DWORD dex32_requestIO(int deviceid,int type,DWORD block,DWORD numblocks, void *b
         return (DWORD)ptr->rID;
       };
       
-     //queue the request
      ptr=(IOrequest*)malloc(sizeof(IOrequest));
-     if (IOjob==0) 
-     {
-      IOjob=ptr;
-      ptr->next=0;
-      ptr->prev=0;
-     }
-      else
-     {
-      ptr->next=IOjob;
-      ptr->prev=0;
-      IOjob->prev=ptr;
-      IOjob=ptr;
-     };
-     
-      ptr->deviceid = deviceid;    
+      ptr->deviceid = deviceid;
       ptr->rID=(DWORD)ptr;
       ptr->type = type;
       ptr->lowblock = block;
@@ -356,34 +341,20 @@ DWORD dex32_requestIO(int deviceid,int type,DWORD block,DWORD numblocks, void *b
       ptr->buf=buf;
       ptr->time=IOrequest_time++;
       ptr->num_of_blocks = numblocks;
+      ptr->next=0;
+      ptr->prev=0;
       #ifdef DEBUG_IOREADWRITE2
       printf(")r\n");
       #endif
-      restoreflags(flags);      
+      /* Do not enqueue: disk_mgr races on the queue if we drop
+         IOrequest_busy between queue and exec (timer can switch to
+         disk_mgr, which dequeues and double-issues the ATA command).
+         Run the request inline while still holding the lock. */
+      disable_taskswitching();
+      iomgr_execjob(ptr);
+      enable_taskswitching();
+      restoreflags(flags);
       sync_leavecrit(&IOrequest_busy);
-
-      /* Execute the request synchronously in the caller's
-         context.  disk_mgr is a priority-0 kernel thread and
-         user processes get priority 1, so a user process
-         blocked on dex32_IOcomplete() would never be
-         descheduled in favor of disk_mgr and the queued
-         read would never complete (starvation deadlock).
-         Running the read/write inline makes the request
-         complete before dex32_requestIO() returns; the
-         worker thread only needs to drain stragglers.
-         Cache-hit fast paths above already completed.
-         A read of a cache-miss block executes here; the
-         result is still cached by iomgr_execjob so a
-         second request for the same block is served from
-         the cache. */
-      { DWORD fl2; storeflags(&fl2); stopints();
-        sync_entercrit(&IOrequest_busy);
-        disable_taskswitching();
-        IOmgr_obtainjob(0,0,0);
-        iomgr_execjob(ptr);
-        enable_taskswitching();
-        sync_leavecrit(&IOrequest_busy);
-        restoreflags(fl2); }
       return (DWORD)ptr->rID;
 ;};
 

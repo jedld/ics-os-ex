@@ -108,6 +108,11 @@ enum {
 #include "tcc.h"
 #include <assert.h>
 
+/* ICS-OS user ELFs run at CPL0, so IRQs push on the same stack and
+   destroy the SysV 128-byte red zone. Never spill to -0x10(%rsp). */
+static void rz_sub16(void) { o(0x10ec8348); } /* sub $16, %rsp */
+static void rz_add16(void) { o(0x10c48348); } /* add $16, %rsp */
+
 ST_DATA const int reg_classes[NB_REGS] = {
     /* eax */ RC_INT | RC_RAX,
     /* ecx */ RC_INT | RC_RCX,
@@ -505,11 +510,13 @@ void load(int r, SValue *sv)
             if ((r >= TREG_XMM0) && (r <= TREG_XMM7)) {
                 if (v == TREG_ST0) {
                     /* gen_cvt_ftof(VT_DOUBLE); */
-                    o(0xf0245cdd); /* fstpl -0x10(%rsp) */
-                    /* movsd -0x10(%rsp),%xmmN */
+                    rz_sub16();
+                    o(0x241cdd); /* fstpl (%rsp) */
+                    /* movsd (%rsp),%xmmN */
                     o(0x100ff2);
-                    o(0x44 + REG_VALUE(r)*8); /* %xmmN */
-                    o(0xf024);
+                    o(0x04 + REG_VALUE(r)*8);
+                    o(0x24);
+                    rz_add16();
                 } else {
                     assert((v >= TREG_XMM0) && (v <= TREG_XMM7));
                     if ((ft & VT_BTYPE) == VT_FLOAT) {
@@ -523,11 +530,13 @@ void load(int r, SValue *sv)
             } else if (r == TREG_ST0) {
                 assert((v >= TREG_XMM0) && (v <= TREG_XMM7));
                 /* gen_cvt_ftof(VT_LDOUBLE); */
-                /* movsd %xmmN,-0x10(%rsp) */
+                rz_sub16();
+                /* movsd %xmmN,(%rsp) */
                 o(0x110ff2);
-                o(0x44 + REG_VALUE(r)*8); /* %xmmN */
-                o(0xf024);
-                o(0xf02444dd); /* fldl -0x10(%rsp) */
+                o(0x04 + REG_VALUE(v)*8);
+                o(0x24);
+                o(0x2404dd); /* fldl (%rsp) */
+                rz_add16();
             } else {
                 orex(1,r,v, 0x89);
                 o(0xc0 + REG_VALUE(r) + REG_VALUE(v) * 8); /* mov v, r */
@@ -2130,11 +2139,13 @@ void gen_cvt_ftof(int t)
             o(0xc0 + REG_VALUE(vtop->r)*9);
         } else if (tbt == VT_LDOUBLE) {
             save_reg(RC_ST0);
-            /* movss %xmm0,-0x10(%rsp) */
+            rz_sub16();
+            /* movss %xmm0,(%rsp) */
             o(0x110ff3);
-            o(0x44 + REG_VALUE(vtop->r)*8);
-            o(0xf024);
-            o(0xf02444d9); /* flds -0x10(%rsp) */
+            o(0x04 + REG_VALUE(vtop->r)*8);
+            o(0x24);
+            o(0x2404d9); /* flds (%rsp) */
+            rz_add16();
             vtop->r = TREG_ST0;
         }
     } else if (bt == VT_DOUBLE) {
@@ -2146,11 +2157,13 @@ void gen_cvt_ftof(int t)
             o(0xc0 + REG_VALUE(vtop->r)*9);
         } else if (tbt == VT_LDOUBLE) {
             save_reg(RC_ST0);
-            /* movsd %xmm0,-0x10(%rsp) */
+            rz_sub16();
+            /* movsd %xmm0,(%rsp) */
             o(0x110ff2);
-            o(0x44 + REG_VALUE(vtop->r)*8);
-            o(0xf024);
-            o(0xf02444dd); /* fldl -0x10(%rsp) */
+            o(0x04 + REG_VALUE(vtop->r)*8);
+            o(0x24);
+            o(0x2404dd); /* fldl (%rsp) */
+            rz_add16();
             vtop->r = TREG_ST0;
         }
     } else {
@@ -2158,18 +2171,22 @@ void gen_cvt_ftof(int t)
         gv(RC_ST0);
         r = get_reg(RC_FLOAT);
         if (tbt == VT_DOUBLE) {
-            o(0xf0245cdd); /* fstpl -0x10(%rsp) */
-            /* movsd -0x10(%rsp),%xmm0 */
+            rz_sub16();
+            o(0x241cdd); /* fstpl (%rsp) */
+            /* movsd (%rsp),%xmm0 */
             o(0x100ff2);
-            o(0x44 + REG_VALUE(r)*8);
-            o(0xf024);
+            o(0x04 + REG_VALUE(r)*8);
+            o(0x24);
+            rz_add16();
             vtop->r = r;
         } else if (tbt == VT_FLOAT) {
-            o(0xf0245cd9); /* fstps -0x10(%rsp) */
-            /* movss -0x10(%rsp),%xmm0 */
+            rz_sub16();
+            o(0x241cd9); /* fstps (%rsp) */
+            /* movss (%rsp),%xmm0 */
             o(0x100ff3);
-            o(0x44 + REG_VALUE(r)*8);
-            o(0xf024);
+            o(0x04 + REG_VALUE(r)*8);
+            o(0x24);
+            rz_add16();
             vtop->r = r;
         }
     }

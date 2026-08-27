@@ -34,5 +34,5 @@ SECTIONS {
 }
 INPUT(startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o
       kernel32.o scheduler.o iomgr.o blkcache.o fat.o iso9660.o ramdisk.o
-      devfs.o irqwrap.o devmgr_error.o)
+      devfs.o irqwrap.o devmgr_error.o kexec.o)
 OUTPUT(Kernel64.bin)

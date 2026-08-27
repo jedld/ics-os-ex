@@ -1,5 +1,107 @@
 # Development blog
 
+## 2026-08-27 (Manila, UTC+8)
+
+### 12:50 — tccnew still #GP; 4K PT_LOAD is not the remaining bug
+
+`test-selfhost` still PASSes (until a later `context_load` experiment).
+`test-tccboot` still FAILs at `tccnew` compiling `min.c`.
+
+What we proved:
+- TinyCC 2MiB `ELF_PAGE_SIZE` *did* collide with the user stack. Default is
+  now 4KiB; tccnew PT_LOADs sit at `0x400000` / `0x44A370`, well below the
+  96MiB reserved window. `args.exe` (TCC-linked + gcc SDK) runs.
+- crt1 relocs in tccnew are sane: `getparameters=0x441CB4`, `strtok=0x441D3A`,
+  `main=0x401A03`. GPF RIP `0x401ee6` is **inside TinyCC `main`**, ~739 bytes
+  in, with `rsp=0x0dffebe0` (valid stack) and **`rcx=0xf000ff0000000000`**
+  (non-canonical). `tcc-main` printf never prints, so it dies before that
+  line (likely loading a string/GOT pointer).
+- Zeroing caller-saved GPRs in `context_load` broke `min.exe` exec (hung
+  at `execp: started pid`). Reverted.
+
+Still open: why TinyCC-generated `main` loads a non-canonical pointer.
+`test-kbuild` / `test-fullhost` remain blocked on tccboot.
+
+**Activity now:** reverted `context_load` GPR wipe; next is GOT/.rodata reloc
+in the in-OS-linked tccnew.
+
+### 08:30 — userpd pool leak (tccboot blocker)
+
+`test-tccboot` compiles every TinyCC file and links `tccnew.exe`, then GPFs:
+`GPF64: rip=0x449ad0 cr2=0xa2f2000 proc=/ramdisk/tccnew.exe`.
+
+Root cause: the 32MiB per-process frame pool (`[0x06000000,0x08000000)`) is
+exhausted after ~5 `tcc.exe` runs. Later execs fall back to the shared
+identity map (`elf64: map fail image` / `userpd map failed; shared map`).
+`tccnew` then touches heap at `0xa2f2000` (past the 2MiB commit) on that
+shared map and GPFs.
+
+`userpd_free()` existed but did not actually return frames:
+1. The 4-level walker could miss leaves (2MiB PS vs 4KiB PTE tables).
+2. `freelinearloc()`/`getphys()` (now a real 4-level walk) `mempush()`'d
+   pool frames onto the kernel free-page stack — stealing them from
+   `upop()` even if the walker later ran.
+3. `kill_process` gated reclaim on `ACCESS_USER` and a pointer compare
+   to `pagedir1`.
+
+Fix (standard frame-allocator practice):
+- Owner bitmap: every `upop()` is billed to the owning PML4; process
+  exit scans and returns **all** billed frames. No walk required.
+- `freelinearloc` skips pool frames (they are not `mempop` memory).
+- `kill_process` always `userpd_free`s a pool PML4 (threads share it).
+- Map each ELF `PT_LOAD` separately (do not privately map TinyCC's
+  2MiB `.data` alignment gap).
+- `ELF_HEAP_COMMIT` 8MiB so `tccnew` min.c does not depend on the first
+  sbrk/PF for `0xa2f2000`.
+- `invlpg` after splitting a 2MiB identity page; stop `sbrk` from
+  `memset`ing the user VA through a stale large-page TLB.
+
+Measured after the zombie_free fix (`test-selfhost`): pool returns to
+**0/8192** after every exec; PML4 `0x7FFF000` is reused.
+
+`tccnew` then got a private PML4 but #GP(0) at `rip=0x401ecc` on
+`movsbl (%rcx),%edx` (strcpy) with **rcx=0xf000ff0000000000** (non-canonical)
+and **rax=0xe000194** (just above `userstackloc` 0x0E000000). TinyCC's
+default 2MiB section alignment placed later PT_LOADs on the user stack
+window. Link with `-Wl,-section-alignment=1000`. Also `relocate_plt()`
+for static EXE that still have a `.plt`.
+
+**Activity now:** `make test-tccboot` with 4K section alignment, then kbuild/fullhost.
+
+### 07:30 — Self-compile / self-host: evaluate, plan, then fix
+
+**Goals (user):**
+1. ICS-OS compiles itself *inside itself* and **boots** that compiled OS.
+2. ICS-OS compiles its own compiler inside itself, then uses that compiler to compile itself inside itself.
+
+**Measured state at start of this session (not the 2026-08-22 gap analysis):**
+
+| Capability | Target | State |
+|---|---|---|
+| Host kernel + `tcc.exe` | `make -C kernel bzImage`, `make apps` | PASS |
+| In-OS compile+run C | `test-selfhost` | PASS (`min.c`/`hello.c`) |
+| In-OS rebuild TinyCC | `test-tccboot` | FAIL — double fault during `tccgen.c` exec (`DBLFLT cr2=0xa194000`) |
+| In-OS compile kernel | `test-kbuild` | logic exists; flags incomplete; **never boots** the image |
+| Compiler-then-kernel | `test-fullhost` | blocked by tccboot |
+| Boot in-OS kernel | none | **not implemented** (kbuild only checks ELF magic) |
+
+**Root causes still open:**
+1. `getphys()` on x86_64 **lies** (always returns identity\|present). A real user PF (unmapped heap page after a 2MiB identity block is split) is treated as present, the dump path runs on the user CR3, and the PF handler itself faults → **double fault**. This is the tccboot blocker.
+2. Double-fault wrapper printed a **stack slot address**, not RIP (`leaq` vs `movq`).
+3. `syscall` MSRs written with WRMSR but **EDX never set** (STAR/LSTAR garbage high half). `syscallentry` IRETQ frame is **backwards** (RIP/CS/RFLAGS) and discards the return value via POP_ALL.
+4. ELF loader maps `SYSCALL_STACK` (64KiB) then `createprocess` uses `USER_SYSCALL_STACK` (512KiB) — splitting the 2MiB syscall block leaves most of it unmapped.
+5. kbuild omits host flags; no kexec/boot loop; ramdisk 8MiB is tight for tccboot+kbuild together.
+
+**Plan (execute in this session):**
+1. Fix diagnostics + `getphys` 4-level walk + demand-map missing user pages + reentrant PF/DF handlers.
+2. Fix WRMSR + `syscallentry` (Linux ABI → DEX) so in-OS `tccnew.exe` can use `syscall` if it does.
+3. Map the full syscall stack; grow ramdisk (16MiB) and ELF heap (16MiB); fail closed if `userpd_map_region` runs out of frames.
+4. kexec: load ELF64 to a staging area, trampoline copies it over 0x100000, drop to 32-bit protected mode, jump to `startup` with Multiboot2 (`kexeced` cmdline). Stamp `build_id` so the second boot is distinguishable.
+5. kbuild uses the stamp + kexec; tests assert the **new** kernel's `Root mount [OK]`.
+6. `test-tccboot` then `test-kbuild` then `test-fullhost`.
+
+**Activity now:** implementing (1)–(4).
+
 ## 2026-08-23 (Manila, UTC+8)
 
 ### 19:00–20:30 — "Boot sometimes hangs at a different point every time" (DIAGNOSTIC MODE)
@@ -312,3 +414,214 @@ sharing/clobbering address space, GPF at entry) is resolved — user processes
 now genuinely run under a per-process private PML4 backed by private pool
 frames. Any residual tccboot issue is now downstream of process execution
 (e.g. the full in-OS TinyCC rebuild path), not process memory isolation.
+
+### 19:00–20:30 — test-tccboot: userpd pool exhausted on the 4th exec (process-exit leak fixed)
+
+**Task:** `make test-tccboot` now gets *further* than before — the per-process
+PML4 isolation works — but the in-OS TinyCC pipeline (which execs `tcc.exe`
+~20 times to compile+link `tccnew.exe`) dies after a handful of execs. Symptom:
+`elf64: no userpd frames for ...; shared map` (or a GPF shortly after), i.e. the
+dedicated userpd frame pool is being **exhausted** because user processes never
+return their frames on exit.
+
+**Root cause (a real leak).** On x86_64 every user ELF gets a *private* PML4
+(`userpd_create`) whose 4KiB frames (image, stack, heap, syscall stack, and the
+PML4/PDPT/PD/PTE table pages themselves) are drawn from the dedicated 32MiB pool
+(8192 frames). But neither process-exit path reclaimed them:
+
+- `kill_process()` only called the 32-bit `dex32_freeuserpagetable()` + `mempush()`
+  path, which is wrong for a 4-level private PML4 (it would 2-level-walk a 16-entry
+  PML4 and corrupt memory) — and in the x86_64 build that branch was effectively a
+  no-op for the private frames.
+- `schedule_from_timer()`'s self-exit reaper (the path actually taken when a user
+  process calls `exit()`) freed *only the PCB* (`zombie_free`) and **never** freed
+  the page tables. So every exiting user process leaked its whole PML4 tree —
+  for `tcc.exe` that is image+stack+heap+tables ≈ 2.4K pool frames. The 8192-frame
+  pool therefore ran dry on the ~4th exec of `tcc.exe`.
+
+**Fix (`process.c`, `process.h`).**
+1. Added `free_meminfo_list()` (process.c:1369) — frees only the `process_mem`
+   metadata list, never the physical frames.
+2. `kill_process()`: for a private-PML4 user process, reclaim frames with
+   `userpd_free(pagedirloc)` (walks the 4-level tables, returns every *private*
+   pool frame, leaves shared `boot_pd1..3`/PS pages alone) and free only the
+   metadata via `free_meminfo_list()`. The shared-`pagedir1` case keeps the legacy
+   `freeprocessmemory()` path.
+3. Self-exit reaper in `schedule_from_timer()`: same `userpd_free()` +
+   `free_meminfo_list()` before `dying->on_cpu = -1`. This is the path that was
+   leaking.
+
+   *Safety:* `userpd_free` runs while the dying task is still `current_process`,
+   but it only *clears* pool-bitmap bits (no zeroing, no deref of the freed frames),
+   and `context_load(&readyprocess->ctx)` immediately switches CR3 to the next
+   task, so the now-unmapped frames are never touched again. No double-free is
+   possible (`upush` rejects non-pool frames; clearing an already-clear bit is a
+   no-op). `pagedir1` (shared) is never freed.
+
+**Verification.**
+- `test-integration` PASS (boot + smp + exec).
+- `test-selfhost` PASS (in-OS TinyCC compiles+runs `min.c`/`hello.c` — exercises
+  the same exit/reaper path with real user ELFs).
+- `test-tccboot` now runs the **entire** in-OS TinyCC pipeline — all 21
+  `tcc.exe` compiles, the `tccnew.exe` link, and the control `args.exe` build+run —
+  with **no** "no userpd frames" message and **no** pool-exhaustion GPF. The leak is
+  gone: the pool no longer drains across ~20 execs.
+
+**Separate, pre-existing bug now *exposed* (not caused by this fix):** the very
+final step — running the in-OS-built `/ramdisk/tccnew.exe` (a 336KB binary, larger
+and built by the in-OS TinyCC/linker rather than the host toolchain) — dies with
+`GPF64 err=0x0 rip=0x449ad0 cr3=0x7fff000`. To diagnose, I extended `GPFhandler64`
+(`hardware/exceptions.c`) with a **full register dump** (via a `gpf_regs[19]` buffer
+populated in `gpfwrapper`/`irqwrap.S` right after `PUSH_ALL`) and a 32-byte code
+dump at the faulting RIP. Findings:
+- Registers are all *sane* (rsp/rbp/rsi/rdx/rax are valid user-window stack
+  pointers ~0xdfff…, no NULL), so it is not a simple null deref.
+- The faulting RIP `0x449ad0` lands in a region **past the end of `.text`** as laid
+  out by the host toolchain (host `tcc.exe` `.text` ends ~0x43f000; `.data`/`.bss`
+  are 0x448ee0+). In the in-OS-built `tccnew.exe` the entry is `0x447B11` and the
+  fault is `0x449ad0` — both high up. The code bytes at the fault are not a clean
+  decodable instruction stream at a valid boundary, which points at the **in-OS
+  TinyCC linker producing a malformed/misplaced image** for this particular large
+  binary (or a loader mapping issue specific to its layout) — *not* the per-process
+  paging or the pool, both of which are now correct (host `tcc.exe`, the same pool,
+  runs fine pids 28–31; only the in-OS-built `tccnew.exe` misbehaves).
+- This is the documented "full in-OS TinyCC rebuild (`test-tccboot`) not green yet"
+  item in AGENTS.md. It is downstream of the process/memory work done here and is a
+  distinct codegen/linking task.
+
+**Diagnostic code kept** (useful, low-cost, only fires on a real #GP): the
+`GPFhandler64` register + code dumps. They print once per fault and help future
+ring-3 debugging; they do not alter normal operation.
+
+## 2026-08-26 (Manila, UTC+8)
+
+### 20:50 — Linux-ABI `syscall` compat layer: implemented, then REVERTED (boot regression)
+
+The `tccnew.exe` `#GP(0)` root cause was confirmed as the one in the todo list:
+the in-OS TinyCC emits the **Linux x86-64 `syscall`** ABI, but the kernel never
+programmed the `IA32_STAR`/`IA32_LSTAR`/`IA32_SYSCALL_MASK` MSRs (it only wired the
+DEX `int 0x30` path). The earlier blog note attributing the fault to an "in-OS TinyCC
+linker producing a malformed image past end-of-`.text`" was a **misdiagnosis**.
+
+I built the full compat layer:
+- `startup.S`: program STAR/LSTAR/SYSCALL_MASK in `long_mode_start` (RPL3 CS/SS =
+  kernel selectors, since user ELFs run CPL 0 with kernel CS).
+- `irqwrap.S`: `syscallentry` (PUSH_ALL, capture the Linux register set into a
+  `linux_sc_cur[9]` `.bss` global, call the C dispatcher, return via IRETQ).
+- `dexapi/dex32API.c`: `syscallentry64()` logging each distinct Linux number once
+  (with raw registers) and mapping read/write/open/close/brk/getpid/time/getcwd/
+  fstat/stat/exit onto the DEX `api_syscall` table; `-ENOSYS` otherwise.
+
+**Outcome: it regressed `test-boot` (69 GPFs, crash in early console init,
+`Dex32PutC`, non-canonical device pointer `0xc0c00000c0b000`).** Bisection found the
+regression is in the syscall-support group (`irqwrap.S`/`exceptions.c`/`dex32API.c`/
+`startup.S`), **not** the `process.c/h` frame-pool fix and **not** `startup.S` alone.
+The fault signature shows **runtime `.text` corruption** (image bytes at `rip` are
+`Dex32PutC`, memory bytes are the long-mode-enable code) plus a **re-entrant GPF
+handler** (handler faults while printing → console corruption → 69-fault cascade).
+The changes are interdependent so I could not isolate the single hunk in a reasonable
+number of slow QEMU cycles, and per the "no regressions" rule I **reverted the whole
+layer** to the clean, passing baseline (`test-boot` PASS, 0 GPF). The frame-pool leak
+fix in `process.c/h` (the prior session's work) is the only kernel change I kept out of
+this revert only because it is a separate, already-validated concern — it is currently
+also reverted; re-apply it independently of the syscall work.
+
+**Deferred next steps (do NOT re-land the syscall layer as one blob again):**
+1. Make the GPF handler **re-entrancy-safe** first (a `volatile` flag set under
+   `cli`, early-return if already handling). This is almost certainly why the cascade
+   hides the true first fault.
+2. Re-introduce the syscall layer in **three tested increments**, running `test-boot`
+   after each: (a) MSRs only; (b) a minimal `syscallentry` that logs and returns
+   `-ENOSYS`; (c) the full mapping.
+3. If a `.bss` global is the culprit, relocate it to a **dedicated page-aligned
+   section outside `boot_pml4..bssEnd`** (the `zero_bss` + boot page-table range),
+   rather than the generic `.bss`.
+
+## 2026-08-27 (Manila, UTC+8)
+
+### 04:00–14:30 — Self-hosted TinyCC: land the syscall layer incrementally, then chase a double fault
+
+Continuing the task "do not stop until the self-hosting tcc works." The prior
+session had reverted the whole Linux-ABI `syscall` layer after it regressed
+`test-boot`. This session re-landed it **in three tested increments** (the plan
+that blog note recommended), which succeeded:
+
+**Increment 1 — MSRs only** (`startup.S`): program `IA32_STAR`/`IA32_LSTAR`/
+`IA32_SYSCALL_MASK` in `long_mode_start`. LSTAR initially a `0` placeholder.
+`test-boot` PASS, 0 GPF.
+
+**Increment 2 — minimal `syscallentry`** (`irqwrap.S`): a `syscall` entry that
+`PUSH_ALL`s, captures the Linux register set, calls a C dispatcher that (for now)
+just records the last `sysno` and returns `-ENOSYS`, and returns to user mode via
+a pushed `IRETQ` frame (RIP=`rcx`, CS=`0x08` kernel selector, RFLAGS=`r11`).
+`test-boot` PASS, 0 GPF. **This fixed the original `#GP`** — user `syscall`
+instructions no longer fault.
+
+**Stack enlargement** (`process.h`/`elf_module.c`): the user-ELF kernel
+(`int 0x30`/`syscall`) stack was `SYSCALL_STACK = 0xFFFF` (64KB). The in-OS TCC
+self-build overflows it, so I added `USER_SYSCALL_STACK = 0x80000` (512KB) and
+passed it to `createprocess()` from `elf_module.c`. `test-integration`
+(boot + SMP + exec) still PASS.
+
+**Result of the syscall work:** `test-tccboot` (full in-OS TinyCC self-build) now
+gets the host `tcc.exe` running inside the OS and it actually *compiles* the TCC
+sources — `libtcc.c`, `tccpp.c`, `tccgen.c` (pids 20/21/22) — with **zero GPFs**
+and zero `-ENOSYS` stalls (the host `tcc.exe` uses the DEX `int 0x30` ABI, so the
+Linux-ABI handler is irrelevant to it). This is real forward progress: the OS
+boot, SMP, exec, and the in-OS compiler all work up to this point.
+
+### THE CURRENT BLOCKER: a double fault during `tccgen.c`'s exec
+
+While starting the exec for `tccgen.c` (pid 23), the kernel takes a **double
+fault** and halts. It is deterministic and **independent of the kernel-stack
+size** (64KB and 512KB both double-fault), so it is not a stack-overflow.
+
+The old `double_fault` C handler was installed *directly* as IDT vector 8 (no
+assembly wrapper), so when it fired the CPU's pushed frame (RIP/CS/RFLAGS/err)
+sat under its assumed C return address → the handler faulted on its own stack →
+**triple fault → "system halted"**, with **no diagnostics at all**.
+
+**Fix landed this session (diagnostics):** added a proper `doublefaultwrapper`
+(`irqwrap.S`) that captures the faulting RIP, CS, RFLAGS and CR2 and calls a new
+`exc_doublefault()` (`hardware/exceptions.c`) which prints
+`DBLFLT: rip=.. cs=.. rflags=.. cr2=..` over serial and halts. Wired it into the
+IDT in `irqhandlers.c` (replacing the bare `double_fault`).
+
+**Captured signature** (deterministic, every run):
+```
+execp: starDBLFLT: rip=0xdffe808 cs=0x0008 rflags=0x2 cr2=0xa194000
+```
+- `cs=0x0008` = kernel CS (CPL 0) — the fault is in kernel code.
+- `cr2=0xa194000` — a **page fault** on `0xa194000` (low identity-mapped region,
+  ~168MB).
+- `rip=0xdffe808` — **outside the kernel `.text`** (which is `0x100024`–
+  `0x142869`). So the captured RIP is not a valid kernel instruction pointer: the
+  faulting context is corrupted (the `execp` print "star[t]" was cut off by the
+  fault).
+
+**Interpretation:** kernel code in the `execp`/elf64-mapping path for `tccgen.c`
+triggers a **page fault** (CR2 `0xa194000`), and the **page-fault handler itself
+faults** (touching an unmapped/invalid address, or recursing) → double fault.
+The `PF64:` line the PF handler prints on entry never appears, so the handler
+dies very early (likely in `getphys()`/`mempop()`/`getvirtaddress()` on a bad
+pointer, or the PF frame is itself corrupt).
+
+**Next steps (in order):**
+1. Make the **page-fault handler re-entrancy-safe** and have it print its own
+   entry (RIP via `(rsp)`, CR2, the `mm` result of `getphys`) *before* any memory
+   allocation, so we see exactly which PF it is handling and where it dies.
+2. Verify the `execp` elf64 private-PML4 mapping for `tccgen.c` is committing the
+   right regions (the prior `tccgen.c` runs mapped PML4s at `0x6217000`/
+   `0x6367000`; confirm the committed page range covers what the code touches).
+3. Confirm whether `0xa194000` is a kernel data address that should be mapped in
+   the *user* PML4 (it is not, if it is kernel memory) — i.e. the PF is the user
+   process faulting on a kernel address, which would be a loader mapping bug.
+4. Once the self-build proceeds, build out the full Linux-ABI syscall mapping
+   only if the in-OS `tcc` (recompiled) actually needs it.
+5. Re-verify `test-integration` + `test-selfhost` stay green.
+
+**Files touched this session:** `startup.S` (MSRs), `irqwrap.S`
+(`syscallentry` + `doublefaultwrapper`), `dex32API.c` (minimal `syscallentry64`),
+`process.h` (`USER_SYSCALL_STACK`), `module/elf_module.c` (use it),
+`hardware/exceptions.c` (`exc_doublefault`), `hardware/chips/irqhandlers.c`
+(IDT vector 8 → `doublefaultwrapper` + extern).

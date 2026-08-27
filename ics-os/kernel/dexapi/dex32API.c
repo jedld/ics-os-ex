@@ -232,5 +232,50 @@ api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,
       current_process->op_success=1;
    }
    return retval;        
-};      
+};
+
+#ifdef __x86_64__
+/* Linux x86-64 syscall ABI (SYSCALL instruction) → DEX api_syscall table.
+   Host-built apps use int 0x30; in-OS TinyCC may emit `syscall`. */
+api_arg_t syscallentry64(api_arg_t sysno, api_arg_t a0, api_arg_t a1,
+                         api_arg_t a2, api_arg_t a3, api_arg_t a4)
+{
+   (void)a3;
+   (void)a4;
+   switch ((unsigned)sysno) {
+   case 0:  /* read(fd, buf, n) */
+      return api_syscall(0xA4, a0, a1, a2, 0, 0);
+   case 1:  /* write(fd, buf, n) */
+      return api_syscall(0xA5, a0, a1, a2, 0, 0);
+   case 2:  /* open(path, flags, mode) — DEX openfilex(path, mode) */
+      return api_syscall(4, a0, a1, 0, 0, 0);
+   case 3:  /* close */
+      return api_syscall(5, a0, 0, 0, 0, 0);
+   case 4:  /* stat */
+      return api_syscall(36, a0, a1, 0, 0, 0);
+   case 5:  /* fstat */
+      return api_syscall(0x58, a0, a1, 0, 0, 0);
+   case 12: /* brk */
+      if (a0 == 0)
+         return (api_arg_t)(uintptr)current_process->knext;
+      {
+         unsigned long cur = (unsigned long)(uintptr)current_process->knext;
+         unsigned long want = (unsigned long)a0;
+         if (want > cur)
+            api_syscall(9, (api_arg_t)(want - cur), 0, 0, 0, 0);
+         return (api_arg_t)(uintptr)current_process->knext;
+      }
+   case 39: /* getpid */
+      return api_syscall(2, 0, 0, 0, 0, 0);
+   case 60: /* exit */
+      return api_syscall(3, a0, 0, 0, 0, 0);
+   case 79: /* getcwd */
+      return api_syscall(0x43, a0, a1, 0, 0, 0);
+   case 201: /* time */
+      return api_syscall(0x55, a0, 0, 0, 0, 0);
+   default:
+      return (api_arg_t)(long)-38; /* -ENOSYS */
+   }
+}
+#endif      
 
