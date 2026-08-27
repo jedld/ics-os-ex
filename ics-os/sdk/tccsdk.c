@@ -29,6 +29,11 @@
 #include "dexsdk.h"
 #include "time.h"
 
+/* Forward decl (defined in posix.c). wait() below delegates to it. We do
+ * NOT include <sys/wait.h> here because it pulls in <sys/types.h>, whose
+ * clock_t typedef conflicts with dexsdk.h's own clock_t in this TU. */
+int waitpid(int pid, int *status, int options);
+
 //global ANSI variables
 int errno;
 
@@ -1388,8 +1393,13 @@ void sleep(unsigned int ms){
     dexsdk_systemcall(0x9B,ms,0,0,0,0);
 }
 
-int wait(){
-   return dexsdk_systemcall(0xC,0,0,0,0,0);     
+/* POSIX wait(): wait for any child to terminate, return its pid and
+ * store the exit status. Delegates to the robust waitpid(-1) path, which
+ * directly switches the CPU to the child and uses the parent's waitq
+ * (the legacy 0xC spin-wait never yielded to the child and returned a
+ * bogus status, so GNU make's blocking wait() spun forever). */
+int wait(int *status){
+   return (int)waitpid(-1, status, 0);
 }
 
 /* Terminates the calling thread. The kernel exit() path is

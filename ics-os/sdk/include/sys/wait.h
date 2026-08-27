@@ -13,4 +13,8 @@
 
 pid_t waitpid(pid_t pid, int *status, int options);
 
+/* POSIX wait: wait for any child to exit, return its pid and store the
+ * status word. Delegates to waitpid(-1, status, 0) in the SDK. */
+int wait(int *status);
+
 #endif

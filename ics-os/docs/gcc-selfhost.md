@@ -12,11 +12,16 @@ needs gigabytes of disk and a driver that `fork`s `as`/`ld`.
 
 This document is the map for that work.
 
-**Current round:** in-OS TinyCC builds GNU make 3.82 onto `/work` (`make test-make`).
-Stock make `fork`s recipes; ICS-OS uses `posix_spawn` in a patched `job.c` until x86_64
-fork works. `waitpid(-1)` / `WNOHANG` and `dirent` are in. Overlay:
-`contrib/gnumake/`. Stage with `scripts/stage-make-short.sh` (host `tcc -E`, then
-in-OS per-file `-c` + link against host-built `sdkobj/`).
+**Current round:** in-OS TinyCC builds GNU make 3.82 onto `/work` (`make test-make`,
+**green**). Stock make `fork`s recipes; ICS-OS uses `posix_spawn` in a patched `job.c`
+until x86_64 fork works. `waitpid(-1)` / `WNOHANG`, `wait()`, and `dirent` are in.
+Overlay: `contrib/gnumake/`. Stage with `scripts/stage-make-short.sh` (host `tcc -E`,
+then in-OS per-file `-c` + link against host-built `sdkobj/`).
+
+`test-make` runs the **host-gcc** `apps/make.exe` for the recipe because the
+TinyCC-linked `make.exe` (in-OS tcc objects + host-gcc `sdkobj/`) still GPFs at
+`rip=0x8` (mixed-object class, same as tccnew). Next: make that link run so makeboot
+executes the in-OS-built make.
 
 ## Why TinyCC-kbuild is deferred
 
@@ -41,7 +46,8 @@ Historic DEX `user_execp` always **waits** (spawn+join). Console and
 
 | Piece | Status |
 |-------|--------|
-| `waitpid` | DEX syscall `0xB1` → `dex32_waitpid`; SDK `sys/wait.h` |
+| `waitpid` | DEX syscall `0xB1` → `sys_waitpid`; SDK `sys/wait.h` |
+| `wait` | SDK `int wait(int*)` → `waitpid(-1, status, 0)`; needed by GNU make's blocking job path (legacy DEX `0xC` spin-wait never yielded to the child) |
 | `posix_spawn` | DEX syscall `0xB2` (`sys_spawn`): load ELF, return child pid, no wait |
 | `execv` / `execvp` | DEX syscall `0xB3` (`sys_execve`): same-pid image replace (steal pid, switch) |
 | `fork` / `forkprocess` | Still 32-bit paging (`disablepaging` / `dex32_copy_pg`). Unsafe on x86_64. Do not use. |

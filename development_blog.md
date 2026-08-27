@@ -2,6 +2,39 @@
 
 ## 2026-08-28 (Manila, UTC+8)
 
+### 07:35 — Green `make test-make`: POSIX `wait()` for GNU make
+
+**Current problem:** `test-make` hung 1800 s. In-OS TinyCC compiled make
+(`MAKE_TCC_OK`) and make posix_spawned `/work/hello.exe` (load OK,
+`entry=0x4040C6`) but the child never ran and make never reaped it.
+
+**Root cause:** GNU make's blocking job path calls `wait(&status)` (the
+legacy DEX `0xC` → `dex32_wait`), not `waitpid`. `dex32_wait` is a
+spin-wait on the `childwait` flag that never switches the CPU to the
+child, so the child starves; it also returns a bogus `1` and ignores the
+status pointer. `test-spawn` worked because it calls `waitpid` (`0xB1`),
+which does `ps_switchto(child)` directly.
+
+**Fix:** SDK `wait()` is now POSIX-correct — `int wait(int *status)`
+delegates to `waitpid(-1, status, 0)` (`sdk/tccsdk.c`); prototype added to
+`sdk/include/sys/wait.h`. No kernel change; `0xC` stays mapped for DEX
+compat.
+
+Also found and fixed a **committed syntax error**: stray `mar         }`
+in `sys_waitpid` (`kernel/vfs/posixfd.c:904`) — the kernel in the tree
+did not compile at all; every prior ISO booted a stale binary.
+
+**Tests:** `test-make` PASS (`MAKE_TCC_OK`, `Hello World from ICS-OS!`,
+`MAKE_PASS`). Regressions `test-boot`, `test-smp`, `test-exec`,
+`test-integration`, `test-spawn`, `test-selfhost` all PASS. `test-tccboot`
+fails **pre-existing** (`tcc: error: invalid option -- '-nostdlib'` from
+the in-OS-rebuilt tccnew) — A/B verified identical with the `tccsdk.c`
+change reverted, so not a regression.
+
+**Activity now:** `test-make` green. Next: the tcc-linked `make.exe`
+still GPFs at `rip=0x8` (mixed in-OS-tcc + host-gcc SDK objects, same
+class as tccnew); fix that so makeboot runs the in-OS-built make.
+
 ### 03:30 — GNU make 3.82 bootstrap (TinyCC → make)
 
 **Current problem:** GNU make needs POSIX extras (dirent, waitpid(-1), posix_spawn

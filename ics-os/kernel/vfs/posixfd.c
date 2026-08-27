@@ -901,7 +901,7 @@ int sys_waitpid(int pid, int *status, int options)
             if (status)
                *status = wst;
             return wpid;
- mar         }
+          }
       }
       if (pid == 0)
          return -EINVAL;
