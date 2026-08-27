@@ -34,6 +34,7 @@ Useful individual targets (from `ics-os/`):
 | `test-smp` | `-smp 2`; AP online; AP work-steal; no GPF |
 | `test-exec` | `hello.exe` → `Hello World` + `EXEC_TEST_PASS` |
 | `test-selfhost` | In-OS TinyCC compiles/runs `min.c` + `hello.c` |
+| `test-tccboot` | In-OS TinyCC rebuilds itself (`tccnew.exe`) and compiles `min.c` |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).
@@ -45,7 +46,7 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 - **Identity map** covers low 4GiB; do not rebuild classic 2-level user PTs for that range on x86_64.
 - **SMP**: APs load the kernel GDT (`ap_load_kernel_gdt`), use LAPIC timer vector **0x41**, claim tasks with `on_cpu`, and honor `cpu_affinity`. Console / `fg_mgr` / user processes are BSP-pinned today.
 - **Serial** is the headless oracle. Prefer `serial_puts` / putc mirroring for QEMU `-nographic` tests.
-- **x86_64 in-OS TinyCC** can compile/run `min.c`/`hello.c` (`make test-selfhost`). Full in-OS TinyCC rebuild (`test-tccboot`) is not green yet.
+- **x86_64 in-OS TinyCC** can compile/run `min.c`/`hello.c` (`make test-selfhost`) and rebuild itself (`make test-tccboot`). `test-kbuild` / `test-fullhost` (in-OS kernel compile + kexec) are the next gate.
 
 ## Coding conventions
 
@@ -88,7 +89,7 @@ Make sure it contains the current problem and the activity currently being perfo
 
 ## Suggested next work
 
-1. Allow user processes on any CPU (harden `waitpid`/exit migration).
-2. x86_64 TinyCC / selfhost restore.
+1. `test-kbuild` / `test-fullhost`: in-OS kernel compile + kexec.
+2. Allow user processes on any CPU (harden `waitpid`/exit migration).
 3. Full ring-3 user mode (today user ELFs still enter with kernel CS).
 4. Stabilize `disk_mgr` / richer live images for `test-iobench`.

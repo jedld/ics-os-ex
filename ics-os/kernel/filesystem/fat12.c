@@ -550,8 +550,10 @@ void file12tostr(fatdirentry *dir,char *str)
    
    if (dir->ext[0]==' '&&dir->ext[1]==' '&&dir->ext[2]==' ')
       {str[i2]=0;return;};
-   if (!(dir->attrib&FDIRECTORY))
-      str[i2]='.';i2++;
+   if (!(dir->attrib&FDIRECTORY)) {
+      str[i2]='.';
+      i2++;
+   }
    for (i=0;i<3;i++)
    {
       if (dir->ext[i]==' ') break;
@@ -1210,8 +1212,9 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
          strtofile12(f->name,temp);
          memcpy(dir[i].name,temp,11);
          
-         //update the filename in the VFS to reflect the change to MS-DOS 8.3 format
-         file12tostr(&dir[i],f->name);
+         /* Keep the original VFS name. file12tostr() lowercases and
+            truncates to 8.3, which breaks paths like hardware/ATA and
+            headers such as irqhandlers.c during in-OS kbuild. */
          
 #ifdef WRITE_DEBUG
          printf("writing used cluster to fat in memory.\n");
@@ -1251,7 +1254,7 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
             {
                printf("FATDRVR: Device out of space!!\n");
                free(fat);
-               return 0;
+               return -1;
             }
             fat_write_cluster(fc,fat_get_eoc(fat_type),fat,fat_type,bpbblock,id);
            
@@ -1259,10 +1262,14 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
             /* allocate a cluster for this directory*/
             dir[i].st_clust = fc;
             f->start_sector = fc;
-            dirent = (fatdirentry*) malloc(512);
-            f->misc2=(void*)dirent;
-            f->miscsize2 = 512;
-            memset(f->misc2,0,512);
+            {
+               int dirbytes = bpbblock->sectors_per_cluster * bpbblock->bytes_per_sector;
+               if (dirbytes < 512) dirbytes = 512;
+               dirent = (fatdirentry*) malloc(dirbytes);
+               f->misc2=(void*)dirent;
+               f->miscsize2 = dirbytes;
+               memset(f->misc2,0,dirbytes);
+            }
             
             
             /* set up the initial entries . and ..*/
@@ -1314,7 +1321,7 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
                dirent[1].st_clust = 0;
             };
             
-            writefile12EX2(f->misc,bpbblock,dirent,1,0,512,id);
+            writefile12EX2(f->misc,bpbblock,dirent,1,0,f->miscsize2,id);
          };
          
          
@@ -1326,18 +1333,19 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
    
    if (!foundslot) //no slot was found??
    {
-      //try to add a new sector
-      if (!fat_addsectors(parentdir,bpbblock,1,id))
+      if (fat_addsectors(parentdir,bpbblock,1,id) != 1)
       {
-         //cannot add a new sector, no more disk space probably?
 #ifdef WRITE_DEBUG
          printf("not enough space to add sectors to directory!!\n");
 #endif
-         
          if (fat) free(fat);
-         return 2; //perform retry
-      };
-   };
+         return -1;
+      }
+      /* Directory cluster grew on disk, but the cached dir image is
+         still the old size, so a new slot is not visible yet. */
+      if (fat) free(fat);
+      return -1;
+   }
    
    //commit changes...
    //write the updated FATS and directories to the disk ...

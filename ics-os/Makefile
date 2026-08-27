@@ -181,7 +181,7 @@ test-selfhost: apps vmdex
 		> /tmp/icsos-selfhost-iso/boot/grub/grub.cfg
 	@grub-mkrescue -o /tmp/icsos-selfhost.iso /tmp/icsos-selfhost-iso >/dev/null 2>&1
 	@echo "Running self-host test (TinyCC inside ICS-OS)..."
-	@-timeout 300 $(QEMU_X64) -smp 1 -nographic -no-reboot -m 256M \
+	@-timeout 300 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
 		-cdrom /tmp/icsos-selfhost.iso -boot d > /tmp/icsos-selfhost.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-selfhost.log
 	@grep -aq "ramdisk: mounted" /tmp/icsos-selfhost.log
@@ -249,7 +249,7 @@ test-kbuild: apps vmdex
 		> /tmp/icsos-kbuild-iso/boot/grub/grub.cfg
 	@grub-mkrescue -o /tmp/icsos-kbuild.iso /tmp/icsos-kbuild-iso >/dev/null 2>&1
 	@echo "Running kbuild test (KVM)..."
-	@-timeout 1800 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+	@-timeout 3600 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
 		-cdrom /tmp/icsos-kbuild.iso -boot d > /tmp/icsos-kbuild.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-kbuild.log
 	@grep -aq "KBUILD_TEST_PASS" /tmp/icsos-kbuild.log

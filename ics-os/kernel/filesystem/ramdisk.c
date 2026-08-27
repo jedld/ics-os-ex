@@ -70,7 +70,10 @@ static void ramdisk_format_fat16(void)
    memcpy(b + 3, "ICSOSRAM", 8);
    b[11] = RAMDISK_SECSIZE & 0xFF;
    b[12] = (RAMDISK_SECSIZE >> 8) & 0xFF;
-   b[13] = 1;
+   /* 2KiB clusters: a subdirectory holds 64 8.3 entries (512B clusters
+      only fit 16, which ksrc.tar exceeds). 4 sectors/cluster keeps the
+      volume in FAT16 range (>= 4085 clusters). */
+   b[13] = 4;
    b[14] = reserved & 0xFF;
    b[15] = (reserved >> 8) & 0xFF;
    b[16] = fats;

@@ -2,6 +2,74 @@
 
 ## 2026-08-27 (Manila, UTC+8)
 
+### 15:30 — `test-tccboot` PASS
+
+Root cause was not `s==NULL` in main. Static TinyCC EXEs still emit a
+`.plt`; `fill_got()` never wrote `R_X86_64_JUMP_SLOT` / `GLOB_DAT` into
+the GOT, so `call tcc_new@plt` jumped to **rip=0** (`rcx=1` from
+`stdout`). Layout-dependent: some links used PC32 (old GPF in the files
+loop) and some used PLT (rip=0).
+
+Fix in `tccelf.c`:
+- set `attr->got_offset` on PLT GOT entries
+- `fill_got()` walks `.got->reloc` and writes `sym->st_value` into each
+  JUMP_SLOT/GLOB_DAT slot
+
+Also: `tcc.c` reloads `s` from `tcc_state` after calls; `dexsdk.h`
+`size_t` is `unsigned long` on x86_64; `contrib/tcc/Makefile` depends on
+`tccelf.c` (ONE_SOURCE was not rebuilding).
+
+`test-tccboot` PASS: tccnew compiles C `main` and `min.c` (inline asm
+`_start`). `test-selfhost` PASS with KVM (TCG 256M timed out in waitpid).
+
+### 16:00 — kbuild untar: FAT 8.3 folded `ATA` to `ata`
+
+`test-kbuild` died extracting `ksrc.tar`:
+`error locating directory` on `/ramdisk/k/hardware/ATA/ataiopio.c`
+right after `hardware/hardware.h` succeeded.
+
+FAT `file12tostr()` lowercases 8.3 names into the VFS node, so mkdir
+`ATA` became `ata`. `vfs_searchname` used `strcmp`, so the parent of
+`ataiopio.c` was not found. Names longer than 8.3 (`irqhandlers.c`)
+would also vanish on create.
+
+Fixes:
+- keep original VFS names on FAT create
+- case-insensitive path walk; prefer directories when more components remain
+- ramdisk clusters 2KiB (64 dirents) so `hardware/ATA` is not capped at 16
+- skip VFS-illegal tar names (`system design.txt`); drop `docs/` from ksrc.tar
+- stage `aptramp.o` (ISO9660 8.3 cannot store `ap_trampoline.o` without Joliet)
+
+Untar + kasm copy now succeed. `test-kbuild` then spent 30 min at
+`kbuild: compiling kernel C` and was SIGTERM'd (QEMU stdout fully
+buffered, so TinyCC progress was invisible). Next: line-buffered QEMU,
+compile `tcccompat.c` first, then the unity-build `kernel32.c`.
+
+**Activity now:** diagnose in-OS tcc compile of kernel32.c.
+
+### 14:10 — tccnew #GP: `s` lost across calls (s==NULL at files loop)
+
+Commit `1fe0548` is on `ics-os-v2`. Next blocker is still `test-tccboot`.
+
+In-OS `tccnew` #GPs at `s->filetype = f->type` (`rip=0x401ee6`) with
+**`rax=0x4e8`** (`offsetof(TCCState, filetype)` when `s==NULL`) and
+**`rcx=0xf000ff0000000000`** (kernel leftover / non-canonical filespec).
+Bytes at `0x401ecc` are the filespec walk (`add %rdx,%rcx; mov (%rcx),%rax`).
+`tcc_parse_args` ran (otherwise we would not reach that loop); the
+TCCState pointer was not in the stack slot main reloads.
+
+Likely TinyCC 0.9.27 left `s` in a caller-saved register across
+`tcc_parse_args` / `tcc_set_output_type`. Those run long enough for a
+timer IRQ at CPL0.
+
+Fixes in flight:
+- `tcc.c`: spill `s` to `.bss` (`tcc_main_state`) and reload after calls
+- `x86_64-gen.c`: 128-byte frame pad so CPL0 IRQ frames cannot overlap
+  rbp-relative locals
+- `dexsdk.h`: `size_t` is `unsigned long` on x86_64 (was `unsigned int`)
+
+**Activity now:** rebuild `tcc.exe`, `make test-tccboot`.
+
 ### 12:50 — tccnew still #GP; 4K PT_LOAD is not the remaining bug
 
 `test-selfhost` still PASSes (until a later `context_load` experiment).

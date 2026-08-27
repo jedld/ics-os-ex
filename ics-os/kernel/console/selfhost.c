@@ -65,6 +65,21 @@ static int tccboot_untar(const char *tar, DWORD tarsize, const char *destdir)
             fsize = (fsize << 3) + (p[i] - '0');
       }
 
+      {
+         int bad = 0, ki;
+         for (ki = 0; name[ki]; ki++) {
+            char c = name[ki];
+            if (c==' ' || c==':' || c=='|' || c=='*' || c=='?' ||
+                c=='(' || c==')' || c=='\\')
+               bad = 1;
+         }
+         if (bad) {
+            printf("  skip invalid name %s\n", name);
+            off += (fsize + 511) & ~511U;
+            continue;
+         }
+      }
+
       if (off + fsize > tarsize) {
          printf("tccboot: tar truncated (%s)\n", name);
          return 0;
@@ -237,19 +252,41 @@ static int tccboot_run(void)
    }
 
    /* Skip `tccnew -v` with no input: TinyCC 0.9.27 treats that as
-      compiling stdin and blocks forever on getchar. */
-   printf("tccboot: tccnew compiling min.c\n");
+      compiling stdin and blocks forever on getchar.
+      First compile a C-only main (no inline asm) so a miscompiled
+      tccasm cannot hang the smoke test. Link the same SDK objects as
+      args.exe. -nostdinc avoids CONFIG_TCC_SYSINCLUDEPATHS I/O. */
+   tccboot_writefile("/ramdisk/m.c", "int main(void){return 0;}\n");
+   printf("tccboot: tccnew compiling m.c\n");
    sprintf(cmd,
-           "/ramdisk/tccnew.exe -nostdlib -static -Wl,-section-alignment=1000 "
-           "-o /ramdisk/min2.exe /ramdisk/min.c");
+           "/ramdisk/tccnew.exe -nostdlib -static -nostdinc -w "
+           "-Wl,-section-alignment=1000 -o /ramdisk/min2.exe "
+           "/ramdisk/m.c "
+           "/ramdisk/sdkobj/tccsdk.o /ramdisk/sdkobj/posix.o "
+           "/ramdisk/sdkobj/libtcc1.o /ramdisk/sdkobj/crt1.o "
+           "/ramdisk/sdkobj/setjmp.o");
    if (!run_tcc("/ramdisk/tccnew.exe", cmd)) {
-      printf("TCCBOOT_TEST_FAIL tccnew min.c\n");
+      printf("TCCBOOT_TEST_FAIL tccnew m.c\n");
       return 0;
    }
 
    printf("tccboot: running /ramdisk/min2.exe\n");
    if (!user_execp("/ramdisk/min2.exe", 0, "/ramdisk/min2.exe")) {
       printf("TCCBOOT_TEST_FAIL run min2\n");
+      return 0;
+   }
+
+   printf("tccboot: tccnew compiling min.c (asm _start)\n");
+   sprintf(cmd,
+           "/ramdisk/tccnew.exe -nostdlib -static -nostdinc -w "
+           "-Wl,-section-alignment=1000 "
+           "-o /ramdisk/min3.exe /ramdisk/min.c");
+   if (!run_tcc("/ramdisk/tccnew.exe", cmd)) {
+      printf("TCCBOOT_TEST_FAIL tccnew min.c\n");
+      return 0;
+   }
+   if (!user_execp("/ramdisk/min3.exe", 0, "/ramdisk/min3.exe")) {
+      printf("TCCBOOT_TEST_FAIL run min3\n");
       return 0;
    }
 
@@ -261,14 +298,14 @@ static int tccboot_run(void)
 static int kbuild_run(const char *cc)
 {
    static const char *cfiles[] = {
-      "kernel32.c", "process/scheduler.c", "filesystem/fat12.c",
+      "tcccompat.c", "process/scheduler.c", "filesystem/fat12.c",
       "filesystem/iso9660.c", "filesystem/ramdisk.c", "filesystem/devfs.c",
       "iomgr/iosched.c", "iomgr/blkcache.c", "devmgr/devmgr_error.c",
-      "cpu/lapic.c", "cpu/smp.c", "tcccompat.c",
+      "cpu/lapic.c", "cpu/smp.c", "kernel32.c",
       0
    };
    static const char *asms[] = {
-      "mbhdr.o", "startup.o", "asmlib.o", "context.o", "ap_trampoline.o",
+      "mbhdr.o", "startup.o", "asmlib.o", "context.o", "aptramp.o",
       "irqwrap.o", "tccva.o", "kexec.o",
       0
    };
@@ -308,10 +345,15 @@ static int kbuild_run(const char *cc)
    }
 
    printf("kbuild: compiling kernel C with %s\n", cc);
-   tccboot_writefile("/ramdisk/k/build.h",
+   printf("kbuild: writing build.h\n");
+   if (!tccboot_writefile("/ramdisk/k/build.h",
       cc && strstr(cc, "tccnew")
          ? "const char *build_id= \"fullhost-inos\";\n"
-         : "const char *build_id= \"kbuild-inos\";\n");
+         : "const char *build_id= \"kbuild-inos\";\n")) {
+      printf("KBUILD_TEST_FAIL write build.h\n");
+      return 0;
+   }
+   printf("kbuild: build.h ready\n");
    for (i = 0; cfiles[i]; i++) {
       const char *base = cfiles[i];
       const char *slash = strrchr(base, '/');
@@ -340,7 +382,7 @@ static int kbuild_run(const char *cc)
            "%s -nostdlib -static -Wl,-Ttext=0x100000 -Wl,-section-alignment=0x1000 "
            "-o/ramdisk/Kernel64.bin "
            "/ramdisk/kasm/mbhdr.o /ramdisk/kasm/startup.o /ramdisk/kasm/asmlib.o "
-           "/ramdisk/kasm/context.o /ramdisk/kasm/ap_trampoline.o "
+           "/ramdisk/kasm/context.o /ramdisk/kasm/aptramp.o "
            "/ramdisk/k/lapic.o /ramdisk/k/smp.o "
            "/ramdisk/k/kernel32.o /ramdisk/k/scheduler.o /ramdisk/k/iosched.o "
            "/ramdisk/k/blkcache.o /ramdisk/k/fat12.o /ramdisk/k/iso9660.o "

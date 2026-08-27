@@ -1670,10 +1670,23 @@ int vfs_mountdirectory(vfs_node *node)
 /* searches a file for the given name and then returns
    a vfs_node pointer */
    
+/* FAT 8.3 stores names folded to lowercase; match path components
+   case-insensitively so hardware/ATA still resolves after mkdir. */
+static int vfs_nameeq(const char *a, const char *b)
+{
+    for (;;) {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return 0;
+        if (ca == 0) return 1;
+    }
+}
+
 vfs_node *vfs_searchname(const char *name)
 {
     char path[256];
-    char *s;
     vfs_node *node_ptr = vfs_root->files;
 
     if (strcmp(name,"")==0) return vfs_root;
@@ -1729,48 +1742,58 @@ vfs_node *vfs_searchname(const char *name)
                 };
         };
     
-    //remove trailing slash
-    if (path[strlen(path)-1]=='/')
-    {
+    if (path[0] && path[strlen(path)-1]=='/')
         path[strlen(path)-1]=0;
-    };
-    
-    s=strtok(path,"/");
-    
-    
-    do {
-        if (strcmp(s,node_ptr->name)==0)
-        {
-            s=strtok(0,"/");
+    if (path[0]==0)
+        return vfs_root;
 
-            if (s==0) //we have found the file!
-                return node_ptr;
-                
-            //a directory?    
-            if ( (node_ptr->attb&FILE_DIRECTORY) 
-                 && (strcmp(node_ptr->name,"..")!=0)
-                 && (strcmp(node_ptr->name,".")!=0)  )   
-               {
-                    devmgr_fs_desc *fs;               
-                    
-                    /*check if directory has been mounted, if not
-                      instruct the filesystem driver to mount it.
-                      
-                      Notes: VFS_NOT_MOUNTED is used so that the VFS does not
-                             mount everything in one shot, very useful for large drives*/
-                    if (node_ptr->files == VFS_NOT_MOUNTED)
-                    {
-                      if (vfs_mountdirectory(node_ptr)==0) return 0;
-                    };
-                    
-                    node_ptr = node_ptr->files;
+    {
+        char *parts[40];
+        int nparts = 0, i;
+        char *tok;
+
+        tok = strtok(path, "/");
+        while (tok && nparts < 40) {
+            parts[nparts++] = tok;
+            tok = strtok(0, "/");
+        }
+        if (nparts == 0)
+            return vfs_root;
+
+        node_ptr = vfs_root->files;
+        for (i = 0; i < nparts; i++) {
+            vfs_node *p;
+            vfs_node *found = 0;
+            vfs_node *found_dir = 0;
+            int last = (i == nparts - 1);
+
+            for (p = node_ptr; p != 0; p = p->next) {
+                if (!vfs_nameeq(parts[i], p->name))
                     continue;
-               }; 
-        }; 
-        
-        node_ptr = node_ptr->next;
-    } 
-    while (node_ptr != 0);
+                if ((p->attb & FILE_DIRECTORY) &&
+                    strcmp(p->name, ".") != 0 &&
+                    strcmp(p->name, "..") != 0) {
+                    found_dir = p;
+                    if (!last)
+                        break;
+                } else if (last) {
+                    found = p;
+                }
+            }
+
+            if (!last) {
+                if (!found_dir)
+                    return 0;
+                if (found_dir->files == VFS_NOT_MOUNTED) {
+                    if (vfs_mountdirectory(found_dir) == 0)
+                        return 0;
+                }
+                node_ptr = found_dir->files;
+                continue;
+            }
+            return found_dir ? found_dir : found;
+        }
+    }
     return 0;
 };
 

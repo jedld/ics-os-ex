@@ -255,7 +255,13 @@ int main(int argc0, char **argv0)
 redo:
     argc = argc0, argv = argv0;
     s = tcc_new();
+    if (!s)
+        return 1;
+    /* tcc_new() stores the pointer in tcc_state. Reload after calls so
+       a TinyCC-generated local `s' cannot go stale. */
+    s = tcc_state;
     opt = tcc_parse_args(s, &argc, &argv, 1);
+    s = tcc_state;
 
     if ((n | t) == 0) {
         if (opt == OPT_HELP)
@@ -306,10 +312,12 @@ redo:
             start_time = getclock_ms();
     }
 
+    s = tcc_state;
     set_environment(s);
     if (s->output_type == 0)
         s->output_type = TCC_OUTPUT_EXE;
     tcc_set_output_type(s, s->output_type);
+    s = tcc_state;
     s->ppfp = ppfp;
 
     if ((s->output_type == TCC_OUTPUT_MEMORY
@@ -317,6 +325,7 @@ redo:
         s->dflag |= t ? 32 : 0, s->run_test = ++t, n = s->nb_files;
 
     /* compile or add each files or library */
+    s = tcc_state;
     for (first_file = NULL, ret = 0;;) {
         struct filespec *f = s->files[s->nb_files - n];
         s->filetype = f->type;

@@ -73,14 +73,13 @@ Default scheduler is **priority round-robin** (`process/scheduler.c`):
   sector instead of ending the directory early (multi-sector dirs like
   `/src/tcc` previously hid later files).
 - Full `tccboot` (rebuild TinyCC with itself): `make test-tccboot`
-  (Multiboot2 ISO, KVM). Sources + SDK + `tcc.exe` are packed as one
+  (Multiboot2 ISO, KVM) **PASS**. Sources + SDK + `tcc.exe` are packed as one
   ustar (`tccsrc.tar`) and extracted onto `/ramdisk`. TinyCC is then
   compiled **per file** (`-DONE_SOURCE=0`) and linked to `tccnew.exe`,
-  which must compile and run `min.c`. `make test-kbuild` compiles kernel
-  C with in-OS tcc and links against prebuilt GAS objects. `make
-  test-fullhost` is tccboot then kbuild using `tccnew.exe`. A tcc-linked
-  kernel currently double-faults after serial init (red-zone / calling
-  convention); the tests assert a valid ELF64 image.
+  which compiles and runs `min.c`. Static EXEs must `fill_got()` for
+  `R_X86_64_JUMP_SLOT` (otherwise `call foo@plt` jumps to rip=0).
+  `make test-kbuild` compiles kernel C with in-OS tcc and kexecs it.
+  `make test-fullhost` is tccboot then kbuild using `tccnew.exe`.
 - ISO9660 directory records skip sector padding so multi-sector dirs
   (e.g. `/src/tcc`) list all files.
 

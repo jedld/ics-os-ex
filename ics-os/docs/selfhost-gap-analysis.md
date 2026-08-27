@@ -11,6 +11,21 @@ the failures, and a phased remediation plan.
 
 ---
 
+## Measured 2026-08-27 (supersedes the 2026-08-22 matrix below)
+
+| # | Capability | Test target | Status |
+|---|------------|-------------|--------|
+| 1 | Compile C inside OS + run | `make test-selfhost` | **PASS** |
+| 2 | Rebuild TinyCC inside OS | `make test-tccboot` | **PASS** (`TCCBOOT_TEST_PASS`) |
+| 3 | Compile kernel inside OS + kexec | `make test-kbuild` | in progress |
+| 4 | tccnew compiles kernel + kexec | `make test-fullhost` | blocked on #3 |
+| 6 | Ring-3 user mode | n/a | still CPL0 / kernel CS |
+
+tccboot blocker that was fixed: static TinyCC EXEs keep a `.plt`; `fill_got()`
+did not write `JUMP_SLOT`/`GLOB_DAT`, so `tccnew` jumped to `rip=0`.
+
+---
+
 ## 1. Capability matrix (measured 2026-08-22)
 
 | # | Capability | Test target | Status | Evidence |

@@ -8,10 +8,11 @@ K="$ROOT/kernel"
 rm -rf "$DST"
 mkdir -p "$DST/src" "$DST/kasm"
 
-# C/H/S tree without build products.
+# C/H/S tree without build products or docs (spaces in names, not needed).
 ( cd "$K" && tar cf - \
     --exclude='*.o' --exclude='Kernel*' --exclude='vmdex' \
-    --exclude='mapfile.txt' --exclude='*.sym' \
+    --exclude='mapfile.txt' --exclude='*.sym' --exclude='docs' \
+    --exclude='*.png' \
     . ) | ( cd "$DST/src" && tar xf - )
 
 # Preassembled GAS (tcc cannot assemble our .S files).
@@ -20,7 +21,7 @@ gcc -c -m64 -o "$DST/kasm/startup.o" "$K/startup/startup.S"
 gcc -c -m64 -o "$DST/kasm/asmlib.o" "$K/startup/asmlib.S"
 gcc -c -m64 -o "$DST/kasm/irqwrap.o" "$K/irqwrap.S"
 gcc -c -m64 -o "$DST/kasm/context.o" "$K/cpu/context.S"
-gcc -c -m64 -o "$DST/kasm/ap_trampoline.o" "$K/cpu/ap_trampoline.S"
+gcc -c -m64 -o "$DST/kasm/aptramp.o" "$K/cpu/ap_trampoline.S"
 gcc -c -m64 -o "$DST/kasm/kexec.o" "$K/kexec.S"
 gcc -c -m64 -ffreestanding -fno-builtin -o "$DST/kasm/tccva.o" "$K/tccva.c"
 

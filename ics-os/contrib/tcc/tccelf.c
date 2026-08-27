@@ -997,6 +997,10 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
         }
 
         attr->plt_offset = create_plt_entry(s1, got_offset, attr);
+        /* Static EXEs still jump through this GOT slot. fill_got()
+           only writes attr->got_offset; leaving it 0 skipped the
+           store and tccnew jumped to rip=0 (#GP). */
+        attr->got_offset = got_offset;
 
         /* create a symbol 'sym@plt' for the PLT jump vector */
         len = strlen(name);
@@ -1347,9 +1351,35 @@ ST_FUNC void fill_got(TCCState *s1)
 		case R_X86_64_GOTPCRELX:
 		case R_X86_64_REX_GOTPCRELX:
                 case R_X86_64_PLT32:
+                case R_X86_64_JUMP_SLOT:
+                case R_X86_64_GLOB_DAT:
                     fill_got_entry(s1, rel);
                     break;
             }
+        }
+    }
+
+    /* JUMP_SLOT/GLOB_DAT on .got itself: write the final symbol
+       address by reloc offset. fill_got_entry() looks at
+       attr->got_offset, which is 0 for the @plt symbol PLT32 is
+       retargeted to, so those slots stayed 0 and static tccnew
+       jumped to rip=0. */
+    if (s1->got && s1->got->reloc) {
+        for_each_elem(s1->got->reloc, 0, rel, ElfW_Rel) {
+            int type = ELFW(R_TYPE)(rel->r_info);
+            int sym_index = ELFW(R_SYM)(rel->r_info);
+            ElfW(Sym) *sym;
+            unsigned off;
+            if (type != R_X86_64_JUMP_SLOT && type != R_X86_64_GLOB_DAT)
+                continue;
+            if (sym_index <= 0)
+                continue;
+            sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+            off = (unsigned)rel->r_offset;
+            if (s1->got->sh_addr && off >= (unsigned)s1->got->sh_addr)
+                off -= (unsigned)s1->got->sh_addr;
+            section_reserve(s1->got, off + PTR_SIZE);
+            write64le(s1->got->data + off, sym->st_value);
         }
     }
 }
