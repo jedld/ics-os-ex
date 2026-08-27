@@ -23,6 +23,8 @@
 #define IORING_OP_READ    22
 #define IORING_OP_WRITE   23
 
+#define IORING_ENTER_GETEVENTS 1
+
 struct k_iovec {
    void *iov_base;
    unsigned long iov_len;

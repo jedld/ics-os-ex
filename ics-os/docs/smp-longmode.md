@@ -133,23 +133,28 @@ across ATA PIO. `IOrequest.lba` is 64-bit. `disk_mgr` sleeps (`sleep(1)` +
 `hlt`) between flush passes; `iomgr_request_flush()` clears its `waiting`
 flag. `make test-iobench` maps `/icsos/apps/tcc.exe` from the CD.
 
-**P3 POSIX / uring:** Per-process fd table (`FD_MAX` 16). `sys_open` / `sys_close` /
-`sys_read` / `sys_write` / `sys_lseek` / `sys_preadv` / `sys_pwritev` /
-`sys_fsync` wrap `file_PCB`. DEX `fopen`/`fread` stay as compat. `io_uring_setup`
-+ `io_uring_enter` run a NOP/READ/WRITE/READV/WRITEV/FSYNC/OPENAT/CLOSE subset
-synchronously; ring VA is `params.sq_off.user_addr` (identity map, no mmap).
-`make test-posixio` writes `/ramdisk/piotest.dat`.
+**P2 page cache:** 512 × 4KiB write-back pages indexed
 by `(device, byte_offset >> 12)`. CD 2048-byte sectors occupy two per page
 (the old `cd*` skip is gone). Misses merge into aligned 4KiB device reads.
 `bio_submit_sync()` is the internal submit path. Dirty pages flush from
 `disk_mgr` / `fclose`. Ramdisk still uses its own `getcache`/`putcache`.
 
+**P3 POSIX / uring:** Per-process fd table (`FD_MAX` 16). `sys_open` / `sys_close` /
+`sys_read` / `sys_write` / `sys_lseek` / `sys_preadv` / `sys_pwritev` /
+`sys_fsync` wrap `file_PCB`. DEX `fopen`/`fread` stay as compat. Ring VA is
+`params.sq_off.user_addr` (identity map, no mmap). Ramdisk SQEs complete
+inline. `/dev/vblk` READ/WRITE/FSYNC SQEs are submitted to virtio-blk and
+complete from the MSI-X harvest into the CQ. `io_uring_enter` waits for
+`min_complete`. `make test-posixio` greps `POSIXIO_PASS`, `URING_PASS`, and
+`URING_VBLK_PASS`.
+
 **virtio-blk** (`hardware/virtio/virtio_blk.c`) is the VM production path:
-modern virtio-pci caps, one DMA request queue, MSI-X vector **0x42**,
-512-byte LBAs, registered as block device `vblk`. ATA PIO remains the
-bare-metal fallback. PCI MMIO BARs are marked uncacheable (PCD|PWT on the
-shared `boot_pd3` 2MiB pages). `make test-virtio` attaches
-`virtio-blk-pci,disable-legacy=on` and greps `VIRTIO_BLK_OK`.
+modern virtio-pci caps, one request queue with a 3-descriptor slot pool,
+MSI-X vector **0x42**, 512-byte LBAs, registered as block device `vblk` and
+as `/dev/vblk`. Completions harvest the used ring in the IRQ (hlt wait, not
+pause-spin). ATA PIO remains the bare-metal fallback. PCI MMIO BARs are
+marked uncacheable (PCD|PWT on the shared `boot_pd3` 2MiB pages).
+`make test-virtio` greps `VIRTIO_BLK_OK` and `VIRTIO_IRQ_OK`.
 
 ## Memory map
 
@@ -160,7 +165,7 @@ The page allocator skips that reserved-range table; the linker
 closed 32MiB interval; `sbrk` must not `mempop`. Add new regions to
 the header first.
 
-Next: async uring completions; POSIX fds / io_uring subset are in.
+Next: `test-kbuild` / ring-3 / user processes on any CPU.
 
 ## Key files
 
@@ -174,5 +179,6 @@ Next: async uring completions; POSIX fds / io_uring subset are in.
 | TTY | `kernel/console/tty.c` |
 | Userland shell | `contrib/sh/sh.c` |
 | Block I/O | `kernel/iomgr/iosched.c`, `blkcache.c` |
+| POSIX fds / io_uring | `kernel/vfs/posixfd.c` |
 | virtio-blk | `kernel/hardware/virtio/virtio_blk.c` |
 | Memory map | `kernel/memory/memlayout.h` |

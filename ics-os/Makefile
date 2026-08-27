@@ -230,6 +230,8 @@ test-virtio: kernel/Kernel64.bin
 		> /tmp/icsos-virtio.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-virtio.log
 	@grep -aq "VIRTIO_BLK_OK" /tmp/icsos-virtio.log
+	@grep -aq "VIRTIO_IRQ_OK" /tmp/icsos-virtio.log
+	@grep -aq "pipelined reads \[OK\]" /tmp/icsos-virtio.log
 	@! grep -aq "VIRTIO_BLK_FAIL" /tmp/icsos-virtio.log
 	@! grep -aq "General Protection fault" /tmp/icsos-virtio.log
 	@echo "test-virtio PASS"
@@ -353,7 +355,7 @@ test-exec: kernel/Kernel64.bin apps/hello.exe
 	@grep -aq "EXEC_TEST_PASS" /tmp/icsos-exec.log
 	@echo "test-exec PASS"
 
-# POSIX fds, preadv/pwritev/fsync, and a synchronous io_uring subset.
+# POSIX fds, preadv/pwritev/fsync, io_uring, and async /dev/vblk.
 test-posixio: kernel/Kernel64.bin apps/posixio.exe
 	@echo "Building Multiboot2 ISO for POSIX I/O..."
 	@mkdir -p /tmp/icsos-posixio-iso/boot/grub /tmp/icsos-posixio-iso/apps
@@ -363,13 +365,18 @@ test-posixio: kernel/Kernel64.bin apps/posixio.exe
 	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
 		> /tmp/icsos-posixio-iso/boot/grub/grub.cfg
 	@grub-mkrescue -o /tmp/icsos-posixio.iso /tmp/icsos-posixio-iso >/dev/null 2>&1
-	@echo "Running POSIX I/O test (KVM)..."
-	@-timeout 55 $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 256M \
-		-cdrom /tmp/icsos-posixio.iso -boot d > /tmp/icsos-posixio.log 2>&1
+	@echo "Running POSIX I/O test (KVM, virtio-blk)..."
+	@dd if=/dev/zero of=/tmp/icsos-posixio-vblk.img bs=1M count=8 status=none
+	@-timeout 55 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-posixio.iso -boot d \
+		-drive file=/tmp/icsos-posixio-vblk.img,if=none,id=vd0,format=raw \
+		-device virtio-blk-pci,drive=vd0,disable-legacy=on \
+		> /tmp/icsos-posixio.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-posixio.log
 	@grep -aq "ramdisk: mounted" /tmp/icsos-posixio.log
 	@grep -aq "POSIXIO_PASS" /tmp/icsos-posixio.log
 	@grep -aq "URING_PASS" /tmp/icsos-posixio.log
+	@grep -aq "URING_VBLK_PASS" /tmp/icsos-posixio.log
 	@! grep -aq "POSIXIO_FAIL" /tmp/icsos-posixio.log
 	@echo "test-posixio PASS"
 

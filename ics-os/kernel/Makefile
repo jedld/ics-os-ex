@@ -61,7 +61,7 @@ iomgr.o: iomgr/iosched.c iomgr/iosched.h iomgr/bio.h stdlib/time.h iomgr/blkcach
 blkcache.o: iomgr/blkcache.c iomgr/blkcache.h
 	$(CC) $(CFLAGS) -o blkcache.o iomgr/blkcache.c
 
-posixfd.o: vfs/posixfd.c vfs/posixfd.h
+posixfd.o: vfs/posixfd.c vfs/posixfd.h process/process.h hardware/virtio/virtio_blk.h
 	$(CC) $(CFLAGS) -o posixfd.o vfs/posixfd.c
 	
 devmgr_error.o:
@@ -85,7 +85,7 @@ ap_trampoline.o: cpu/ap_trampoline.S
 kexec.o: kexec.S
 	$(CC) $(CFLAGS) -o kexec.o kexec.S
 
-virtio_blk.o: hardware/virtio/virtio_blk.c hardware/virtio/virtio_blk.h hardware/virtio/virtio.h
+virtio_blk.o: hardware/virtio/virtio_blk.c hardware/virtio/virtio_blk.h hardware/virtio/virtio.h process/process.h
 	$(CC) $(CFLAGS) -o virtio_blk.o hardware/virtio/virtio_blk.c
 
 lapic.o: cpu/lapic.c cpu/lapic.h

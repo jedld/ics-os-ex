@@ -2,20 +2,36 @@
  * virtio-blk (OASIS virtio 1.2, modern PCI transport).
  *
  * One request queue, DMA via identity-mapped buffers, MSI-X on vector
- * 0x42. Completions are observed on the used ring (IRQ is a wakeup).
- * ATA PIO remains the fallback when QEMU has no virtio disk.
+ * 0x42. Each in-flight request owns a 3-descriptor chain. The used ring
+ * is harvested in the MSI-X handler (and as a poll fallback); waiters
+ * hlt until that IRQ instead of pause-spinning. ATA PIO remains the
+ * fallback when QEMU has no virtio disk.
  */
 #include "virtio.h"
 #include "virtio_blk.h"
 #include "../../devmgr/dex32_devmgr.h"
 #include "../../cpu/lapic.h"
+#include "../../process/process.h"
+#include "../../stdlib/time.h"
 
 extern void *malloc(unsigned int);
 extern void *memset(void *s, int c, unsigned int n);
 extern int memcmp(const void *s1, const void *s2, unsigned int n);
 extern char *strcpy(char *d, const char *s);
 extern int printf(const char *fmt, ...);
+extern void *memcpy(void *d, const void *s, unsigned int n);
 extern void mmio_mark_uncacheable(u64 phys, u64 len);
+extern void storeflags(DWORD *flags);
+extern void restoreflags(DWORD flags);
+extern void stopints(void);
+extern unsigned int ticks;
+
+#define VBLK_DESCS_PER_REQ 3
+#define VBLK_BOUNCE        4096
+#define VBLK_TIMEOUT_TICKS 500
+#define VBLK_EIO           (-5)
+#define VBLK_EINVAL        (-22)
+#define VBLK_ENOMEM        (-12)
 
 #define SYS_CODE_SEL 0x08
 typedef struct __attribute__((packed)) _idtentry_v {
@@ -141,6 +157,22 @@ static inline void mmio_w64(volatile u64 *p, u64 v)
    virt_mb();
 }
 
+struct vblk_slot {
+   struct virtio_blk_req req;
+   u32 nbytes;
+   int res;
+   PCB386 *waiter;
+   void (*done_fn)(void *arg, int res);
+   void *done_arg;
+   void *user_buf;
+   volatile u8 done;
+   u8 busy;
+   u8 status;
+   u8 copy_back;
+   u8 pad[4];
+};
+typedef char vblk_slot_sz[(sizeof(struct vblk_slot) == 64) ? 1 : -1];
+
 struct vblk_dev {
    u8 bus, dev, fn;
    volatile struct virtio_pci_common_cfg *common;
@@ -149,12 +181,13 @@ struct vblk_dev {
    volatile u8 *devcfg;
    u32 notify_off_mul;
    u16 qsize;
+   u16 nslots;
    u16 notify_off;
    volatile struct virtq_desc *desc;
    volatile struct virtq_avail *avail;
    volatile struct virtq_used *used;
-   struct virtio_blk_req *req;
-   u8 *status;
+   struct vblk_slot *slots;
+   u8 *bounce;
    u16 avail_idx;
    u16 last_used;
    u64 capacity;
@@ -328,12 +361,15 @@ static int virtio_setup_queue(struct vblk_dev *d)
       mmio_w16(&d->common->queue_size, qsz);
    }
    d->qsize = qsz;
+   d->nslots = (u16)(qsz / VBLK_DESCS_PER_REQ);
+   if (d->nslots < 1)
+      return 0;
    d->desc = zalloc_align(sizeof(struct virtq_desc) * qsz, 16);
    d->avail = zalloc_align(sizeof(struct virtq_avail), 2);
    d->used = zalloc_align(sizeof(struct virtq_used), 4);
-   d->req = zalloc_align(sizeof(struct virtio_blk_req), 16);
-   d->status = zalloc_align(64, 16);
-   if (!d->desc || !d->avail || !d->used || !d->req || !d->status)
+   d->slots = zalloc_align(sizeof(struct vblk_slot) * d->nslots, 64);
+   d->bounce = zalloc_align((unsigned)d->nslots * VBLK_BOUNCE, 4096);
+   if (!d->desc || !d->avail || !d->used || !d->slots || !d->bounce)
       return 0;
 
    mmio_w16(&d->common->queue_msix_vector,
@@ -355,60 +391,254 @@ static void virtio_notify(struct vblk_dev *d)
    mmio_w16(p, 0);
 }
 
-static int vblk_xfer(struct vblk_dev *d, u32 type, u64 sector,
-                     void *buf, u32 bytes)
+static void vblk_complete_slot(struct vblk_slot *s)
 {
-   u16 i, head = 0;
-   int spins = 0;
-   int has_data = (type != VIRTIO_BLK_T_FLUSH) && bytes != 0;
+   int res;
+
+   if (s->status == VIRTIO_BLK_S_OK)
+      res = (int)s->nbytes;
+   else
+      res = VBLK_EIO;
+   s->res = res;
+   s->done = 1;
+   if (s->waiter)
+      s->waiter->waiting = 0;
+}
+
+static void vblk_finish_async(struct vblk_dev *d, int si)
+{
+   struct vblk_slot *s = &d->slots[si];
+   void (*fn)(void *arg, int res);
+   void *arg;
+
+   if (!s->done || !s->busy || !s->done_fn)
+      return;
+   if (s->copy_back && s->user_buf && s->res > 0)
+      memcpy(s->user_buf, d->bounce + (unsigned)si * VBLK_BOUNCE,
+             (unsigned)s->res);
+   fn = s->done_fn;
+   arg = s->done_arg;
+   s->done_fn = 0;
+   s->busy = 0;
+   fn(arg, s->res);
+}
+
+static void vblk_harvest_locked(struct vblk_dev *d)
+{
+   u16 used_idx;
+
+   if (!d->used || !d->slots)
+      return;
+   virt_mb();
+   used_idx = d->used->idx;
+   while (d->last_used != used_idx) {
+      struct virtq_used_elem *e;
+      u16 head, si;
+      struct vblk_slot *s;
+
+      e = &d->used->ring[d->last_used % d->qsize];
+      head = (u16)e->id;
+      si = (u16)(head / VBLK_DESCS_PER_REQ);
+      d->last_used++;
+      if (si >= d->nslots)
+         continue;
+      s = &d->slots[si];
+      if (!s->busy)
+         continue;
+      vblk_complete_slot(s);
+   }
+}
+
+void virtio_blk_harvest(void)
+{
+   DWORD flags;
+   int i;
 
    if (!vblk_ready)
+      return;
+   storeflags(&flags);
+   stopints();
+   vblk_harvest_locked(&vblk);
+   restoreflags(flags);
+   for (i = 0; i < (int)vblk.nslots; i++)
+      vblk_finish_async(&vblk, i);
+}
+
+static int vblk_alloc_slot(struct vblk_dev *d)
+{
+   u16 i;
+   for (i = 0; i < d->nslots; i++) {
+      if (!d->slots[i].busy) {
+         d->slots[i].busy = 1;
+         d->slots[i].done = 0;
+         d->slots[i].res = 0;
+         d->slots[i].waiter = 0;
+         d->slots[i].done_fn = 0;
+         d->slots[i].done_arg = 0;
+         d->slots[i].user_buf = 0;
+         d->slots[i].copy_back = 0;
+         return (int)i;
+      }
+   }
+   return -1;
+}
+
+int virtio_blk_submit(u32 type, u64 sector, void *buf, u32 bytes,
+                      void (*done)(void *arg, int res), void *arg,
+                      int *slot_out)
+{
+   struct vblk_dev *d = &vblk;
+   struct vblk_slot *s;
+   DWORD flags;
+   unsigned start;
+   int si, has_data;
+   u16 head, i;
+
+   if (!vblk_ready)
+      return VBLK_EIO;
+   if (type == VIRTIO_BLK_T_FLUSH && !d->has_flush) {
+      if (done)
+         done(arg, 0);
+      if (slot_out)
+         *slot_out = -1;
       return 0;
+   }
+   if (type != VIRTIO_BLK_T_FLUSH) {
+      if (!buf || bytes == 0 || bytes > VBLK_BOUNCE ||
+          (bytes & (VIRTIO_BLK_SECTOR_SIZE - 1)))
+         return VBLK_EINVAL;
+      if (sector + bytes / VIRTIO_BLK_SECTOR_SIZE > d->capacity)
+         return VBLK_EINVAL;
+   }
+   if (type == VIRTIO_BLK_T_OUT && d->readonly)
+      return VBLK_EIO;
 
-   d->req->type = type;
-   d->req->reserved = 0;
-   d->req->sector = sector;
-   d->status[0] = 0xFF;
+   start = ticks;
+   for (;;) {
+      storeflags(&flags);
+      stopints();
+      vblk_harvest_locked(d);
+      si = vblk_alloc_slot(d);
+      if (si >= 0)
+         break;
+      restoreflags(flags);
+      for (i = 0; i < (int)d->nslots; i++)
+         vblk_finish_async(d, i);
+      if (ticks - start > VBLK_TIMEOUT_TICKS)
+         return VBLK_ENOMEM;
+      cpu_idle();
+   }
 
-   d->desc[0].addr = (u64)(uintptr)d->req;
-   d->desc[0].len = sizeof(struct virtio_blk_req);
-   d->desc[0].flags = VIRTQ_DESC_F_NEXT;
-   d->desc[0].next = 1;
+   s = &d->slots[si];
+   s->nbytes = (type == VIRTIO_BLK_T_FLUSH) ? 0 : bytes;
+   s->done_fn = done;
+   s->done_arg = arg;
+   s->user_buf = buf;
+   s->copy_back = (type == VIRTIO_BLK_T_IN) ? 1 : 0;
+   if (!done && current_process)
+      s->waiter = current_process;
+   s->req.type = type;
+   s->req.reserved = 0;
+   s->req.sector = sector;
+   s->status = 0xFF;
+
+   head = (u16)(si * VBLK_DESCS_PER_REQ);
+   has_data = (type != VIRTIO_BLK_T_FLUSH) && bytes != 0;
+
+   d->desc[head].addr = (u64)(uintptr)&s->req;
+   d->desc[head].len = sizeof(struct virtio_blk_req);
+   d->desc[head].flags = VIRTQ_DESC_F_NEXT;
+   d->desc[head].next = has_data ? (u16)(head + 1) : (u16)(head + 2);
 
    if (has_data) {
-      d->desc[1].addr = (u64)(uintptr)buf;
-      d->desc[1].len = bytes;
-      d->desc[1].flags = VIRTQ_DESC_F_NEXT;
+      u8 *bnc = d->bounce + (unsigned)si * VBLK_BOUNCE;
+      if (type == VIRTIO_BLK_T_OUT)
+         memcpy(bnc, buf, bytes);
+      d->desc[head + 1].addr = (u64)(uintptr)bnc;
+      d->desc[head + 1].len = bytes;
+      d->desc[head + 1].flags = VIRTQ_DESC_F_NEXT;
       if (type == VIRTIO_BLK_T_IN)
-         d->desc[1].flags |= VIRTQ_DESC_F_WRITE;
-      d->desc[1].next = 2;
-      i = 2;
-   } else
-      i = 1;
+         d->desc[head + 1].flags |= VIRTQ_DESC_F_WRITE;
+      d->desc[head + 1].next = (u16)(head + 2);
+   }
 
-   d->desc[i].addr = (u64)(uintptr)d->status;
+   i = (u16)(head + 2);
+   d->desc[i].addr = (u64)(uintptr)&s->status;
    d->desc[i].len = 1;
    d->desc[i].flags = VIRTQ_DESC_F_WRITE;
    d->desc[i].next = 0;
 
+   d->avail->flags = 0;
    d->avail->ring[d->avail_idx % d->qsize] = head;
    virt_mb();
    d->avail_idx++;
    d->avail->idx = d->avail_idx;
    virt_mb();
    virtio_notify(d);
+   restoreflags(flags);
 
-   while (d->used->idx == d->last_used) {
-      __asm__ volatile ("pause");
-      if (++spins > 20000000) {
-         printf("virtio-blk: timeout type=%d sector=%llu\n",
-                (int)type, (unsigned long long)sector);
-         return 0;
+   if (slot_out)
+      *slot_out = si;
+   return 0;
+}
+
+int virtio_blk_wait(int slot)
+{
+   struct vblk_dev *d = &vblk;
+   struct vblk_slot *s;
+   unsigned start;
+   int res;
+
+   if (!vblk_ready || slot < 0 || slot >= (int)d->nslots)
+      return VBLK_EINVAL;
+   s = &d->slots[slot];
+   start = ticks;
+   while (!s->done) {
+      virtio_blk_harvest();
+      if (s->done)
+         break;
+      if (ticks - start > VBLK_TIMEOUT_TICKS) {
+         printf("virtio-blk: timeout slot=%d\n", slot);
+         s->busy = 0;
+         return VBLK_EIO;
       }
+      cpu_idle();
    }
-   virt_mb();
-   d->last_used = d->used->idx;
-   return d->status[0] == VIRTIO_BLK_S_OK;
+   res = s->res;
+   if (s->copy_back && s->user_buf && res > 0)
+      memcpy(s->user_buf, d->bounce + (unsigned)slot * VBLK_BOUNCE,
+             (unsigned)res);
+   s->busy = 0;
+   return res;
+}
+
+static int vblk_xfer(struct vblk_dev *d, u32 type, u64 sector,
+                     void *buf, u32 bytes)
+{
+   int slot, n;
+
+   (void)d;
+   if (virtio_blk_submit(type, sector, buf, bytes, 0, 0, &slot) < 0)
+      return 0;
+   n = virtio_blk_wait(slot);
+   if (type == VIRTIO_BLK_T_FLUSH)
+      return n >= 0;
+   return n == (int)bytes;
+}
+
+static int vblk_rw_chunks(u32 type, u64 block, char *buf, u64 n)
+{
+   while (n) {
+      u32 chunk = (n > (u64)(VBLK_BOUNCE / VIRTIO_BLK_SECTOR_SIZE)) ?
+                  (u32)(VBLK_BOUNCE / VIRTIO_BLK_SECTOR_SIZE) : (u32)n;
+      if (!vblk_xfer(&vblk, type, block, buf,
+                     chunk * VIRTIO_BLK_SECTOR_SIZE))
+         return 0;
+      buf += chunk * VIRTIO_BLK_SECTOR_SIZE;
+      block += chunk;
+      n -= chunk;
+   }
+   return 1;
 }
 
 static int vblk_read_block(u64 block, char *buf, DWORD numblocks)
@@ -418,10 +648,7 @@ static int vblk_read_block(u64 block, char *buf, DWORD numblocks)
       return 0;
    if (block + n > vblk.capacity)
       return 0;
-   if (!vblk_xfer(&vblk, VIRTIO_BLK_T_IN, block, buf,
-                  (u32)(n * VIRTIO_BLK_SECTOR_SIZE)))
-      return 0;
-   return 1;
+   return vblk_rw_chunks(VIRTIO_BLK_T_IN, block, buf, n);
 }
 
 static int vblk_write_block(u64 block, char *buf, DWORD numblocks)
@@ -431,10 +658,7 @@ static int vblk_write_block(u64 block, char *buf, DWORD numblocks)
       return 0;
    if (block + n > vblk.capacity)
       return 0;
-   if (!vblk_xfer(&vblk, VIRTIO_BLK_T_OUT, block, buf,
-                  (u32)(n * VIRTIO_BLK_SECTOR_SIZE)))
-      return 0;
-   return 1;
+   return vblk_rw_chunks(VIRTIO_BLK_T_OUT, block, buf, n);
 }
 
 static int vblk_total_blocks(void)
@@ -487,7 +711,82 @@ static void vblk_selftest(void)
       return;
    }
    printf("virtio-blk: dma R/W LBA %llu [OK]\n", (unsigned long long)sector);
+
+   {
+      int s0, s1;
+      char *p0, *p1;
+      p0 = (char *)malloc(VIRTIO_BLK_SECTOR_SIZE);
+      p1 = (char *)malloc(VIRTIO_BLK_SECTOR_SIZE);
+      if (!p0 || !p1 ||
+          virtio_blk_submit(VIRTIO_BLK_T_IN, sector, p0,
+                            VIRTIO_BLK_SECTOR_SIZE, 0, 0, &s0) < 0 ||
+          virtio_blk_submit(VIRTIO_BLK_T_IN, sector, p1,
+                            VIRTIO_BLK_SECTOR_SIZE, 0, 0, &s1) < 0 ||
+          virtio_blk_wait(s0) != (int)VIRTIO_BLK_SECTOR_SIZE ||
+          virtio_blk_wait(s1) != (int)VIRTIO_BLK_SECTOR_SIZE ||
+          memcmp(p0, a, VIRTIO_BLK_SECTOR_SIZE) != 0 ||
+          memcmp(p1, a, VIRTIO_BLK_SECTOR_SIZE) != 0) {
+         printf("virtio-blk: pipelined reads [FAIL]\n");
+         printf("VIRTIO_BLK_FAIL\n");
+         return;
+      }
+      printf("virtio-blk: pipelined reads [OK]\n");
+   }
+
+   printf("virtio-blk: irqs=%d slots=%u\n",
+          vblk_irq_count, (unsigned)vblk.nslots);
+   if (vblk_irq_count > 0)
+      printf("VIRTIO_IRQ_OK\n");
    printf("VIRTIO_BLK_OK\n");
+}
+
+int virtio_blk_present(void)
+{
+   return vblk_ready;
+}
+
+int virtio_blk_readonly(void)
+{
+   return vblk.readonly;
+}
+
+u64 virtio_blk_sectors(void)
+{
+   return vblk.capacity;
+}
+
+int virtio_blk_rw(int write, u64 off, void *buf, u32 bytes)
+{
+   u64 sector;
+   int slot, n;
+
+   if (!vblk_ready)
+      return VBLK_EIO;
+   if (!buf || bytes == 0)
+      return 0;
+   if ((off | (u64)bytes) & (VIRTIO_BLK_SECTOR_SIZE - 1))
+      return VBLK_EINVAL;
+   sector = off / VIRTIO_BLK_SECTOR_SIZE;
+   n = virtio_blk_submit(write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN,
+                         sector, buf, bytes, 0, 0, &slot);
+   if (n < 0)
+      return n;
+   return virtio_blk_wait(slot);
+}
+
+int virtio_blk_flush(void)
+{
+   int slot, n;
+
+   if (!vblk_ready)
+      return 0;
+   if (!vblk.has_flush)
+      return 0;
+   n = virtio_blk_submit(VIRTIO_BLK_T_FLUSH, 0, 0, 0, 0, 0, &slot);
+   if (n < 0)
+      return n;
+   n = virtio_blk_wait(slot);
+   return n < 0 ? n : 0;
 }
 
 void virtio_blk_irq(void)
@@ -495,6 +794,8 @@ void virtio_blk_irq(void)
    vblk_irq_count++;
    if (vblk.isr)
       (void)*vblk.isr;
+   if (vblk_ready)
+      vblk_harvest_locked(&vblk);
    lapic_eoi();
 }
 

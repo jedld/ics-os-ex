@@ -12,6 +12,8 @@
 #define IORING_OP_READ    22
 #define IORING_OP_WRITE   23
 
+#define IORING_ENTER_GETEVENTS 1
+
 struct io_uring_sqe {
    uint8_t opcode;
    uint8_t flags;
@@ -79,6 +81,7 @@ int io_uring_queue_init(unsigned entries, struct io_uring *ring, unsigned flags)
 void io_uring_queue_exit(struct io_uring *ring);
 struct io_uring_sqe *io_uring_get_sqe(struct io_uring *ring);
 int io_uring_submit(struct io_uring *ring);
+int io_uring_submit_and_wait(struct io_uring *ring, unsigned wait_nr);
 int io_uring_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe);
 void io_uring_cqe_seen(struct io_uring *ring, struct io_uring_cqe *cqe);
 

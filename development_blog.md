@@ -2,6 +2,23 @@
 
 ## 2026-08-27 (Manila, UTC+8)
 
+### 21:15 — Async virtio completions into io_uring
+
+IRQ harvest of the virtio used ring replaces the 20M `pause` spin.
+Each in-flight request owns a 3-descriptor slot (hdr + data + status)
+plus a 4KiB kernel bounce buffer (user VA is not GPA-safe under a
+private PML4). Waiters `hlt` until MSI-X 0x42; copy-back and uring CQEs
+run in process context. `/dev/vblk` is a raw POSIX fd; uring
+READ/WRITE/FSYNC on it submit without waiting. `io_uring_enter` honors
+`min_complete`. Ramdisk SQEs stay inline.
+
+Tests: `test-virtio` (`irqs=3 slots=42`, `VIRTIO_IRQ_OK`, pipelined
+reads), `test-posixio` (`URING_VBLK_PASS`), `test-boot`, `test-smp`,
+`test-exec` PASS.
+
+**Activity now:** async uring on virtio is in. Next is `test-kbuild` or
+ring-3.
+
 ### 20:40 — I/O P3: POSIX fds and a synchronous io_uring subset
 
 Kernel per-process fd table: `open`/`close`/`read`/`write`/`lseek`/

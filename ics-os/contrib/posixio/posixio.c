@@ -99,8 +99,73 @@ int main(void)
       return fail("uring fsync");
    io_uring_cqe_seen(&ring, cqe);
 
+   sqe = io_uring_get_sqe(&ring);
+   sqe->opcode = IORING_OP_NOP;
+   sqe->user_data = 3;
+   if (io_uring_submit_and_wait(&ring, 1) != 1)
+      return fail("uring nop submit_and_wait");
+   if (io_uring_wait_cqe(&ring, &cqe) != 0 || cqe->res != 0)
+      return fail("uring nop");
+   io_uring_cqe_seen(&ring, cqe);
+
    io_uring_queue_exit(&ring);
    close(fd);
+
+   fd = open("/dev/vblk", O_RDWR);
+   if (fd >= 0) {
+      static char pa[512] __attribute__((aligned(16)));
+      static char pb[512] __attribute__((aligned(16)));
+      static char pc[512] __attribute__((aligned(16)));
+      int i;
+      printf("posixio: io_uring /dev/vblk DMA\n");
+      if (io_uring_queue_init(8, &ring, 0) != 0)
+         return fail("vblk uring setup");
+      for (i = 0; i < 512; i++)
+         pa[i] = (char)(0x5A ^ i);
+      sqe = io_uring_get_sqe(&ring);
+      sqe->opcode = IORING_OP_WRITE;
+      sqe->fd = fd;
+      sqe->off = 4096;
+      sqe->addr = (uint64_t)(unsigned long)pa;
+      sqe->len = 512;
+      sqe->user_data = 10;
+      if (io_uring_submit_and_wait(&ring, 1) != 1)
+         return fail("vblk uring write submit");
+      if (io_uring_wait_cqe(&ring, &cqe) != 0 || cqe->res != 512)
+         return fail("vblk uring write");
+      io_uring_cqe_seen(&ring, cqe);
+
+      memset(pb, 0, sizeof(pb));
+      memset(pc, 0, sizeof(pc));
+      sqe = io_uring_get_sqe(&ring);
+      sqe->opcode = IORING_OP_READ;
+      sqe->fd = fd;
+      sqe->off = 4096;
+      sqe->addr = (uint64_t)(unsigned long)pb;
+      sqe->len = 512;
+      sqe->user_data = 11;
+      sqe = io_uring_get_sqe(&ring);
+      sqe->opcode = IORING_OP_READ;
+      sqe->fd = fd;
+      sqe->off = 4096;
+      sqe->addr = (uint64_t)(unsigned long)pc;
+      sqe->len = 512;
+      sqe->user_data = 12;
+      if (io_uring_submit_and_wait(&ring, 2) != 2)
+         return fail("vblk uring pipelined read submit");
+      if (io_uring_wait_cqe(&ring, &cqe) != 0 || cqe->res != 512)
+         return fail("vblk uring read0");
+      io_uring_cqe_seen(&ring, cqe);
+      if (io_uring_wait_cqe(&ring, &cqe) != 0 || cqe->res != 512)
+         return fail("vblk uring read1");
+      io_uring_cqe_seen(&ring, cqe);
+      if (memcmp(pa, pb, 512) != 0 || memcmp(pa, pc, 512) != 0)
+         return fail("vblk uring mismatch");
+      io_uring_queue_exit(&ring);
+      close(fd);
+      printf("URING_VBLK_PASS\n");
+   }
+
    printf("POSIXIO_PASS\n");
    printf("URING_PASS\n");
    return 0;

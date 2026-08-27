@@ -1,24 +1,30 @@
 /*
- * POSIX file descriptors and a synchronous io_uring subset (I/O P3).
+ * POSIX file descriptors and io_uring (I/O P3 + async virtio completions).
  *
  * DEX fopen/fread stay as compat. New syscalls allocate per-process fds
- * wrapping file_PCB. io_uring_setup/enter process SQEs inline (one syscall
- * per batch); completions go on the CQ. Ring memory is identity-mapped so
- * user code uses the VA in io_uring_params.sq_off.user_addr instead of mmap.
+ * wrapping file_PCB. Cache hits and ramdisk SQEs complete inline.
+ * /dev/vblk READ/WRITE/FSYNC SQEs are submitted to virtio-blk and the
+ * MSI-X harvest posts CQEs. io_uring_enter honors min_complete and
+ * IORING_ENTER_GETEVENTS. Ring VA is params.sq_off.user_addr (no mmap).
  */
 #include "../dextypes.h"
 #include "../process/process.h"
 #include "../console/tty.h"
 #include "../iomgr/blkcache.h"
 #include "../iomgr/iosched.h"
+#include "../hardware/virtio/virtio.h"
+#include "../hardware/virtio/virtio_blk.h"
+#include "../stdlib/time.h"
 #include "posixfd.h"
 
 extern void *malloc(unsigned int);
 extern void free(void *);
 extern void *memset(void *s, int c, unsigned int n);
 extern void *memcpy(void *d, const void *s, unsigned int n);
+extern int strcmp(const char *s, const char *t);
 extern void putc(char c);
 extern int vfs_setbuffer(file_PCB *handle, char *buffer, int bufsize, int mode);
+extern unsigned int ticks;
 
 #define EPERM   1
 #define ENOENT  2
@@ -30,6 +36,20 @@ extern int vfs_setbuffer(file_PCB *handle, char *buffer, int bufsize, int mode);
 #define ENOSYS  38
 
 #define URING_MAX 64
+#define URING_QUEUED  1
+#define URING_WAIT_TICKS 500
+#define VBLK_MAX_XFER 4096
+
+typedef struct ics_uring ics_uring;
+
+typedef struct {
+   ics_uring *ring;
+   u64 user_data;
+} uring_blk_cb;
+
+typedef struct {
+   u64 off;
+} fd_blk_t;
 
 typedef struct __attribute__((packed)) {
    BYTE opcode;
@@ -54,7 +74,7 @@ typedef struct __attribute__((packed)) {
    DWORD flags;
 } io_uring_cqe;
 
-typedef struct {
+struct ics_uring {
    DWORD sq_head;
    DWORD sq_tail;
    DWORD sq_ring_mask;
@@ -70,7 +90,9 @@ typedef struct {
    DWORD sq_array[URING_MAX];
    io_uring_cqe cqes[URING_MAX];
    io_uring_sqe sqes[URING_MAX];
-} ics_uring;
+   PCB386 *waiter;
+   uring_blk_cb blkcb[URING_MAX];
+};
 
 typedef struct __attribute__((packed)) {
    DWORD head, tail, ring_mask, ring_entries, flags, dropped, array, resv1;
@@ -126,6 +148,45 @@ static tty_t *fd_istty(int fd)
    return 0;
 }
 
+static int path_is_vblk(const char *p)
+{
+   return p && (strcmp(p, "/dev/vblk") == 0 || strcmp(p, "vblk") == 0);
+}
+
+static fd_blk_t *fd_blk(int fd)
+{
+   if (!current_process || fd < 0 || fd >= FD_MAX)
+      return 0;
+   if (current_process->fds[fd].type != FD_BLK)
+      return 0;
+   return (fd_blk_t *)current_process->fds[fd].ptr;
+}
+
+static long vblk_posix_rw(int write, u64 off, void *buf, unsigned long len)
+{
+   u64 cap, end;
+   int n;
+
+   if (!virtio_blk_present())
+      return -EIO;
+   if (!buf || len == 0)
+      return 0;
+   if ((off | (u64)len) & (VIRTIO_BLK_SECTOR_SIZE - 1))
+      return -EINVAL;
+   cap = virtio_blk_sectors() * (u64)VIRTIO_BLK_SECTOR_SIZE;
+   if (off >= cap)
+      return 0;
+   end = off + len;
+   if (end > cap)
+      len = (unsigned long)(cap - off);
+   if (len > VBLK_MAX_XFER)
+      len = VBLK_MAX_XFER;
+   if (write && virtio_blk_readonly())
+      return -EIO;
+   n = virtio_blk_rw(write, off, buf, (u32)len);
+   return n;
+}
+
 static int posix_to_vfs_mode(int flags)
 {
    if (flags & ICSOS_O_APPEND)
@@ -144,6 +205,24 @@ int sys_open(const char *path, int flags, int mode)
    (void)mode;
    if (!path || !current_process)
       return -EINVAL;
+   if (path_is_vblk(path)) {
+      fd_blk_t *b;
+      if (!virtio_blk_present())
+         return -ENOENT;
+      if ((flags & ICSOS_O_ACCMODE) != ICSOS_O_RDONLY &&
+          virtio_blk_readonly())
+         return -EIO;
+      fd = fd_alloc_slot();
+      if (fd < 0)
+         return fd;
+      b = (fd_blk_t *)malloc(sizeof(fd_blk_t));
+      if (!b)
+         return -ENOMEM;
+      b->off = 0;
+      current_process->fds[fd].type = FD_BLK;
+      current_process->fds[fd].ptr = b;
+      return fd;
+   }
    fd = fd_alloc_slot();
    if (fd < 0)
       return fd;
@@ -182,6 +261,14 @@ int sys_close(int fd)
       current_process->fds[fd].ptr = 0;
       return 0;
    }
+   if (current_process->fds[fd].type == FD_BLK) {
+      fd_blk_t *b = (fd_blk_t *)current_process->fds[fd].ptr;
+      current_process->fds[fd].type = FD_NONE;
+      current_process->fds[fd].ptr = 0;
+      if (b)
+         free(b);
+      return 0;
+   }
    return -EBADF;
 }
 
@@ -195,6 +282,15 @@ long sys_read(int fd, void *buf, long n)
    t = fd_istty(fd);
    if (t)
       return tty_read(t, (char *)buf, (int)n);
+   {
+      fd_blk_t *b = fd_blk(fd);
+      if (b) {
+         long got = vblk_posix_rw(0, b->off, buf, (unsigned long)n);
+         if (got > 0)
+            b->off += (u64)got;
+         return got;
+      }
+   }
    f = fd_file(fd);
    if (!f)
       return -EBADF;
@@ -213,6 +309,15 @@ long sys_write(int fd, const void *buf, long n)
       return tty_write(t, (const char *)buf, (int)n);
    if (current_process && current_process->ctty && (fd == 1 || fd == 2))
       return tty_write(current_process->ctty, (const char *)buf, (int)n);
+   {
+      fd_blk_t *b = fd_blk(fd);
+      if (b) {
+         long got = vblk_posix_rw(1, b->off, (void *)buf, (unsigned long)n);
+         if (got > 0)
+            b->off += (u64)got;
+         return got;
+      }
+   }
    f = fd_file(fd);
    if (f)
       return fwrite((char *)buf, 1, (int)n, f);
@@ -227,7 +332,25 @@ long sys_write(int fd, const void *buf, long n)
 
 long sys_lseek(int fd, long off, int whence)
 {
-   file_PCB *f = fd_file(fd);
+   file_PCB *f;
+   fd_blk_t *b = fd_blk(fd);
+   if (b) {
+      u64 cap = virtio_blk_sectors() * (u64)VIRTIO_BLK_SECTOR_SIZE;
+      s64 noff;
+      if (whence == SEEK_SET)
+         noff = off;
+      else if (whence == SEEK_CUR)
+         noff = (s64)b->off + off;
+      else if (whence == SEEK_END)
+         noff = (s64)cap + off;
+      else
+         return -EINVAL;
+      if (noff < 0)
+         return -EINVAL;
+      b->off = (u64)noff;
+      return (long)b->off;
+   }
+   f = fd_file(fd);
    if (!f)
       return -EBADF;
    fseek(f, off, whence);
@@ -262,33 +385,90 @@ static long do_iov_rw(file_PCB *f, const struct k_iovec *iov, int iovcnt,
 
 long sys_preadv(int fd, const struct k_iovec *iov, int iovcnt, long offset)
 {
-   file_PCB *f = fd_file(fd);
-   long old, n;
-   if (!f)
-      return -EBADF;
-   old = ftell(f);
-   fseek(f, offset, SEEK_SET);
-   n = do_iov_rw(f, iov, iovcnt, 0);
-   fseek(f, old, SEEK_SET);
-   return n;
+   file_PCB *f;
+   fd_blk_t *b = fd_blk(fd);
+   long total = 0;
+   int i;
+
+   if (b) {
+      u64 off = (u64)offset;
+      if (!iov || iovcnt <= 0)
+         return -EINVAL;
+      for (i = 0; i < iovcnt; i++) {
+         long n;
+         if (!iov[i].iov_base && iov[i].iov_len)
+            return -EINVAL;
+         if (iov[i].iov_len == 0)
+            continue;
+         n = vblk_posix_rw(0, off, iov[i].iov_base, iov[i].iov_len);
+         if (n < 0)
+            return total ? total : n;
+         total += n;
+         off += (u64)n;
+         if ((unsigned long)n < iov[i].iov_len)
+            break;
+      }
+      return total;
+   }
+   f = fd_file(fd);
+   {
+      long old, n;
+      if (!f)
+         return -EBADF;
+      old = ftell(f);
+      fseek(f, offset, SEEK_SET);
+      n = do_iov_rw(f, iov, iovcnt, 0);
+      fseek(f, old, SEEK_SET);
+      return n;
+   }
 }
 
 long sys_pwritev(int fd, const struct k_iovec *iov, int iovcnt, long offset)
 {
-   file_PCB *f = fd_file(fd);
-   long old, n;
-   if (!f)
-      return -EBADF;
-   old = ftell(f);
-   fseek(f, offset, SEEK_SET);
-   n = do_iov_rw(f, iov, iovcnt, 1);
-   fseek(f, old, SEEK_SET);
-   return n;
+   file_PCB *f;
+   fd_blk_t *b = fd_blk(fd);
+   long total = 0;
+   int i;
+
+   if (b) {
+      u64 off = (u64)offset;
+      if (!iov || iovcnt <= 0)
+         return -EINVAL;
+      for (i = 0; i < iovcnt; i++) {
+         long n;
+         if (!iov[i].iov_base && iov[i].iov_len)
+            return -EINVAL;
+         if (iov[i].iov_len == 0)
+            continue;
+         n = vblk_posix_rw(1, off, iov[i].iov_base, iov[i].iov_len);
+         if (n < 0)
+            return total ? total : n;
+         total += n;
+         off += (u64)n;
+         if ((unsigned long)n < iov[i].iov_len)
+            break;
+      }
+      return total;
+   }
+   f = fd_file(fd);
+   {
+      long old, n;
+      if (!f)
+         return -EBADF;
+      old = ftell(f);
+      fseek(f, offset, SEEK_SET);
+      n = do_iov_rw(f, iov, iovcnt, 1);
+      fseek(f, old, SEEK_SET);
+      return n;
+   }
 }
 
 int sys_fsync(int fd)
 {
-   file_PCB *f = fd_file(fd);
+   file_PCB *f;
+   if (fd_blk(fd))
+      return virtio_blk_flush();
+   f = fd_file(fd);
    if (!f)
       return -EBADF;
    if (!fflush(f))
@@ -313,6 +493,12 @@ int sys_fstat_fd(int fd, void *statbuf)
    if (fd_istty(fd)) {
       memset(st, 0, sizeof(*st));
       st->st_mode = 0020000 | 0666; /* S_IFCHR */
+      return 0;
+   }
+   if (fd_blk(fd)) {
+      memset(st, 0, sizeof(*st));
+      st->st_mode = 0060000 | 0666; /* S_IFBLK */
+      st->st_size = (long)(virtio_blk_sectors() * (u64)VIRTIO_BLK_SECTOR_SIZE);
       return 0;
    }
    if (!f)
@@ -396,6 +582,117 @@ int sys_io_uring_setup(unsigned entries, void *params)
    return fd;
 }
 
+static void uring_vblk_done(void *arg, int res)
+{
+   uring_blk_cb *cb = (uring_blk_cb *)arg;
+   ics_uring *r;
+   DWORD cq_tail;
+   io_uring_cqe *cqe;
+
+   if (!cb || !cb->ring)
+      return;
+   r = cb->ring;
+   cq_tail = r->cq_tail;
+   cqe = &r->cqes[cq_tail & r->cq_ring_mask];
+   cqe->user_data = cb->user_data;
+   cqe->res = res;
+   cqe->flags = 0;
+   r->cq_tail = cq_tail + 1;
+   cb->ring = 0;
+   if (r->waiter)
+      r->waiter->waiting = 0;
+}
+
+static int uring_alloc_cb(ics_uring *r)
+{
+   int i;
+   for (i = 0; i < URING_MAX; i++)
+      if (!r->blkcb[i].ring)
+         return i;
+   return -1;
+}
+
+static int uring_queue_vblk(ics_uring *r, io_uring_sqe *sqe,
+                            u32 type, void *buf, u32 bytes, u64 off)
+{
+   int i, n;
+   u64 sector;
+
+   if ((off | (u64)bytes) & (VIRTIO_BLK_SECTOR_SIZE - 1))
+      return -EINVAL;
+   if (!virtio_blk_present())
+      return -EIO;
+   i = uring_alloc_cb(r);
+   if (i < 0)
+      return -ENOMEM;
+   r->blkcb[i].ring = r;
+   r->blkcb[i].user_data = sqe->user_data;
+   sector = off / VIRTIO_BLK_SECTOR_SIZE;
+   n = virtio_blk_submit(type, sector, buf, bytes,
+                         uring_vblk_done, &r->blkcb[i], 0);
+   if (n < 0) {
+      r->blkcb[i].ring = 0;
+      return n;
+   }
+   return URING_QUEUED;
+}
+
+/* 0 = not a vblk SQE (caller runs it inline). URING_QUEUED or -errno. */
+static int uring_try_vblk(ics_uring *r, io_uring_sqe *sqe)
+{
+   int fd;
+   void *buf;
+   u32 bytes, type;
+   u64 off;
+
+   if (!r || !sqe)
+      return 0;
+   fd = sqe->fd;
+   if (!current_process || fd < 0 || fd >= FD_MAX)
+      return 0;
+   if (current_process->fds[fd].type != FD_BLK)
+      return 0;
+
+   if (sqe->opcode == IORING_OP_FSYNC) {
+      int i, n;
+      i = uring_alloc_cb(r);
+      if (i < 0)
+         return -ENOMEM;
+      r->blkcb[i].ring = r;
+      r->blkcb[i].user_data = sqe->user_data;
+      n = virtio_blk_submit(VIRTIO_BLK_T_FLUSH, 0, 0, 0,
+                            uring_vblk_done, &r->blkcb[i], 0);
+      if (n < 0) {
+         r->blkcb[i].ring = 0;
+         return n;
+      }
+      return URING_QUEUED;
+   }
+
+   if (sqe->opcode == IORING_OP_READ || sqe->opcode == IORING_OP_WRITE) {
+      buf = (void *)(uintptr)sqe->addr;
+      bytes = sqe->len;
+      off = sqe->off;
+      if (off == ~(u64)0) {
+         fd_blk_t *b = fd_blk(fd);
+         off = b ? b->off : 0;
+      }
+      type = (sqe->opcode == IORING_OP_WRITE) ?
+             VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+      return uring_queue_vblk(r, sqe, type, buf, bytes, off);
+   }
+   if (sqe->opcode == IORING_OP_READV || sqe->opcode == IORING_OP_WRITEV) {
+      const struct k_iovec *iov = (const struct k_iovec *)(uintptr)sqe->addr;
+      if (!iov || sqe->len != 1)
+         return 0;
+      type = (sqe->opcode == IORING_OP_WRITEV) ?
+             VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+      return uring_queue_vblk(r, sqe, type, iov[0].iov_base,
+                              (u32)iov[0].iov_len, sqe->off);
+   }
+   return 0;
+}
+
 static int uring_do_sqe(io_uring_sqe *sqe)
 {
    struct k_iovec iov;
@@ -447,8 +744,7 @@ int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
 {
    ics_uring *r;
    unsigned i, done = 0;
-   (void)min_complete;
-   (void)flags;
+
    if (!current_process || fd < 0 || fd >= FD_MAX)
       return -EBADF;
    if (current_process->fds[fd].type != FD_URING)
@@ -463,8 +759,7 @@ int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
       DWORD mask = r->sq_ring_mask;
       DWORD idx;
       io_uring_sqe *sqe;
-      io_uring_cqe *cqe;
-      DWORD cq_tail;
+      int v;
 
       if (head == tail)
          break;
@@ -472,14 +767,33 @@ int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
       if (idx > mask)
          idx &= mask;
       sqe = &r->sqes[idx];
-      cq_tail = r->cq_tail;
-      cqe = &r->cqes[cq_tail & r->cq_ring_mask];
-      cqe->user_data = sqe->user_data;
-      cqe->res = uring_do_sqe(sqe);
-      cqe->flags = 0;
-      r->cq_tail = cq_tail + 1;
+      v = uring_try_vblk(r, sqe);
+      if (v != URING_QUEUED) {
+         io_uring_cqe *cqe;
+         DWORD cq_tail = r->cq_tail;
+         cqe = &r->cqes[cq_tail & r->cq_ring_mask];
+         cqe->user_data = sqe->user_data;
+         cqe->res = (v < 0) ? v : uring_do_sqe(sqe);
+         cqe->flags = 0;
+         r->cq_tail = cq_tail + 1;
+      }
       r->sq_head = head + 1;
       done++;
    }
+
+   if (min_complete) {
+      unsigned start = ticks;
+      r->waiter = current_process;
+      while ((r->cq_tail - r->cq_head) < min_complete) {
+         virtio_blk_harvest();
+         if ((r->cq_tail - r->cq_head) >= min_complete)
+            break;
+         if (ticks - start > URING_WAIT_TICKS)
+            break;
+         cpu_idle();
+      }
+      r->waiter = 0;
+   }
+   (void)flags;
    return (int)done;
 }

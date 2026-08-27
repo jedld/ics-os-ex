@@ -710,6 +710,17 @@ int io_uring_submit(struct io_uring *ring)
    return io_uring_enter(ring->ring_fd, tail - head, 0, 0);
 }
 
+int io_uring_submit_and_wait(struct io_uring *ring, unsigned wait_nr)
+{
+   unsigned head, tail;
+   if (!ring)
+      return -1;
+   head = *ring->sq_head;
+   tail = *ring->sq_tail;
+   return io_uring_enter(ring->ring_fd, tail - head, wait_nr,
+                         IORING_ENTER_GETEVENTS);
+}
+
 int io_uring_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe)
 {
    unsigned head, tail, mask;
@@ -717,8 +728,14 @@ int io_uring_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe)
       return -1;
    head = *ring->cq_head;
    tail = *ring->cq_tail;
-   if (head == tail)
-      return -1;
+   if (head == tail) {
+      if (io_uring_enter(ring->ring_fd, 0, 1, IORING_ENTER_GETEVENTS) < 0)
+         return -1;
+      head = *ring->cq_head;
+      tail = *ring->cq_tail;
+      if (head == tail)
+         return -1;
+   }
    mask = *ring->cq_mask;
    *cqe = &ring->cqes[head & mask];
    return 0;
