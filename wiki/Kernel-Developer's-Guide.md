@@ -77,7 +77,7 @@ Kernel source directories.
 |`filesystem/`  |Sources for filesystem support (fat12 and iso9660)|
 |`grub/`        |Files needed by grub|
 |`hardware/`    |Sources for hardware device drivers (ATA PIO, UHCI, virtio-blk, …)|
-|`iomgr/`       |Input/Output manager code|
+|`iomgr/`       |I/O manager (bio, per-device blk-mq lock, 4KiB page cache)|
 |`memory/`      |Memory management routines|
 |`mnt/`         |Temporary mount directory|
 |`module/`      |Implementation of supported executable file formats (PE, ELF)|

@@ -1,7 +1,7 @@
 //**************************************************************************
 //DEX32 Disk drive scheduler
 //April 3, 2003 by Joseph Emmanuel Dayo
-//P0 (2026): per-device lock, 64-bit LBA, no global lock across the transfer.
+//P2: bio + one blk-mq hctx per device, 64-bit LBA, no global lock across the transfer.
 //**************************************************************************
 
 
@@ -48,6 +48,8 @@ DWORD iomgr_flushmgr();
 DWORD iomgr_diskmgr();
 void  iomgr_register_diskmgr(DWORD pid);
 void  iomgr_request_flush(void);
+void  blk_mq_lock(int deviceid);
+void  blk_mq_unlock(int deviceid);
 IOrequest *IOmgr_obtainjob(int deviceid, u64 near_lba);
 int   dex32_IOcomplete(DWORD handle);
 void  dex32_closeIO(DWORD handle);

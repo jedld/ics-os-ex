@@ -205,7 +205,8 @@ test-iobench: kernel/Kernel64.bin apps/tcc.exe
 		-cdrom /tmp/icsos-iobench.iso -boot d > /tmp/icsos-iobench.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-iobench.log
 	@grep -aq "iobench: size=" /tmp/icsos-iobench.log
-	@grep -aqE "IOBENCH_PASS|IOBENCH_WARN" /tmp/icsos-iobench.log
+	@grep -aq "IOBENCH_PASS" /tmp/icsos-iobench.log
+	@grep -aq "IOBENCH_CACHE_OK" /tmp/icsos-iobench.log
 	@! grep -aq "iobench: FAIL" /tmp/icsos-iobench.log
 	@echo "test-iobench PASS"
 

@@ -564,7 +564,7 @@ void console_iobench(void)
 {
    const char *path = "/icsos/apps/tcc.exe";
    DWORD t0, t1, size = 0, i;
-   DWORD hits, misses, fills, slots;
+   DWORD hits, misses, fills, slots, merged;
    void *buf;
    DWORD cold_ms, warm_ms, mmap_ms;
 
@@ -604,6 +604,7 @@ void console_iobench(void)
    mmap_ms = (t1 - t0) / (i ? i : 1);
 
    blkcache_stats(&hits, &misses, &fills, &slots);
+   blkcache_mq_stats(&merged);
    printf("iobench: size=%u bytes\n", (unsigned)size);
    printf("iobench: cold_map=%u ms  warm_map=%u ms  avg3=%u ms\n",
           (unsigned)cold_ms, (unsigned)warm_ms, (unsigned)mmap_ms);
@@ -613,8 +614,11 @@ void console_iobench(void)
              (unsigned)((cold_ms * 10 / warm_ms) % 10));
    else if (cold_ms > warm_ms)
       printf("iobench: warm was <1 timer tick (good)\n");
-   printf("iobench: cache hits=%u misses=%u fills=%u slots=%u\n",
-          (unsigned)hits, (unsigned)misses, (unsigned)fills, (unsigned)slots);
+   printf("iobench: cache hits=%u misses=%u fills=%u slots=%u merged=%u\n",
+          (unsigned)hits, (unsigned)misses, (unsigned)fills,
+          (unsigned)slots, (unsigned)merged);
+   if (hits > 0)
+      printf("IOBENCH_CACHE_OK\n");
    if (warm_ms <= cold_ms)
       printf("IOBENCH_PASS\n");
    else

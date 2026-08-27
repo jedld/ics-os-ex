@@ -125,13 +125,19 @@ Ring-3: user CS is recorded as `USER_CODE` (64-bit DPL=3 GDT). Software
 context switch still uses kernel CS until TSS.rsp0 + `iretq` is wired;
 `int 0x30` already has DPL=3.
 
-## Block I/O (P0 + P1)
+## Block I/O (P0–P2)
 
 `dex32_requestIO` runs the device transfer in the caller under a
-**per-device lock**, not `IOrequest_busy`. Task switching stays enabled
+**per-device blk-mq lock**, not `IOrequest_busy`. Task switching stays enabled
 across ATA PIO. `IOrequest.lba` is 64-bit. `disk_mgr` sleeps (`sleep(1)` +
 `hlt`) between flush passes; `iomgr_request_flush()` clears its `waiting`
 flag. `make test-iobench` maps `/icsos/apps/tcc.exe` from the CD.
+
+**P2 page cache:** `iomgr/blkcache.c` is a 512×4KiB write-back cache indexed
+by `(device, byte_offset >> 12)`. CD 2048-byte sectors occupy two per page
+(the old `cd*` skip is gone). Misses merge into aligned 4KiB device reads.
+`bio_submit_sync()` is the internal submit path. Dirty pages flush from
+`disk_mgr` / `fclose`. Ramdisk still uses its own `getcache`/`putcache`.
 
 **virtio-blk** (`hardware/virtio/virtio_blk.c`) is the VM production path:
 modern virtio-pci caps, one DMA request queue, MSI-X vector **0x42**,
@@ -149,7 +155,7 @@ The page allocator skips that reserved-range table; the linker
 closed 32MiB interval; `sbrk` must not `mempop`. Add new regions to
 the header first.
 
-Next: blk-mq lite + 4KiB page cache (P2), then POSIX fds / io_uring (P3).
+Next: POSIX fds / io_uring (P3).
 
 ## Key files
 

@@ -6,11 +6,14 @@
 //device transfer.  A per-device lock serializes ATA/UHCI (not SMP-safe to
 //issue two PIO commands at once).  disk_mgr sleeps between flush passes
 //instead of spinning; iomgr_request_flush() wakes it.
+//P2: bio_submit_sync + one blk-mq hctx per device; 4KiB page cache with
+//write-back.  CD is cached (ISO sectors are 2048, two per page).
 //**************************************************************************
 
 #include "../devmgr/dex32_devmgr.h"
 #include "iosched.h"
 #include "blkcache.h"
+#include "bio.h"
 #include "../stdlib/time.h"
 #include "../process/process.h"
 
@@ -32,6 +35,7 @@ int flushing=0,flushok=1;
 
 sync_sharedvar IOrequest_busy;
 static sync_sharedvar io_devlock[MAXDEVICES];
+static DWORD blk_mq_dispatched[MAXDEVICES];
 static DWORD iomgr_diskmgr_pid;
 
 extern PCB386 *ps_findprocess(DWORD processid);
@@ -46,6 +50,16 @@ static void iomgr_unlockdev(int deviceid)
 {
    if (deviceid >= 0 && deviceid < MAXDEVICES)
       sync_leavecrit(&io_devlock[deviceid]);
+}
+
+void blk_mq_lock(int deviceid)
+{
+   iomgr_lockdev(deviceid);
+}
+
+void blk_mq_unlock(int deviceid)
+{
+   iomgr_unlockdev(deviceid);
 }
 
 void iomgr_register_diskmgr(DWORD pid)
@@ -67,12 +81,12 @@ void iomgr_request_flush(void)
 DWORD iomgr_init()
  {
    devmgr_iomgr iomgr;
-   int i;
    IOjob=0;
    cur=0;
    iomgr_diskmgr_pid = 0;
    memset(&IOrequest_busy,0,sizeof(sync_sharedvar));
    memset(io_devlock, 0, sizeof(io_devlock));
+   memset(blk_mq_dispatched, 0, sizeof(blk_mq_dispatched));
 
    blkcache_init();
 
@@ -92,11 +106,13 @@ DWORD iomgr_flushmgr()
  {
  int ret;
 
+ if (!blkcache_flush())
+    printf("Error writing page cache. Data might be lost.\n");
 
  ret = devmgr_flushblocks();
  if (ret==-1)
     printf("Error writing to device %d. Data might be lost.\n",ret);
-
+ return 1;
  };
 
 static u64 iomgr_execjob(IOrequest *ptr);
@@ -118,7 +134,8 @@ DWORD iomgr_diskmgr()
                    {
                      forceflush=0;
 
-                     if (shouldflush()) iomgr_flushmgr();
+                     if (shouldflush() || blkcache_has_dirty())
+                        iomgr_flushmgr();
                      flush_counter=time();
                     };
           /* Yield a scheduler pass, then halt until the next IRQ. */
@@ -130,7 +147,9 @@ DWORD iomgr_diskmgr()
       if (ptr!=0)
       {
           do {
+             iomgr_lockdev(ptr->deviceid);
              lastjob=iomgr_execjob(ptr);
+             iomgr_unlockdev(ptr->deviceid);
              ptr= IOmgr_obtainjob(0, lastjob);
 
            }
@@ -158,17 +177,13 @@ static u64 iomgr_execjob(IOrequest *ptr)
       return ptr->lba;
    };
 
+   if (ptr->deviceid >= 0 && ptr->deviceid < MAXDEVICES)
+      blk_mq_dispatched[ptr->deviceid]++;
+
    if (ptr->type==IO_READ)
    {
-      if (myblock->read_block(ptr->lba,ptr->buf,ptr->num_of_blocks) > 0)
-      {
+      if (blkcache_read(ptr->deviceid, ptr->lba, ptr->num_of_blocks, ptr->buf))
          ptr->status=IO_COMPLETE;
-         if ((myblock->hdr.name[0] != 'c' || myblock->hdr.name[1] != 'd') &&
-             myblock->putcache == 0) {
-            blkcache_put(ptr->deviceid, ptr->lba,
-                         ptr->num_of_blocks, ptr->buf);
-         }
-      }
       else
          ptr->status=IO_ERROR;
    }
@@ -179,7 +194,8 @@ static u64 iomgr_execjob(IOrequest *ptr)
          printf("IO ERROR: Device %d does not support writes!\n", ptr->deviceid);
          ptr->status=IO_ERROR;
       }
-      else if (myblock->write_block(ptr->lba,ptr->buf,ptr->num_of_blocks))
+      else if (blkcache_write(ptr->deviceid, ptr->lba,
+                             ptr->num_of_blocks, ptr->buf))
          ptr->status=IO_COMPLETE;
       else
          ptr->status=IO_ERROR;
@@ -320,11 +336,43 @@ DWORD dex32_requestIO(int deviceid,int type,u64 block,DWORD numblocks, void *buf
       ptr->time=IOrequest_time++;
       ptr->num_of_blocks = numblocks;
 
-      /* Per-device lock only.  Do not hold IOrequest_busy or disable
-         task switching across the transfer — that serialized the whole
-         system on ATA PIO. */
-      iomgr_lockdev(deviceid);
-      iomgr_execjob(ptr);
-      iomgr_unlockdev(deviceid);
+      {
+         struct bio b;
+         memset(&b, 0, sizeof(b));
+         b.deviceid = deviceid;
+         b.op = (type == IO_WRITE) ? BIO_WRITE : BIO_READ;
+         b.sector = block;
+         b.nsect = numblocks;
+         b.buf = buf;
+         bio_submit_sync(&b);
+         ptr->status = (b.status == BIO_OK) ? IO_COMPLETE : IO_ERROR;
+      }
       return ptr->rID;
 ;}
+
+int bio_submit_sync(struct bio *bio)
+{
+   IOrequest req;
+
+   if (!bio)
+      return 0;
+   if (bio->op == BIO_FLUSH) {
+      iomgr_flushmgr();
+      bio->status = BIO_OK;
+      return 1;
+   }
+   memset(&req, 0, sizeof(req));
+   req.deviceid = bio->deviceid;
+   req.type = (bio->op == BIO_WRITE) ? IO_WRITE : IO_READ;
+   req.lba = bio->sector;
+   req.num_of_blocks = bio->nsect;
+   req.buf = bio->buf;
+   req.status = IO_PENDING;
+
+   iomgr_lockdev(bio->deviceid);
+   iomgr_execjob(&req);
+   iomgr_unlockdev(bio->deviceid);
+
+   bio->status = (req.status == IO_COMPLETE) ? BIO_OK : BIO_ERR;
+   return bio->status == BIO_OK;
+}

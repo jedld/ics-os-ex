@@ -55,7 +55,7 @@ ramdisk.o: filesystem/ramdisk.c filesystem/ramdisk.h
 devfs.o:
 	$(CC) $(CFLAGS) -o devfs.o filesystem/devfs.c
 	
-iomgr.o: iomgr/iosched.c iomgr/iosched.h stdlib/time.h iomgr/blkcache.h
+iomgr.o: iomgr/iosched.c iomgr/iosched.h iomgr/bio.h stdlib/time.h iomgr/blkcache.h
 	$(CC) $(CFLAGS) -o iomgr.o iomgr/iosched.c
 
 blkcache.o: iomgr/blkcache.c iomgr/blkcache.h

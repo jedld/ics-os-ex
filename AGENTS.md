@@ -35,7 +35,7 @@ Useful individual targets (from `ics-os/`):
 | `test-exec` | `hello.exe` → `Hello World` + `EXEC_TEST_PASS` |
 | `test-selfhost` | In-OS TinyCC compiles/runs `min.c` + `hello.c` |
 | `test-tccboot` | In-OS TinyCC rebuilds itself (`tccnew.exe`) and compiles `min.c` |
-| `test-iobench` | CD sequential map; `IOBENCH_PASS` or `IOBENCH_WARN` |
+| `test-iobench` | CD sequential map; 4KiB page cache hits; `IOBENCH_PASS` + `IOBENCH_CACHE_OK` |
 | `test-virtio` | QEMU virtio-blk DMA R/W; `VIRTIO_BLK_OK` |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
@@ -93,6 +93,6 @@ Make sure it contains the current problem and the activity currently being perfo
 ## Suggested next work
 
 1. `test-kbuild` / `test-fullhost`: in-OS kernel compile + kexec.
-2. I/O P2: blk-mq lite + 4KiB page cache. P0 (per-device lock, 64-bit LBA) and P1 (virtio-blk MSI-X + DMA) are in.
+2. I/O P3: POSIX fds (`preadv`/`pwritev`/`fsync`), then io_uring-style SQ/CQ. P0–P2 (unlock, virtio-blk, 4KiB page cache) are in.
 3. Allow user processes on any CPU (harden `waitpid`/exit migration).
 4. Full ring-3 user mode (today user ELFs still enter with kernel CS).

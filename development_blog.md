@@ -2,6 +2,19 @@
 
 ## 2026-08-27 (Manila, UTC+8)
 
+### 20:15 — I/O P2: bio + 4KiB page cache
+
+P2 is in. 512×4KiB write-back cache, `bio_submit_sync`, one hctx per
+device. ISO9660 CD reads are cached (two 2048-byte sectors per page).
+Misses merge into aligned 4KiB device reads.
+
+Tests: `test-integration`, `test-virtio`, `test-iobench` PASS.
+iobench on `/icsos/apps/tcc.exe`: cold 224 ms, warm 3 ms (**74.6x**),
+cache hits=580 misses=146 fills=74 merged=148, `IOBENCH_CACHE_OK`.
+
+**Activity now:** P2 landed. Next is P3 (POSIX fds / io_uring) or
+`test-kbuild`.
+
 ### 19:50 — Memory map: one table, no more clobber-by-growth
 
 The 0x200000 frame-stack collision was the same class of bug as the
