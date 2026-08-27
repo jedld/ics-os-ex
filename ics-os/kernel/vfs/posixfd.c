@@ -25,11 +25,21 @@ extern int strcmp(const char *s, const char *t);
 extern void putc(char c);
 extern int vfs_setbuffer(file_PCB *handle, char *buffer, int bufsize, int mode);
 extern unsigned int ticks;
+extern char *userspace;
+extern char *showpath(char *s);
+extern int dex32_loader(char *name, char *image, char *loadaddress, int mode,
+                        char *p, char *workdir, PCB386 *parent);
+extern void dex32_stopints(DWORD *flags);
+extern void dex32_restoreints(DWORD flags);
+
+#define SPAWN_CMDLINE 1024
 
 #define EPERM   1
 #define ENOENT  2
 #define EIO     5
+#define ENOEXEC 8
 #define EBADF   9
+#define ECHILD  10
 #define ENOMEM  12
 #define EINVAL  22
 #define EMFILE  24
@@ -796,4 +806,103 @@ int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
    }
    (void)flags;
    return (int)done;
+}
+
+static int spawn_load(const char *path, const char *params)
+{
+   char *buf;
+   DWORD size;
+   DWORD id;
+   char temp[255];
+   char name[256];
+   char cmd[SPAWN_CMDLINE];
+   int i;
+
+   if (!path)
+      return -EINVAL;
+   for (i = 0; path[i] && i < 255; i++)
+      name[i] = path[i];
+   name[i] = 0;
+   if (!name[0])
+      return -EINVAL;
+
+   cmd[0] = 0;
+   if (params) {
+      for (i = 0; params[i] && i < SPAWN_CMDLINE - 1; i++)
+         cmd[i] = params[i];
+      cmd[i] = 0;
+   }
+   if (!cmd[0]) {
+      for (i = 0; name[i] && i < SPAWN_CMDLINE - 1; i++)
+         cmd[i] = name[i];
+      cmd[i] = 0;
+   }
+
+   buf = (char *)vfs_mapfile(name, &size);
+   if (!buf)
+      return -ENOENT;
+
+   id = dex32_loader(name, buf, userspace, 0, cmd, showpath(temp),
+                     current_process);
+   free(buf);
+   if (!id || (int)id == -1)
+      return -ENOEXEC;
+   return (int)id;
+}
+
+int sys_spawn(const char *path, const char *params)
+{
+   return spawn_load(path, params);
+}
+
+int sys_waitpid(int pid, int *status, int options)
+{
+   PCB386 *p;
+
+   (void)options;
+   if (pid <= 0)
+      return -EINVAL;
+   p = ps_findprocess((DWORD)pid);
+   if (p == (PCB386 *)-1) {
+      if (status)
+         *status = 0;
+      return pid;
+   }
+   dex32_waitpid(pid, 0);
+   if (status)
+      *status = 0;
+   return pid;
+}
+
+int sys_execve(const char *path, const char *params)
+{
+   PCB386 *me = current_process;
+   PCB386 *child;
+   int id, oldpid;
+   DWORD flags;
+
+   /* Keep IRQs off until the child owns our pid so waitpid(old)
+      cannot miss the steal window. createprocess restores the flags
+      it sampled here (already off). */
+   dex32_stopints(&flags);
+   id = spawn_load(path, params);
+   if (id < 0) {
+      dex32_restoreints(flags);
+      return id;
+   }
+   child = ps_findprocess((DWORD)id);
+   if (child == (PCB386 *)-1) {
+      dex32_restoreints(flags);
+      return -EIO;
+   }
+   oldpid = (int)me->processid;
+   child->processid = (DWORD)oldpid;
+   child->owner = me->owner;
+   me->processid = (DWORD)id;
+   ps_dequeue(me);
+   dex32_restoreints(flags);
+   ps_switchto(child);
+   for (;;)
+      ;
+   return 0;
 }

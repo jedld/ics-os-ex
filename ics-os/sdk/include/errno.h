@@ -14,7 +14,9 @@ extern int errno;
 #define EINVAL  22
 #define EMFILE  24
 #define ENOSPC  28
-#define ENOSYS  38
 #define ERANGE  34
+#define ENOSYS  38
+#define ENOEXEC 8
+#define ECHILD  10
 
 #endif

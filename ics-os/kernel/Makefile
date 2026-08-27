@@ -36,7 +36,7 @@ kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		hardware/hardware.c hardware/chips/speaker.c devmgr/dex32_devmgr.c \
 		devmgr/extension.c process/environment.c devmgr/bridges.c \
 		process/sync.c console/script.c process/process.c process/process.h dexapi/dex32API.c \
-		hardware/ATA/ide.c vfs/vfs_aux.c memory/kheap.c memory/dexmalloc.c \
+		hardware/ATA/ide.c vfs/vfs_aux.c vfs/posixfd.h memory/kheap.c memory/dexmalloc.c \
 		vmm/vmm.c kexec.c kexec.h
 	$(CC) $(CFLAGS) -o kernel32.o kernel32.c 
 	

@@ -536,6 +536,31 @@ void dex32_startup(){
 
 #define STARTUP_DELAY 400
 
+/* Mount a host-formatted FAT volume on virtio-blk at /work when present.
+   Zeroed disks (test-virtio / test-posixio) and ATA-only boots skip. */
+static void work_mount_vblk(void)
+{
+   unsigned char bpb[512];
+   int n;
+
+   if (!virtio_blk_present())
+      return;
+   memset(bpb, 0, sizeof(bpb));
+   n = virtio_blk_rw(0, 0, bpb, 512);
+   if (n < 0) {
+      printf("work: vblk read failed (skipped)\n");
+      return;
+   }
+   if (bpb[11] != 0x00 || bpb[12] != 0x02 || bpb[13] == 0 || bpb[16] == 0) {
+      printf("work: no FAT on vblk (skipped)\n");
+      return;
+   }
+   if (vfs_mount_device("fat", "vblk", "work") == -1)
+      printf("work: mount failed\n");
+   else
+      printf("work: mounted\n");
+}
+
 /*This function is the first function that is called by the taskswitcher
  see process/process.c
  incidentally it is also the first process that gets run
@@ -743,6 +768,7 @@ void dex_init(){
       /* Writable scratch FS for in-OS compiles (selfhost / tccboot). */
       if (mounted)
          ramdisk_mount();
+      work_mount_vblk();
 
       /* Unpark APs after root mount; console remains BSP-pinned. */
       if (mounted && cpu_count > 1) {

@@ -78,7 +78,7 @@ Kernel source directories.
 |`grub/`        |Files needed by grub|
 |`hardware/`    |Sources for hardware device drivers (ATA PIO, UHCI, virtio-blk, …)|
 |`iomgr/`       |I/O manager (bio, per-device blk-mq lock, 4KiB page cache)|
-|`vfs/`         |VFS plus POSIX fd table and io_uring (`posixfd.c`); `/dev/vblk` async CQEs|
+|`vfs/`         |VFS plus POSIX fd table, io_uring (`posixfd.c`), `waitpid`/`posix_spawn`/`execve`; `/dev/vblk` and optional FAT `/work`|
 |`memory/`      |Memory management routines|
 |`mnt/`         |Temporary mount directory|
 |`module/`      |Implementation of supported executable file formats (PE, ELF)|

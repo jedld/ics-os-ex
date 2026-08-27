@@ -411,6 +411,7 @@ DWORD    totalprocess();
 DWORD    getprocessinfo(DWORD processid,PCB386 *data);
 DWORD    dex32_locktasks();
 DWORD    dex32_unlocktasks();
+int      dex32_waitpid(int pid, int status);
 DWORD    ps_dequeue(PCB386 *process);
 DWORD    ps_enqueue(PCB386 *process);
 PCB386   *ps_getcurrentprocess();

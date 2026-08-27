@@ -1,5 +1,24 @@
 # Development blog
 
+## 2026-08-28 (Manila, UTC+8)
+
+### 02:40 — POSIX spawn + virtio `/work` (GCC self-host prerequisites)
+
+TinyCC will not compile `kernel32.c`. The self-host target is TinyCC → GNU
+make → binutils → GCC 4.7.4 (C only) → ICS-OS. This round does not download
+GCC; it lands the OS gaps that block that chain.
+
+**Current problem:** no userspace `waitpid`, `execvp` was a stub, `user_execp`
+always waits (console/tccboot need that), `forkprocess` is 32-bit paging,
+`/ramdisk` is 16 MiB, and `vblk` was raw with no FAT mount.
+
+**Activity:** `waitpid` (syscall 0xB1), `posix_spawn`/`sys_spawn` (0xB2,
+non-waiting ELF load), `execv` via `sys_execve` (0xB3, same-pid steal +
+switch). `user_execp` wait behavior unchanged. Fork left unused. After
+`virtio_blk_init`, a FAT BPB on `vblk` mounts at `/work` (`work: mounted`);
+zeros/no-disk skip so `test-boot`/`test-virtio`/`test-posixio` stay green.
+`make test-spawn` greps `SPAWN_PASS` and `WORK_DISK_PASS`. Tests: `test-spawn` PASS plus `test-boot`, `test-exec`, `test-virtio`, `test-posixio`.
+
 ## 2026-08-27 (Manila, UTC+8)
 
 ### 21:15 — Async virtio completions into io_uring

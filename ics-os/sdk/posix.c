@@ -14,6 +14,8 @@
 #include <sys/mman.h>
 #include <sys/uio.h>
 #include <sys/io_uring.h>
+#include <sys/wait.h>
+#include <spawn.h>
 #include <signal.h>
 #include <time.h>
 #include <stdarg.h>
@@ -50,6 +52,9 @@ extern void exit(int status);
 #define FXN_URING_ENTER 0xAE
 #define FXN_FSTATFD  0xAF
 #define FXN_FDFILE   0xB0
+#define FXN_WAITPID  0xB1
+#define FXN_SPAWN    0xB2
+#define FXN_EXECVE   0xB3
 
 static long ics_sys(int n, long a, long b, long c, long d, long e)
 {
@@ -299,7 +304,102 @@ int sscanf(const char *str, const char *fmt, ...)
 
 int execvp(const char *file, char *const argv[])
 {
-   (void)file; (void)argv;
+   char path[256];
+   int i, n;
+
+   if (!file || !file[0]) {
+      errno = ENOENT;
+      return -1;
+   }
+   for (i = 0; file[i]; i++)
+      if (file[i] == '/')
+         return execv(file, argv);
+
+   n = 0;
+   memcpy(path, "/icsos/apps/", 12);
+   n = 12;
+   for (i = 0; file[i] && n < 255; i++)
+      path[n++] = file[i];
+   path[n] = 0;
+   return execv(path, argv);
+}
+
+static void posix_join_argv(char *dst, int max, char *const argv[])
+{
+   int n = 0, i;
+
+   dst[0] = 0;
+   if (!argv || max <= 1)
+      return;
+   for (i = 0; argv[i]; i++) {
+      int l = (int)strlen(argv[i]);
+      if (n && n + 1 < max)
+         dst[n++] = ' ';
+      if (n + l >= max)
+         l = max - n - 1;
+      if (l <= 0)
+         break;
+      memcpy(dst + n, argv[i], (size_t)l);
+      n += l;
+      dst[n] = 0;
+      if (n >= max - 1)
+         break;
+   }
+}
+
+pid_t waitpid(pid_t pid, int *status, int options)
+{
+   return (pid_t)ics_sys(FXN_WAITPID, pid, (long)status, options, 0, 0);
+}
+
+int posix_spawn(pid_t *pid, const char *path,
+                const posix_spawn_file_actions_t *file_actions,
+                const posix_spawnattr_t *attrp,
+                char *const argv[], char *const envp[])
+{
+   char cmd[1024];
+   long r;
+
+   (void)file_actions;
+   (void)attrp;
+   (void)envp;
+   if (!path) {
+      errno = EINVAL;
+      return EINVAL;
+   }
+   posix_join_argv(cmd, (int)sizeof(cmd), argv);
+   if (!cmd[0]) {
+      int n = (int)strlen(path);
+      if (n >= (int)sizeof(cmd))
+         n = (int)sizeof(cmd) - 1;
+      memcpy(cmd, path, (size_t)n);
+      cmd[n] = 0;
+   }
+   r = ics_sys(FXN_SPAWN, (long)path, (long)cmd, 0, 0, 0);
+   if (r < 0)
+      return errno;
+   if (pid)
+      *pid = (pid_t)r;
+   return 0;
+}
+
+int execv(const char *path, char *const argv[])
+{
+   char cmd[1024];
+
+   if (!path) {
+      errno = EINVAL;
+      return -1;
+   }
+   posix_join_argv(cmd, (int)sizeof(cmd), argv);
+   if (!cmd[0]) {
+      int n = (int)strlen(path);
+      if (n >= (int)sizeof(cmd))
+         n = (int)sizeof(cmd) - 1;
+      memcpy(cmd, path, (size_t)n);
+      cmd[n] = 0;
+   }
+   ics_sys(FXN_EXECVE, (long)path, (long)cmd, 0, 0, 0);
    return -1;
 }
 

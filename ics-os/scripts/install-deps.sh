@@ -5,4 +5,4 @@ sudo apt-get update
 sudo apt-get install -y \
     build-essential gcc-multilib libc6-dev-i386 nasm python3 \
     qemu-system-x86 qemu-utils \
-    tcc git grub-pc-bin grub-efi-amd64-bin xorriso mtools fdisk ovmf
+    tcc git grub-pc-bin grub-efi-amd64-bin xorriso mtools fdisk ovmf dosfstools

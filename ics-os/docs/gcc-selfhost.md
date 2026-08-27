@@ -1,0 +1,85 @@
+# GCC self-host path (ICS-OS)
+
+TinyCC stays the **bootstrap C compiler**. It will not compile `kernel32.c`.
+The intended in-OS chain is:
+
+```
+TinyCC → GNU make → binutils (as, ld, ar) → GCC 4.7.4 (C only) → ICS-OS kernel
+```
+
+GCC 4.7.4 is the last GCC that TinyCC can build (no C++). A full GCC build
+needs gigabytes of disk and a driver that `fork`s `as`/`ld`.
+
+This document is the map for that work. The current round only lands the
+OS prerequisites (`posix_spawn` / `waitpid` and a writable virtio volume).
+It does **not** download or compile GCC.
+
+## Why TinyCC-kbuild is deferred
+
+`test-kbuild` / `test-fullhost` asked in-OS TinyCC to compile the kernel.
+That is the wrong compiler for `kernel32.c`. Keep TinyCC for:
+
+- `test-selfhost` / `test-tccboot` (bootstrap C)
+- later: compiling GNU make, then a C-only GCC 4.7.4
+
+## POSIX gaps (this round)
+
+GCC/`make` do the usual spawn:
+
+```c
+pid = fork();
+if (pid == 0) { execv(path, argv); _exit(127); }
+waitpid(pid, &st, 0);
+```
+
+Historic DEX `user_execp` always **waits** (spawn+join). Console and
+`tccboot` depend on that — do not change it.
+
+| Piece | Status |
+|-------|--------|
+| `waitpid` | DEX syscall `0xB1` → `dex32_waitpid`; SDK `sys/wait.h` |
+| `posix_spawn` | DEX syscall `0xB2` (`sys_spawn`): load ELF, return child pid, no wait |
+| `execv` / `execvp` | DEX syscall `0xB3` (`sys_execve`): same-pid image replace (steal pid, switch) |
+| `fork` / `forkprocess` | Still 32-bit paging (`disablepaging` / `dex32_copy_pg`). Unsafe on x86_64. Do not use. |
+| `user_execp` (`0x5B`) | Unchanged: still waits |
+
+The ISO 9660 root is 8.3 unless Joliet is selected; `spawn.exe` is the
+packed test binary (`contrib/spawntest`, console command `spawntest`).
+
+Stock GCC `pexecute` can be wrapped with `posix_spawn` until fork is fixed.
+
+## Disk plan
+
+`/ramdisk` is 16 MiB FAT16 — too small for GCC/binutils trees. `vblk` is a
+raw virtio-blk device.
+
+After `virtio_blk_init` and FAT registration, the kernel probes sector 0.
+If the BPB looks like FAT, it mounts at **`/work`** and prints `work: mounted`.
+No vblk, or a zeroed/non-FAT image (as in `test-virtio` / `test-posixio`),
+skips the mount so `test-boot` stays green.
+
+Host side for `test-spawn`: `mkfs.vfat -F 16` a **512 MiB** image, attach
+like the posixio virtio disk. 512 MiB is enough for spawn tests and a later
+trimmed binutils + make tree. GCC 4.7 itself needs a bigger image in a
+later round.
+
+FAT 8.3 still bites some GCC names even with LFN on create; that is a later
+FS issue.
+
+## Later rounds (not this one)
+
+1. In-OS TinyCC builds **GNU make**.
+2. Then **binutils** (`as`, `ld`, `ar`).
+3. Then **GCC 4.7.4** (`--enable-languages=c --disable-multilib`).
+4. That GCC compiles ICS-OS; kexec as today.
+
+## Tests
+
+```
+cd ics-os
+make -C kernel bzImage
+make test-spawn          # SPAWN_PASS + WORK_DISK_PASS
+make test-posixio        # still green (unformatted vblk → no /work)
+make test-virtio
+make test-boot
+```

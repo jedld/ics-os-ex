@@ -38,6 +38,7 @@ Useful individual targets (from `ics-os/`):
 | `test-iobench` | CD sequential map; 4KiB page cache hits; `IOBENCH_PASS` + `IOBENCH_CACHE_OK` |
 | `test-posixio` | POSIX fds + preadv/pwritev/fsync + io_uring; ramdisk `POSIXIO_PASS`/`URING_PASS`; virtio `/dev/vblk` `URING_VBLK_PASS` |
 | `test-virtio` | QEMU virtio-blk DMA; MSI-X completions; `VIRTIO_BLK_OK` + `VIRTIO_IRQ_OK` |
+| `test-spawn` | `posix_spawn` + `waitpid` of `hello.exe` (`SPAWN_PASS`); FAT `/work` on virtio (`WORK_DISK_PASS`) |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).
@@ -50,7 +51,7 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 - **Memory map** is `kernel/memory/memlayout.h`. Kernel image must stay below 4MiB (user ELF). Frame stack follows `bssEnd`. Do not invent a new fixed PA; add a reserved range so `mempop` skips it.
 - **SMP**: APs load the kernel GDT (`ap_load_kernel_gdt`), use LAPIC timer vector **0x41**, claim tasks with `on_cpu`, and honor `cpu_affinity`. Console / `fg_mgr` / user processes are BSP-pinned today.
 - **Serial** is the headless oracle. Prefer `serial_puts` / putc mirroring for QEMU `-nographic` tests.
-- **x86_64 in-OS TinyCC** can compile/run `min.c`/`hello.c` (`make test-selfhost`) and rebuild itself (`make test-tccboot`). `test-kbuild` / `test-fullhost` (in-OS kernel compile + kexec) are the next gate.
+- **x86_64 in-OS TinyCC** can compile/run `min.c`/`hello.c` (`make test-selfhost`) and rebuild itself (`make test-tccboot`). TinyCC will not compile the kernel; the self-host path is TinyCC → make → binutils → GCC 4.7.4 (see `ics-os/docs/gcc-selfhost.md`).
 
 ## Coding conventions
 
@@ -93,7 +94,7 @@ Make sure it contains the current problem and the activity currently being perfo
 
 ## Suggested next work
 
-1. `test-kbuild` / `test-fullhost`: in-OS kernel compile + kexec.
-2. Richer io_uring (registered buffers, linked SQEs) if needed. Async virtio CQEs and `/dev/vblk` are in.
-3. Allow user processes on any CPU (harden `waitpid`/exit migration).
+1. GCC self-host (see `ics-os/docs/gcc-selfhost.md`): in-OS TinyCC builds GNU make, then binutils, then GCC 4.7.4 (C only); that GCC compiles ICS-OS. TinyCC `test-kbuild` is deferred.
+2. Richer io_uring (registered buffers, linked SQEs) if needed. Async virtio CQEs and `/dev/vblk` are in. `posix_spawn` / `waitpid` / `/work` are in (`make test-spawn`).
+3. Allow user processes on any CPU (harden `waitpid`/exit migration). Fix `fork` for x86_64 (today `posix_spawn` wraps GCC `pexecute`).
 4. Full ring-3 user mode (today user ELFs still enter with kernel CS).

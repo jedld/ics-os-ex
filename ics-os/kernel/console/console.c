@@ -1099,6 +1099,11 @@ int console_execute(const char *str){
       if (!user_execp("/icsos/apps/posixio.exe", 0, "/icsos/apps/posixio.exe"))
          printf("POSIXIO_FAIL\n");
    }else
+   if (strcmp(u,"spawntest") == 0){
+      printf("spawntest: running /icsos/apps/spawn.exe\n");
+      if (!user_execp("/icsos/apps/spawn.exe", 0, "/icsos/apps/spawn.exe"))
+         printf("SPAWN_FAIL\n");
+   }else
    if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
       char cmd[512];
       int ok = 1;

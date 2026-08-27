@@ -44,4 +44,8 @@ int  sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
                         unsigned flags);
 void *sys_fd_file(int fd);
 
+int sys_waitpid(int pid, int *status, int options);
+int sys_spawn(const char *path, const char *params);
+int sys_execve(const char *path, const char *params);
+
 #endif

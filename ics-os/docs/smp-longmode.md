@@ -148,6 +148,11 @@ complete from the MSI-X harvest into the CQ. `io_uring_enter` waits for
 `min_complete`. `make test-posixio` greps `POSIXIO_PASS`, `URING_PASS`, and
 `URING_VBLK_PASS`.
 
+**POSIX spawn / waitpid:** Syscalls `0xB1` (`waitpid`), `0xB2` (`posix_spawn` /
+non-waiting ELF load), `0xB3` (`execve` same-pid replace). `user_execp`
+(`0x5B`) still waits. `forkprocess` remains 32-bit and is not used.
+`make test-spawn` greps `SPAWN_PASS` and `WORK_DISK_PASS`.
+
 **virtio-blk** (`hardware/virtio/virtio_blk.c`) is the VM production path:
 modern virtio-pci caps, one request queue with a 3-descriptor slot pool,
 MSI-X vector **0x42**, 512-byte LBAs, registered as block device `vblk` and
@@ -155,6 +160,8 @@ as `/dev/vblk`. Completions harvest the used ring in the IRQ (hlt wait, not
 pause-spin). ATA PIO remains the bare-metal fallback. PCI MMIO BARs are
 marked uncacheable (PCD|PWT on the shared `boot_pd3` 2MiB pages).
 `make test-virtio` greps `VIRTIO_BLK_OK` and `VIRTIO_IRQ_OK`.
+If sector 0 looks like FAT, the kernel mounts `vblk` at `/work` and prints
+`work: mounted` (skipped on a zeroed disk).
 
 ## Memory map
 
@@ -165,7 +172,8 @@ The page allocator skips that reserved-range table; the linker
 closed 32MiB interval; `sbrk` must not `mempop`. Add new regions to
 the header first.
 
-Next: `test-kbuild` / ring-3 / user processes on any CPU.
+Next: GCC 4.7.4 self-host (`docs/gcc-selfhost.md`) / ring-3 / user processes
+on any CPU. TinyCC kbuild is deferred.
 
 ## Key files
 
@@ -179,6 +187,7 @@ Next: `test-kbuild` / ring-3 / user processes on any CPU.
 | TTY | `kernel/console/tty.c` |
 | Userland shell | `contrib/sh/sh.c` |
 | Block I/O | `kernel/iomgr/iosched.c`, `blkcache.c` |
-| POSIX fds / io_uring | `kernel/vfs/posixfd.c` |
+| POSIX fds / io_uring / spawn | `kernel/vfs/posixfd.c` |
 | virtio-blk | `kernel/hardware/virtio/virtio_blk.c` |
+| GCC self-host plan | `docs/gcc-selfhost.md` |
 | Memory map | `kernel/memory/memlayout.h` |

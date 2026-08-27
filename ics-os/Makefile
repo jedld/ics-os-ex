@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -67,6 +67,8 @@ apps:
 	-$(MAKE) -C contrib/hello install
 	-$(MAKE) -C contrib/posixio
 	-$(MAKE) -C contrib/posixio install
+	-$(MAKE) -C contrib/spawntest
+	-$(MAKE) -C contrib/spawntest install
 	-$(MAKE) -C contrib/sh
 	-$(MAKE) -C contrib/sh install
 	$(MAKE) -C contrib/tcc
@@ -379,6 +381,34 @@ test-posixio: kernel/Kernel64.bin apps/posixio.exe
 	@grep -aq "URING_VBLK_PASS" /tmp/icsos-posixio.log
 	@! grep -aq "POSIXIO_FAIL" /tmp/icsos-posixio.log
 	@echo "test-posixio PASS"
+
+# posix_spawn + waitpid of hello.exe, plus FAT /work on virtio-blk.
+test-spawn: kernel/Kernel64.bin apps/spawn.exe apps/hello.exe
+	@echo "Building Multiboot2 ISO for spawn + work disk..."
+	@mkdir -p /tmp/icsos-spawn-iso/boot/grub /tmp/icsos-spawn-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-spawn-iso/vmdex
+	@cp apps/spawn.exe /tmp/icsos-spawn-iso/apps/spawn.exe
+	@cp apps/hello.exe /tmp/icsos-spawn-iso/apps/hello.exe
+	@printf '%s\n' 'spawntest' 'reboot' > /tmp/icsos-spawn-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-spawn-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-spawn.iso /tmp/icsos-spawn-iso >/dev/null 2>&1
+	@echo "Formatting 512 MiB FAT16 virtio work disk..."
+	@truncate -s 512M /tmp/icsos-work.img
+	@mkfs.vfat -F 16 -s 32 /tmp/icsos-work.img >/dev/null
+	@echo "Running spawn test (KVM, virtio-blk)..."
+	@-timeout 70 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-spawn.iso -boot d \
+		-drive file=/tmp/icsos-work.img,if=none,id=vd0,format=raw \
+		-device virtio-blk-pci,drive=vd0,disable-legacy=on \
+		> /tmp/icsos-spawn.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-spawn.log
+	@grep -aq "work: mounted" /tmp/icsos-spawn.log
+	@grep -aq "SPAWN_PASS" /tmp/icsos-spawn.log
+	@grep -aq "WORK_DISK_PASS" /tmp/icsos-spawn.log
+	@! grep -aq "SPAWN_FAIL" /tmp/icsos-spawn.log
+	@! grep -aq "WORK_DISK_FAIL" /tmp/icsos-spawn.log
+	@echo "test-spawn PASS"
 
 # Full QEMU integration suite for the x86_64 / SMP / ELF64 path.
 test-integration: vmdex apps/hello.exe
