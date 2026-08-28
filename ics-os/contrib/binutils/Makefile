@@ -35,7 +35,7 @@ CONFDIR := $(CURDIR)
 # bin_dummy_emulation is #define'd to the selected emulation vector
 # (upstream: binutils/Makefile.in -Dbin_dummy_emulation=$(EMULATION_VECTOR));
 # bin_vanilla_emulation is defined in emul_vanilla.c.
-DEFS  := -DHAVE_CONFIG_H -DI8086 -DDEFAULT_ARCH=elf64_littleswap \
+DEFS  := -DHAVE_CONFIG_H -DI8086 -DDEFAULT_ARCH=\"x86_64\" \
 	-DSELECT_VECS='&bfd_elf64_x86_64_vec' \
 	-Dbin_dummy_emulation=bin_vanilla_emulation
 INC   := -nostdinc -I$(SDK)/include -I$(CONFDIR) \
@@ -118,7 +118,65 @@ LIBIBERTY_O := $(patsubst %.c,$(OBJ)/libib/%.o,$(LIBIBERTY_C))
 AR_O        := $(patsubst %.c,$(OBJ)/ar/%.o,$(AR_C))
 AR_EXE      := $(CURDIR)/ar.exe
 
-.PHONY: libiberty libbfd all ar as ld clean
+# ---- opcodes (instruction-encoding library) ----
+# i386-opc.c (the i386/x86-64 opcode + modifier tables, used by GAS) and the
+# generic disassembler core (dis-buf/disassemble/dis-init) + i386-dis.c, built
+# so objcopy/ld can be added later. i386-tbl.h / i386-init.h are pre-generated
+# and checked into the tarball (opcodes/).
+OPCODES_C := \
+	i386-opc.c i386-dis.c \
+	dis-buf.c disassemble.c dis-init.c
+
+# ---- GAS (the assembler core) ----
+# The 31-file core from gas/Makefile.in GAS_CFILES, plus the target files,
+# which live in gas/config/ and are handled by a separate rule:
+#   obj-elf.c   - the ELF object format (obj-elf.h maps the generic obj_*
+#                 names to obj_elf_*; no te-elf.h/targ-elf.h in 2.23)
+#   atof-ieee.c - IEEE float literals (tc-i386.c's md_atof calls ieee_md_atof)
+#   tc-i386.c   - the i386/x86-64 CPU backend (#includes tc-i386-intel.c, so
+#                 that file is NOT listed separately). It does not reference
+#                 the disassembler, so as.exe only needs i386-opc from the
+#                 opcodes lib.
+# NOTE: itbl-ops.c / itbl-lex-wrapper.c / cgen.c are NOT built. Those serve
+# the cgen instruction-table backends (MIPS only, gated by HAVE_ITBL_CPU).
+# i386 has no itbl table, so as.c compiles with `#define itbl_init()` (a
+# no-op) and the itbl objects are absent from the link.
+GAS_C := \
+	app.c as.c atof-generic.c compress-debug.c cond.c depend.c \
+	dwarf2dbg.c dw2gencfi.c ecoff.c ehopt.c expr.c \
+	flonum-copy.c flonum-konst.c flonum-mult.c frags.c hash.c \
+	input-file.c input-scrub.c listing.c literal.c macro.c \
+	messages.c output-file.c read.c remap.c sb.c stabs.c subsegs.c \
+	symbols.c write.c
+GAS_CFG_C := obj-elf.c atof-ieee.c tc-i386.c
+
+OPCODES_O   := $(patsubst %.c,$(OBJ)/opcodes/%.o,$(OPCODES_C))
+GAS_O       := $(patsubst %.c,$(OBJ)/gas/%.o,$(GAS_C))
+GAS_CFG_O   := $(patsubst %.c,$(OBJ)/gas/%.o,$(GAS_CFG_C))
+AS_EXE      := $(CURDIR)/as.exe
+
+# GAS includes use the repo-root prefix ("bfd/elf-bfd.h", "opcodes/...") and
+# the gas/config dir for target headers, which the global INC does not have.
+# $(OBJ)/gas is added so the generated target headers below are found.
+GASINC := -I$(OBJ)/gas -I$(SRC) -I$(SRC)/gas/config
+
+# as.h includes "targ-env.h", te-*.h includes "obj-format.h", and obj-elf.h
+# includes "targ-cpu.h"; upstream makes all of these as build-dir copies of the
+# selected te-<te_file>.h / obj-<obj_format>.h / tc-<cpu>.h. For x86-64
+# ELF/Linux that is te-linux.h / obj-elf.h / tc-i386.h.
+GAS_GEN_H := $(OBJ)/gas/targ-env.h $(OBJ)/gas/obj-format.h $(OBJ)/gas/targ-cpu.h
+
+$(OBJ)/gas/targ-env.h: $(SRC)/gas/config/te-linux.h
+	@mkdir -p $(OBJ)/gas
+	cp $< $@
+$(OBJ)/gas/obj-format.h: $(SRC)/gas/config/obj-elf.h
+	@mkdir -p $(OBJ)/gas
+	cp $< $@
+$(OBJ)/gas/targ-cpu.h: $(SRC)/gas/config/tc-i386.h
+	@mkdir -p $(OBJ)/gas
+	cp $< $@
+
+.PHONY: libiberty libbfd opcodes gas all ar as ld clean
 
 all: ar
 
@@ -162,8 +220,43 @@ install: ar
 uninstall:
 	rm -f $(ICSOS_ROOT)/apps/ar.exe
 
-as: libiberty
-	@echo "as: (libbfd + gas next)"
+# ---- opcodes + GAS (assembler) ----
+opcodes: $(OPCODES_O)
+	@echo "opcodes: $(words $(OPCODES_O)) objects built OK"
+
+$(OBJ)/opcodes/%.o: $(SRC)/opcodes/%.c $(CONF)
+	@mkdir -p $(OBJ)/opcodes
+	$(CC) $(CFLAGS) -c $< -o $@
+
+gas: $(GAS_O) $(GAS_CFG_O)
+	@echo "gas: $(words $(GAS_O) $(GAS_CFG_O)) objects built OK"
+
+# GAS core sources live in gas/.
+$(OBJ)/gas/%.o: $(SRC)/gas/%.c $(CONF) $(GAS_GEN_H)
+	@mkdir -p $(OBJ)/gas
+	$(CC) $(CFLAGS) $(GASINC) -c $< -o $@
+
+# GAS target sources live in gas/config/.
+$(OBJ)/gas/obj-elf.o: $(SRC)/gas/config/obj-elf.c $(CONF) $(GAS_GEN_H)
+	@mkdir -p $(OBJ)/gas
+	$(CC) $(CFLAGS) $(GASINC) -c $< -o $@
+$(OBJ)/gas/atof-ieee.o: $(SRC)/gas/config/atof-ieee.c $(CONF) $(GAS_GEN_H)
+	@mkdir -p $(OBJ)/gas
+	$(CC) $(CFLAGS) $(GASINC) -c $< -o $@
+$(OBJ)/gas/tc-i386.o: $(SRC)/gas/config/tc-i386.c $(CONF) $(GAS_GEN_H)
+	@mkdir -p $(OBJ)/gas
+	$(CC) $(CFLAGS) $(GASINC) -c $< -o $@
+
+# as: link GAS + opcodes + libbfd + libiberty + the SDK runtime into a single
+# static ELF64 user executable (same pattern as ar.exe).
+as: $(AS_EXE)
+
+$(AS_EXE): $(GAS_O) $(GAS_CFG_O) $(OPCODES_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
+	   $(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
+	$(CC) $(CFLAGS) $(APP_LDFLAGS) -o$@ \
+		$(GAS_O) $(GAS_CFG_O) $(OPCODES_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
+		$(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
+	@echo "as: linked $(AS_EXE)"
 
 ld: libiberty
 	@echo "ld: (libbfd + ld next)"

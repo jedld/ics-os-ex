@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <time.h>
 
 #define EOF (-1)
 #define SEEK_SET 0
@@ -44,6 +45,7 @@ int fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f);
 int fseek(FILE *f, long off, int whence);
 long ftell(FILE *f);
 void rewind(FILE *f);
+int ungetc(int c, FILE *f);
 int putchar(int c);
 int puts(const char *s);
 int getchar(void);

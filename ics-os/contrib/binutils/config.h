@@ -20,6 +20,12 @@
 #define TARGET_ARCH "i386"
 #define TARGET_MACHINE ""
 
+/* GAS (as.c) prints/uses these identity strings; normally configure-defined.
+   They are informational (banner + --version + .gasversion metadata only). */
+#define TARGET_ALIAS "x86_64-elf"
+#define TARGET_CANONICAL "x86_64-icsos-elf"
+#define TARGET_CPU "i386"
+
 /* BFD target name string used by bucomm.c set_default_bfd_target() via
    bfd_set_default_target(TARGET). Must match an entry in targmatch.h. */
 #define TARGET "x86_64"

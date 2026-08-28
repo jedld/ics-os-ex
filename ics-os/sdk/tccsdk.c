@@ -1183,14 +1183,45 @@ FILE *fopen(const char *filename,const char *s){
    return 0;
 };
 
+/* One-deep pushback slot for stdin (the SDK FILE type is an opaque fd with
+   no user-side buffer). Empty when == -1. */
+static int sdk_stdin_pushback = -1;
+
 int fgetc (FILE *stream){
    char ch;
-   if (stream==stdin) 
+   if (stream==stdin) {
+      if (sdk_stdin_pushback != -1) {
+         int c = sdk_stdin_pushback;
+         sdk_stdin_pushback = -1;
+         return c;
+      }
       return getchar();
+   }
    if (feof(stream))
      return -1;
    fread(&ch,1,1,stream);
    return ch;
+};
+
+/* ungetc: push back one character (POSIX guarantees one char).
+   The SDK FILE is an opaque fd handle (no user-side buffering), so a regular
+   file is pushed back by seeking one byte earlier; stdin uses the pushback
+   slot above. This is all GAS needs for its backtracking lexer. */
+int ungetc(int c, FILE *stream){
+   if (c == EOF)
+      return EOF;
+   if (stream == stdin) {
+      if (sdk_stdin_pushback != -1)
+         return EOF;               /* pushback slot already full */
+      sdk_stdin_pushback = (unsigned char)c;
+      return (unsigned char)c;
+   }
+   long pos = ftell(stream);
+   if (pos < 0)
+      return EOF;
+   if (fseek(stream, pos - 1, SEEK_SET) != 0)
+      return EOF;
+   return (unsigned char)c;
 };
 
 char *gets(char *buf){

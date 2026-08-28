@@ -16,5 +16,6 @@ time_t time(time_t *t);
 clock_t clock(void);
 struct tm *localtime(const time_t *t);
 char *ctime(const time_t *t);
+size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm);
 
 #endif

@@ -31,9 +31,17 @@ host-gcc make runs a recipe — both paths PASS). `waitpid(-1)`/`WNOHANG`, `wait
 102/102 objects** — with host gcc against `sdk/include` + `tccsdk.c`/`posix.c`
 (same flags as `apps/make.exe`). The curated **libbfd ELF x86-64 subset —
 40/40 objects** (core + `elf.c`/`elflink.c` + `elf64.c`/`elf64-gen.c`/
-`elf64-x86-64.c` + archive/link support) also compiles clean against the SDK.
-The `ar`/`as`/`ld` tools are the immediate next step. The build surfaced and
-closed a first batch of real SDK gaps (see "SDK gaps closed (binutils)"):
+`elf64-x86-64.c` + archive/link support) compiles clean against the SDK.
+**Two tools now build:** `ar.exe` (ar frontend + libbfd + libiberty) and
+`as.exe` (GAS core 33 objects + opcodes i386 + libbfd + libiberty) both link
+as statically-linked ELF64 x86-64 ICS-OS user executables (`int 0x30` ABI).
+Key i386 finding: the cgen/itbl table backends (`itbl-ops.c`/`cgen.c`, MIPS
+only, `HAVE_ITBL_CPU`) are NOT part of the i386 build — `as.c` compiles
+`#define itbl_init()` (no-op) for non-itbl targets, and the target files
+(`obj-elf.c`/`atof-ieee.c`/`tc-i386.c`) come from `gas/config/`. `DEFAULT_ARCH`
+must be the string `"x86_64"`, not a BFD enum. `ld` is the next tool. The build
+surfaced and closed a first batch of real SDK gaps (see "SDK gaps closed
+(binutils)"):
 `float.h`, `sys/param.h`, `sys/resource.h`, `malloc.h`, `strings.h`, C99
 `intmax_t`/`uintmax_t`, `sigset_t`/signal-set APIs, `F_*`/`FD_CLOEXEC`,
 `realpath`/`sysconf`/`getpagesize`/`pathconf`, extra `errno` codes — all
@@ -69,6 +77,15 @@ Closed while compiling libiberty against the SDK (all in `sdk/`):
 | `F_*`, `FD_CLOEXEC` | `fcntl.h` | `pex-unix.c`, libbfd file I/O |
 | `realpath`/`sysconf`/`getpagesize`/`pathconf` | `unistd.h` + `posix.c` | libbfd `getpagesize`, ld `realpath` |
 | `ENAMETOOLONG`/`ELOOP`/`EISDIR`/`ENOTEMPTY`/`EPIPE`/`ESRCH`/`EDEADLK` | `errno.h` | |
+
+**`as` (GAS) round — additional gaps:**
+
+| Item | Where | Notes |
+|------|-------|-------|
+| `ungetc` | `tccsdk.c` + `stdio.h` | opaque-fd `FILE`: file pushback = `fseek(ftell-1)`; `stdin` uses a 1-char slot |
+| `localtime` | `posix.c` | was a fixed-date stub; now civil-from-days (Hinnant), UTC, real `tm_yday`/`tm_wday` |
+| `strftime` | `posix.c` + `time.h` | subset for the `-L` listing timestamp |
+| `mbstowcs` | `wchar.h` (new) | `static inline`; ICS-OS is single-byte/ASCII so byte length is correct |
 
 `getrlimit`/`setrlimit` are implemented in-SDK (defaults unlimited,
 `RLIMIT_NOFILE`=256) — no kernel backing yet. **Open kernel item:** the SDK

@@ -1061,3 +1061,66 @@ file lists, `CPUC` wildcard, `bin_dummy_emulation` def, `ar` link line),
 `contrib/binutils/config.h` (`TARGET`, `DEFAULT_AR_DETERMINISTIC`),
 `contrib/binutils/demangle-stub.c` (new), `sdk/{posix.c,tccsdk.c}`,
 `sdk/include/{stdio,stdlib,unistd,sys/stat}.h`.
+
+### 14:00–15:30 — binutils `as` (GAS 2.23) builds + links an ICS-OS user ELF64
+
+**Goal:** the second binutils tool — the GNU assembler. This is the critical
+one: GCC emits `.s` and needs `as` to turn it into `.o`, so a working `as`
+unblocks the GCC 4.7.4 self-host step.
+
+**Approach:** mirror the `ar`/`libbfd`/`libiberty` recipe. Add `gas/` core +
+`opcodes/` to the Makefile and link them against the already-built libbfd +
+libiberty + SDK.
+
+**Findings (the i386 path is NOT the cgen/itbl table path):**
+- `itbl-ops.c` / `itbl-lex-wrapper.c` / `cgen.c` serve the *instruction-table*
+  (cgen) backends — MIPS only, gated by `HAVE_ITBL_CPU`. i386/x86-64 uses the
+  hand-written `tc-i386.c` backend instead.
+- For a non-itbl target, `as.c` compiles `#define itbl_init()` (a **no-op
+  macro**) and the itbl objects are simply **not in the link**. So I removed
+  `itbl-ops.c`/`itbl-lex-wrapper.c` from `GAS_C` (they don't even compile for
+  i386 — `ITBL_OPCODES`/`ITBL_NUM_OPCODES` are undefined).
+- The target files live in `gas/config/` and need their own rule:
+  `obj-elf.c` (ELF object format), `atof-ieee.c` (float literals for
+  `md_atof`), and `tc-i386.c` (the CPU backend; it `#include`s
+  `tc-i386-intel.c`, so that file is not listed separately).
+- **`DEFAULT_ARCH` must be a string, not an enum.** `tc-i386.c` does
+  `static const char *default_arch = DEFAULT_ARCH;` and later
+  `strncmp(default_arch, "x86_64", 6)`. I had set
+  `-DDEFAULT_ARCH=elf64_littleswap` (a BFD enum) → `'elf64_littleswap'
+  undeclared`. Upstream `gas/configure` emits
+  `#define DEFAULT_ARCH "${arch}"` → fixed to `-DDEFAULT_ARCH=\"x86_64\"`.
+
+**SDK gaps closed (GAS needs a little more POSIX than `ar` did):**
+- `ungetc` — GAS's backtracking lexer calls it heavily. The SDK `FILE` is an
+  opaque fd handle (no user-side buffer), so a regular file is pushed back by
+  `fseek(f, ftell(f)-1, SEEK_SET)`; `stdin` uses a one-char pushback slot
+  (`fgetc` was patched to honor it). Implemented in `sdk/tccsdk.c`.
+- `strftime` — GAS only uses it for the `-L` listing-header timestamp
+  (`"%Y-%m-%dT%H:%M:%S.000%z"`). Implemented a small converter in
+  `sdk/posix.c` (subset: `%Y %y %m %d %H %M %S %B %b %A %a %Z %z %n %t %`).
+- `localtime` — the old stub returned a fixed date; replaced with a real
+  civil-from-days implementation (Hinnant algorithm, UTC; the kernel clock is
+  UTC and TZ is unimplemented). `tm_yday`/`tm_wday` are computed properly.
+- `mbstowcs` — GAS (`read.c`) calls `mbstowcs(NULL,name,len)==-1` purely as a
+  locale check on quoted symbol names. ICS-OS is single-byte/ASCII, so a
+  `static inline` in `sdk/include/wchar.h` (new file) that returns the byte
+  length is correct.
+
+**Result:** `make as` compiles all 33 GAS objects + opcodes + libbfd + libiberty
+and links `as.exe` — a statically-linked ELF64 x86-64 **ICS-OS user
+executable** (`_start` at entry, `dexsdk_systemcall` present, no host
+interpreter). Like `ar.exe` it does not run on the host (it uses `int 0x30`
+syscalls); it runs in-OS. Functional in-OS validation (`as --version`,
+assembling a real `.s`) is the next step, paired with a QEMU `test-binutils`.
+
+**Files touched:** `contrib/binutils/Makefile` (GAS_C/GAS_CFG_C/OPCODES lists,
+`gas`+`as` targets, `DEFAULT_ARCH` fix, itbl exclusion),
+`contrib/binutils/{bfdver.h,config.h}`, `sdk/tccsdk.c` (`ungetc` + pushback
+slot + `fgetc` patch), `sdk/posix.c` (`localtime` + `strftime`),
+`sdk/include/wchar.h` (new, `mbstowcs`), `sdk/include/{stdio,time}.h`
+(prototypes).
+
+**Next:** build `ld` (ldemul/`elf.em` + BFD linking), then a QEMU
+`test-binutils` that runs `as`/`ar`/`ld` in-OS against a real source file,
+then GCC 4.7.4 (C-only).

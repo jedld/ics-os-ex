@@ -406,15 +406,103 @@ int execv(const char *path, char *const argv[])
    return -1;
 }
 
+/* Convert days-since-1970-01-01 to a civil date (Howard Hinnant's algorithm).
+   Works for the whole representable range, including pre-epoch negatives. */
+static void icsos_civil_from_days(long z, int *year, int *month, int *day)
+{
+   z += 719468;
+   {
+      long era = (z >= 0 ? z : z - 146096) / 146097;
+      long doe = z - era * 146097;              /* [0, 146096] */
+      long yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365; /* [0,399] */
+      long y = yoe + era * 400;
+      long doy = doe - (365*yoe + yoe/4 - yoe/100); /* [0,365] */
+      long mp = (5*doy + 2)/153;                  /* [0,11] */
+      long d = doy - (153*mp+2)/5 + 1;            /* [1,31] */
+      long m = mp + (mp < 10 ? 3 : -9);           /* [1,12] */
+      *year = (int)(y + (m <= 2));
+      *month = (int)m;
+      *day = (int)d;
+   }
+}
+
+/* localtime: the ICS-OS kernel clock is UTC; TZ is not implemented, so local
+   time is reported as UTC (tm_isdst=0). */
 struct tm *localtime(const time_t *t)
 {
    static struct tm tm;
    time_t v = t ? *t : 0;
+   long days = v / 86400;
+   long rem = v - days * 86400;
+   int year, month, day;
+
+   if (rem < 0) { rem += 86400; days--; }
+   icsos_civil_from_days(days, &year, &month, &day);
+
    memset(&tm, 0, sizeof(tm));
-   tm.tm_year = 126;
-   tm.tm_mday = 1;
-   (void)v;
+   tm.tm_sec  = (int)(rem % 60);
+   tm.tm_min  = (int)((rem / 60) % 60);
+   tm.tm_hour = (int)(rem / 3600);
+   tm.tm_mday = day;
+   tm.tm_mon  = month - 1;
+   tm.tm_year = year - 1900;
+   tm.tm_wday = (int)(((days % 7) + 7) % 7 + 4) % 7;  /* 1970-01-01 was a Thursday */
+   {
+      static const int cum[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
+      int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+      tm.tm_yday = cum[month - 1] + day - 1 + ((leap && month > 2) ? 1 : 0);
+   }
+   tm.tm_isdst = 0;
    return &tm;
+}
+
+static const char icsos_months[12][3] = {
+   "Jan","Feb","Mar","Apr","May","Jun",
+   "Jul","Aug","Sep","Oct","Nov","Dec"
+};
+static const char icsos_wdays[7][3] = {
+   "Sun","Mon","Tue","Wed","Thu","Fri","Sat"
+};
+
+/* strftime: supports the subset GAS uses for its listing header
+   ("%Y-%m-%dT%H:%M:%S.000%z") plus the common date conversions. */
+size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm)
+{
+   size_t o = 0;
+
+   if (!tm || max == 0)
+      return 0;
+   while (*fmt) {
+      char c = *fmt++;
+      if (c != '%') {
+         if (o + 1 < max) s[o++] = c;
+         continue;
+      }
+      c = *fmt++;
+      switch (c) {
+      case 'Y': { int n = sprintf(s+o, "%04d", tm->tm_year + 1900); o += (size_t)n; } break;
+      case 'y': { int n = sprintf(s+o, "%02d", (tm->tm_year + 1900) % 100); o += (size_t)n; } break;
+      case 'm': { int n = sprintf(s+o, "%02d", tm->tm_mon + 1); o += (size_t)n; } break;
+      case 'd': { int n = sprintf(s+o, "%02d", tm->tm_mday); o += (size_t)n; } break;
+      case 'H': { int n = sprintf(s+o, "%02d", tm->tm_hour); o += (size_t)n; } break;
+      case 'M': { int n = sprintf(s+o, "%02d", tm->tm_min); o += (size_t)n; } break;
+      case 'S': { int n = sprintf(s+o, "%02d", tm->tm_sec); o += (size_t)n; } break;
+      case 'B': if (o+3 < max) { memcpy(s+o, icsos_months[tm->tm_mon], 3); o += 3; } break;
+      case 'b': if (o+3 < max) { memcpy(s+o, icsos_months[tm->tm_mon], 3); o += 3; } break;
+      case 'A': if (o+3 < max) { memcpy(s+o, icsos_wdays[tm->tm_wday], 3); o += 3; } break;
+      case 'a': if (o+3 < max) { memcpy(s+o, icsos_wdays[tm->tm_wday], 3); o += 3; } break;
+      case 'Z': if (o+3 < max) { memcpy(s+o, "UTC", 3); o += 3; } break;
+      case 'z': if (o+5 < max) { memcpy(s+o, "+0000", 5); o += 5; } break;
+      case 'n': if (o+1 < max) s[o++] = '\n'; break;
+      case 't': if (o+1 < max) s[o++] = '\t'; break;
+      case '%': if (o+1 < max) s[o++] = '%'; break;
+      default:  if (o+1 < max) s[o++] = '%';
+                if (o+1 < max) s[o++] = c;
+                break;
+      }
+   }
+   if (o < max) s[o] = '\0';
+   return o;
 }
 
 int gettimeofday(struct timeval *tv, struct timezone *tz)
