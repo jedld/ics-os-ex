@@ -30,23 +30,28 @@ struct k_iovec {
    unsigned long iov_len;
 };
 
-int sys_open(const char *path, int flags, int mode);
-int sys_close(int fd);
+/* POSIX syscall handlers return a 64-bit (long) value so negative errno
+ * codes are sign-extended into rax per the SysV AMD64 ABI. The int 0x30
+ * dispatcher (dex32API.c api_syscall) invokes these through an api_arg_t
+ * (64-bit) function pointer; an int-returning handler would zero-extend
+ * its 32-bit result, turning e.g. -ENOENT into a huge positive value. */
+long sys_open(const char *path, int flags, int mode);
+long sys_close(int fd);
 long sys_read(int fd, void *buf, long n);
 long sys_write(int fd, const void *buf, long n);
 long sys_lseek(int fd, long off, int whence);
 long sys_preadv(int fd, const struct k_iovec *iov, int iovcnt, long offset);
 long sys_pwritev(int fd, const struct k_iovec *iov, int iovcnt, long offset);
-int  sys_fsync(int fd);
-int  sys_fstat_fd(int fd, void *statbuf);
-int  sys_io_uring_setup(unsigned entries, void *params);
-int  sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
-                        unsigned flags);
+long  sys_fsync(int fd);
+long  sys_fstat_fd(int fd, void *statbuf);
+long  sys_io_uring_setup(unsigned entries, void *params);
+long  sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
+                         unsigned flags);
 void *sys_fd_file(int fd);
 
-int sys_waitpid(int pid, int *status, int options);
-int sys_spawn(const char *path, const char *params);
-int sys_execve(const char *path, const char *params);
-int sys_getdents(const char *path, char *buf, int buflen);
+long sys_waitpid(int pid, int *status, int options);
+long sys_spawn(const char *path, const char *params);
+long sys_execve(const char *path, const char *params);
+long sys_getdents(const char *path, char *buf, int buflen);
 
 #endif

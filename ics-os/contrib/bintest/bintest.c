@@ -120,6 +120,19 @@ static long disk_size(const char *path)
 
 int main(void)
 {
+   /* Probe: SDK snprintf width behavior (ar "File too big" investigation). */
+   {
+      char sbuf[32];
+      int sr = snprintf(sbuf, sizeof(sbuf), "%-10llu", 1032ULL);
+      int si;
+      for (si = 0; si < 16 && (unsigned char)sbuf[si]; si++) { }
+      printf("bintest: snprintf %%-10llu ret=%d len=%d hex=", sr, si);
+      {
+         int k;
+         for (k = 0; k < si; k++) printf("%02x ", sbuf[k]);
+         printf("\n");
+      }
+   }
    /* Input is first copied to /ramdisk (CD reads in a spawned child are under
       suspicion); all tool outputs go to /ramdisk. */
    char *asv[]  = { "/icsos/apps/as.exe",  "--64", "/ramdisk/mini.s",

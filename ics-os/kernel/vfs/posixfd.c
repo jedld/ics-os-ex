@@ -212,7 +212,7 @@ static int posix_to_vfs_mode(int flags)
    return FILE_READ;
 }
 
-int sys_open(const char *path, int flags, int mode)
+long sys_open(const char *path, int flags, int mode)
 {
    int fd, vmode;
    file_PCB *fcb;
@@ -257,7 +257,7 @@ static void uring_free(ics_uring *r)
       free(r);
 }
 
-int sys_close(int fd)
+long sys_close(int fd)
 {
    if (!current_process || fd < 0 || fd >= FD_MAX)
       return -EBADF;
@@ -477,7 +477,7 @@ long sys_pwritev(int fd, const struct k_iovec *iov, int iovcnt, long offset)
    }
 }
 
-int sys_fsync(int fd)
+long sys_fsync(int fd)
 {
    file_PCB *f;
    if (fd_blk(fd))
@@ -493,7 +493,7 @@ int sys_fsync(int fd)
    return 0;
 }
 
-int sys_fstat_fd(int fd, void *statbuf)
+long sys_fstat_fd(int fd, void *statbuf)
 {
    file_PCB *f = fd_file(fd);
    vfs_stat vs;
@@ -535,7 +535,7 @@ void *sys_fd_file(int fd)
    return fd_file(fd);
 }
 
-int sys_io_uring_setup(unsigned entries, void *params)
+long sys_io_uring_setup(unsigned entries, void *params)
 {
    io_uring_params *p = (io_uring_params *)params;
    ics_uring *r;
@@ -753,7 +753,7 @@ static int uring_do_sqe(io_uring_sqe *sqe)
    }
 }
 
-int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
+long sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
                        unsigned flags)
 {
    ics_uring *r;
@@ -854,7 +854,7 @@ static int spawn_load(const char *path, const char *params)
    return (int)id;
 }
 
-int sys_spawn(const char *path, const char *params)
+long sys_spawn(const char *path, const char *params)
 {
    return spawn_load(path, params);
 }
@@ -878,7 +878,7 @@ static PCB386 *waitpid_live_child(PCB386 *parent)
    return (PCB386 *)-1;
 }
 
-int sys_waitpid(int pid, int *status, int options)
+long sys_waitpid(int pid, int *status, int options)
 {
    PCB386 *me = current_process;
    int i, wpid, wst;
@@ -932,7 +932,7 @@ int sys_waitpid(int pid, int *status, int options)
    }
 }
 
-int sys_getdents(const char *path, char *ubuf, int ubuflen)
+long sys_getdents(const char *path, char *ubuf, int ubuflen)
 {
    vfs_node *dir;
    vfs_node *list;
@@ -974,7 +974,7 @@ int sys_getdents(const char *path, char *ubuf, int ubuflen)
    return off;
 }
 
-int sys_execve(const char *path, const char *params)
+long sys_execve(const char *path, const char *params)
 {
    PCB386 *me = current_process;
    PCB386 *child;

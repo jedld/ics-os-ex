@@ -735,9 +735,12 @@ int vsprintf_help(unsigned c, void **ptr ){
  */ 
 int vsprintf(char *buffer, const char *fmt, va_list args){
         int ret_val;
-
-        //ret_val = do_sprintf(fmt, args, vsprintf_help,NULL,(void*)& buffer);
-        ret_val=do_sprintf(fmt, args, vsprintf_help, (void*)& buffer);
+        /* do_sprintf advances the pointer it is given (vsprintf_help writes
+         * through it), so pass a SEPARATE cursor. Passing &buffer directly
+         * leaves buffer pointing past the end and the NUL below lands at
+         * buffer + 2*ret_val, leaving the real terminator uninitialized. */
+        char *cursor = buffer;
+        ret_val=do_sprintf(fmt, args, vsprintf_help, (void*)& cursor);
         buffer[ret_val] = '\0';
         return ret_val;
 }
