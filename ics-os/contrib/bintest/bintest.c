@@ -107,6 +107,17 @@ static int check_file(const char *path, const char *magic)
    return n;
 }
 
+/* On-disk size of path via a fresh O_RDONLY + lseek(SEEK_END). */
+static long disk_size(const char *path)
+{
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+     return -1;
+  long sz = lseek(fd, 0, SEEK_END);
+  close(fd);
+  return sz;
+}
+
 int main(void)
 {
    /* Input is first copied to /ramdisk (CD reads in a spawned child are under
@@ -155,7 +166,7 @@ int main(void)
          unsigned char rb[24];
          size_t rn = fread(rb, 1, sizeof(rb), rf);
          int ri;
-         printf("bintest: DEXPROBE fopen(/icsos/mini.s,r) fread=%zu: ", rn);
+         printf("bintest: DEXPROBE fopen(/icsos/mini.s,r) fread=%d: ", (int)rn);
          for (ri = 0; ri < (int)rn && ri < 24; ri++)
             printf("%02x", rb[ri]);
          printf("\n");
@@ -170,7 +181,7 @@ int main(void)
             const char *msg = "DEXWRITE_OK";
             size_t wn = fwrite(msg, 1, strlen(msg), wf);
             fclose(wf);
-            printf("bintest: DEXPROBE fwrite=%zu\n", wn);
+            printf("bintest: DEXPROBE fwrite=%d\n", (int)wn);
             FILE *rf2 = fopen("/ramdisk/dexprobe.out", "r");
             if (!rf2) {
                printf("bintest: DEXPROBE reopen read FAILED\n");
@@ -178,7 +189,7 @@ int main(void)
                char rb2[32];
                size_t rn2 = fread(rb2, 1, sizeof(rb2), rf2);
                int ri2;
-               printf("bintest: DEXPROBE readback=%zu: ", rn2);
+               printf("bintest: DEXPROBE readback=%d: ", (int)rn2);
                for (ri2 = 0; ri2 < (int)rn2 && ri2 < 32; ri2++)
                   printf("%02x", (unsigned char)rb2[ri2]);
                printf("\n");
@@ -252,43 +263,91 @@ int main(void)
            for (i = 0; ok && i < 2048; i++)
               if ((unsigned char)rb[i] != (i & 0xff))
                  ok = 0;
-           printf("bintest: BIGPROBE wrote=%zu read=%zu match=%d\n",
-                  wn, rn, ok);
+           printf("bintest: BIGPROBE wrote=%d read=%d match=%d\n",
+                  (int)wn, (int)rn, ok);
            fclose(lr);
         }
      }
   }
 
-  /* DEX fseek probe (the path GAS/bfd uses to reposition output). The SDK
-     fseek() always returns 0, so a broken kernel seek is invisible to callers.
-     Expected if working: after writing "0123456789", fseek(3)+fwrite("XX")
-     yields "012XX6789". Any other result localizes a broken DEX seek. */
+  /* DEX r+ seeked-write regression probe (BFD's bfd_openw pattern). Write
+     "0123456789", reopen r+, seek(3)+fwrite("XX") -> "012XX56789". The DEX
+     readback and a POSIX cross-read are compared: a DEX read of 0 with a
+     correct POSIX read localizes the fault to the DEX file_PCB read state
+     after an intervening r+ open/close (the ar/ld gate). */
   {
      FILE *f = fopen("/ramdisk/seek.w", "w");
-     if (!f) {
-        printf("bintest: SEEKPROBE fopen(w) failed\n");
-     } else {
+     if (f) {
         fwrite("0123456789", 1, 10, f);
         fclose(f);
         FILE *g = fopen("/ramdisk/seek.w", "r+");
-        if (!g) {
-           printf("bintest: SEEKPROBE fopen(r+) failed\n");
-        } else {
+        if (g) {
            fseek(g, 3, SEEK_SET);
-           long pos = ftell(g);
            fwrite("XX", 1, 2, g);
            fclose(g);
-           FILE *h = fopen("/ramdisk/seek.w", "r");
            char rb[16];
            size_t rn = 0;
+           FILE *h = fopen("/ramdisk/seek.w", "r");
            if (h) {
+              fseek(h, 0, SEEK_END);
+              long hsize = ftell(h);
+              fseek(h, 0, SEEK_SET);
+              printf("bintest: SEEKPROBE DEX-handle size(SEEK_END)=%ld\n",
+                     hsize);
               rn = fread(rb, 1, sizeof(rb) - 1, h);
               fclose(h);
            }
            if (rn < sizeof(rb) - 1)
               rb[rn] = 0;
-           printf("bintest: SEEKPROBE pos=%ld read=%zu: [%s] (want [012XX56789])\n",
-                  pos, rn, rb);
+           printf("bintest: SEEKPROBE DEX-read=%d: [%s]\n", (int)rn, rb);
+           int pf = open("/ramdisk/seek.w", O_RDONLY);
+           int pr = 0;
+           if (pf >= 0) {
+              pr = (int)read(pf, rb, sizeof(rb) - 1);
+              close(pf);
+           }
+           if (pr < 0)
+              pr = 0;
+           if (pr < (int)sizeof(rb) - 1)
+              rb[pr] = 0;
+           printf("bintest: SEEKPROBE POSIX-read=%d: [%s] (want [012XX56789])\n",
+                  pr, rb);
+        }
+     }
+  }
+
+  /* POSIX O_RDWR probe (the mode BFD's bfd_openw uses for its output): open
+     read-write, write, lseek back, write, close, read back. */
+  {
+     int of = open("/ramdisk/rw.w", O_RDWR | O_CREAT | O_TRUNC);
+     if (of < 0) {
+        printf("bintest: RWPROBE open(rw) failed\n");
+     } else {
+        write(of, "0123456789", 10);
+        close(of);
+        printf("bintest: RWPROBE after w size=%ld\n", disk_size("/ramdisk/rw.w"));
+        int of2 = open("/ramdisk/rw.w", O_RDWR);
+        if (of2 < 0) {
+           printf("bintest: RWPROBE reopen(rw) failed\n");
+        } else {
+           lseek(of2, 3, SEEK_SET);
+           write(of2, "XX", 2);
+           close(of2);
+           printf("bintest: RWPROBE size-after=%ld\n",
+                  disk_size("/ramdisk/rw.w"));
+           int rf = open("/ramdisk/rw.w", O_RDONLY);
+           char rb[16];
+           int rn = 0;
+           if (rf >= 0) {
+              rn = (int)read(rf, rb, sizeof(rb) - 1);
+              close(rf);
+           }
+           if (rn < 0)
+              rn = 0;
+           if (rn < (int)sizeof(rb) - 1)
+              rb[rn] = 0;
+           printf("bintest: RWPROBE read=%d: [%s] (want [012XX56789])\n",
+                  rn, rb);
         }
      }
   }
@@ -316,7 +375,7 @@ int main(void)
             rn = 0;
          if (rn < (int)sizeof(rb) - 1)
             rb[rn] = 0;
-         printf("bintest: PSEEKPROBE read=%d: [%s] (want [012XX6789])\n",
+         printf("bintest: PSEEKPROBE read=%d: [%s] (want [012XX56789])\n",
                 rn, rb);
       }
    }
