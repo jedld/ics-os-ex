@@ -983,32 +983,44 @@ int rename (const char *oldname, const char *newname)
 {
 
     vfs_node *filenode=vfs_searchname( oldname);
+    char newname_copy[256];
+    char newloc[256], newfname[256];
 
     if (filenode!=0 && !filenode->locked)
     {
         int fs_deviceid;
         devmgr_fs_desc *fs;
-        vfs_node *check=vfs_searchname(newname); 
+        vfs_node *check=vfs_searchname(newname);
         if (check!=0) //A file with that name already exits?
-        { 
-            //check if they are in the same directory
-            if (check->path==filenode->path) return 0;  
+        {
+            if (check==filenode)
+                return 1; //renaming a file onto itself: no-op success
+            //cross-directory rename is not supported by the FAT chattb;
+            //only allow same-directory moves.
+            if (check->path!=filenode->path) return 0;
+            //POSIX rename atomically replaces the destination: delete the
+            //existing destination node, then move the source into its place.
+            if (vfs_deletefile(check)==-1) return 0;
         };
 
-        //update filename in VFS   
-        strcpy(filenode->name,newname);
+        //update filename in VFS. node->name holds only the base filename
+        //(not the full path), so take the basename of newname.
+        if (strlen(newname)>=sizeof(newname_copy)) return 0;
+        strcpy(newname_copy,newname);
+        parsedir(newname_copy,newloc,newfname);
+        strcpy(filenode->name,newfname);
 
         //obtain the file system driver to read this file
         fs_deviceid = filenode->fsid;
         if (fs_deviceid==-1) return 0;
-        fs=(devmgr_fs_desc*)devmgr_devlist[fs_deviceid];
+        fs=(devmgr_fs_desc*)devmgr_getdevice(fs_deviceid);
         //the the file system driver to change the filename
         fs->chattb(filenode,FAT12_FNAME,filenode->memid);
 
-        return 1;     
+        return 1;
     };
 
-    return 0;  
+    return 0;
 };
 
 //adjust the file pointer of a file
@@ -1245,25 +1257,27 @@ int vfs_deletefile(vfs_node *ptr)
 {
     devmgr_fs_desc *fs;
     int fs_deviceid=0, ret;
-    
+
     if (ptr->locked) return -1; //file is open, cannot delete
     if (!vfs_removenode(ptr)) return -1;
 
     //Determine device ID of the filesystem to use
     fs_deviceid = ptr->fsid;
     if (fs_deviceid==-1) return 0;
-    
+
     fs=(devmgr_fs_desc*)devmgr_getdevice(fs_deviceid);
-    
+
     /* Tell filesystem driver to delete the file using an intermodule call
        if there is an deletefile function available for the device */
     if (fs->deletefile!=0)
+    {
         ret = bridges_call(fs, &fs->deletefile, ptr, ptr->memid);
+    }
     else
         ret = -1;
-        
-    free(ptr);        
-    return ret;    
+
+    free(ptr);
+    return ret;
 };
 
 //closes and deletes a file based on a handle

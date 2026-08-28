@@ -523,10 +523,20 @@ long sys_fstat_fd(int fd, void *statbuf)
       return -EIO;
    memset(st, 0, sizeof(*st));
    st->st_size = vs.st_size;
-   st->st_mode = 0100000 | 0777;
+   /* Report the true file type so S_ISDIR/S_ISREG work. ld's
+      find_scripts_dir() checks S_ISDIR to locate its ldscripts/
+      directory; a blanket S_IFREG made the check fail and ld could
+      not find its default linker script. */
+   st->st_mode = (f->ptr && (f->ptr->attb & FILE_DIRECTORY))
+                    ? (0040000 | 0777) /* S_IFDIR */
+                    : (0100000 | 0777); /* S_IFREG */
    st->st_atime = vs.st_atime;
    st->st_mtime = vs.st_mtime;
    st->st_ctime = vs.st_ctime;
+   /* ICS-OS has no hard-link support; every file has exactly one link.
+    * GNU binutils smart_rename() only uses rename(2) when the destination
+    * has st_nlink == 1; a zero value forces its copy-fallback path. */
+   st->st_nlink = 1;
    return 0;
 }
 

@@ -1041,6 +1041,33 @@ DWORD sectors /*sectors to add*/,int id)
 };
 
 
+int fat_get_eoc(int fat_type);
+
+/* Free every cluster of a file's chain. The original code walked the
+   chain with obtaincluster(), which is FAT12-only; on a FAT16 volume
+   (e.g. the /ramdisk) it misreads the next-cluster values, so the free
+   (0) entries get written at wild offsets, corrupting the in-memory
+   FAT and the heap. obtain_next_cluster() is type-aware, and a bounds
+   check protects against a corrupted chain that would otherwise run
+   off the end of the FAT. */
+void fat_free_cluster_chain(fatdirentry *desc, BYTE *fat,
+                            int fat_type, BPB *bpbblock, int id)
+{
+   int cluster = desc->st_clust;
+   int maxent = (int)fat_sectors_per_fat(bpbblock) * 256; /* upper bound of valid FAT entries */
+   int guard = 0;
+
+   while (cluster != 0 && cluster < fat_get_eoc(fat_type) && guard < 0x10000)
+   {
+      int next = (cluster < maxent)
+                  ? obtain_next_cluster(cluster, fat, fat_type, bpbblock, id)
+                  : 0;
+      fat_write_cluster(cluster, 0, fat, fat_type, bpbblock, id);
+      cluster = next;
+      guard++;
+   };
+}
+
 DWORD fat_deletefile(vfs_node *f,int id)
 {
    fatdirentry *desc;
@@ -1059,7 +1086,7 @@ DWORD fat_deletefile(vfs_node *f,int id)
    desc->file_size=0;
    desc->name[0]=0xe5;
    cluster=desc->st_clust; //obtain the starting cluster
-
+   
    if (fat_type!=FAT12_FAT32)
    {
            fat=(BYTE*)malloc(fat_sectors_per_fat(&bpbblock)*512);//allocate memory for FAT
@@ -1070,17 +1097,9 @@ DWORD fat_deletefile(vfs_node *f,int id)
    
    
    
-   cluster=obtaincluster(desc->st_clust,fat);
    if (desc->st_clust!=0)
    {
-      fat_write_cluster(desc->st_clust,0,fat,fat_type,&bpbblock,id);
-      
-      while (cluster < fat_get_eoc(fat_type))
-      {
-         DWORD next_cluster=obtaincluster(cluster,fat);
-         fat_write_cluster(cluster,0,fat,fat_type,&bpbblock,id);
-         cluster=next_cluster;
-      };
+      fat_free_cluster_chain(desc,fat,fat_type,&bpbblock,id);
    };
    
    desc->name[0]=0xe5; //mark file as deleted.
@@ -1118,16 +1137,9 @@ DWORD fat_rewritefile(vfs_node *f,BPB *bpbblock,int id)
    cluster=desc->st_clust; //obtain the starting cluster
    parentdir=(vfs_node*)f->path; //the parent directory of the file ... : )
    
-   cluster=obtaincluster(desc->st_clust,fat);
    if (desc->st_clust!=0)
    {
-      fat_write_cluster(desc->st_clust,0,fat,fat_type,bpbblock,id);
-      while ( cluster < fat_get_eoc(fat_type) )
-      {
-         DWORD next_cluster=obtaincluster(cluster,fat);
-         fat_write_cluster(cluster,0,fat,fat_type,bpbblock,id);
-         cluster=next_cluster;
-      };
+      fat_free_cluster_chain(desc,fat,fat_type,bpbblock,id);
    };
    
    desc->st_clust=0;
