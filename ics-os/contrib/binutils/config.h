@@ -23,6 +23,9 @@
 /* The one target we build: x86-64 ELF */
 #define TARGET_DEFAULT elf64_littleswap
 
+/* GNU debuglink search directory (dwarf2.c). A path string literal. */
+#define DEBUGDIR "/debug"
+
 /* No plugins (needs dlopen), no NLS/gettext, no demangling C++ */
 #define ENABLE_PLUGINS 0
 #define DISABLE_NLS 1

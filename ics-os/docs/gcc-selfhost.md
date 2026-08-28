@@ -29,12 +29,24 @@ host-gcc make runs a recipe — both paths PASS). `waitpid(-1)`/`WNOHANG`, `wait
 
 **binutils (this round):** `contrib/binutils/` builds the curated **libiberty —
 102/102 objects** — with host gcc against `sdk/include` + `tccsdk.c`/`posix.c`
-(same flags as `apps/make.exe`). libbfd and the `as`/`ld`/`ar` tools are the
-immediate next step. The build surfaced and closed a first batch of real SDK
-gaps (see "SDK gaps closed (binutils)"): `float.h`, `sys/param.h`,
-`sys/resource.h`, `malloc.h`, C99 `intmax_t`/`uintmax_t`, `sigset_t`/signal-set
-APIs, `F_*`/`FD_CLOEXEC`, `realpath`/`sysconf`/`getpagesize`/`pathconf`,
-extra `errno` codes — all userspace-only (no new syscalls).
+(same flags as `apps/make.exe`). The curated **libbfd ELF x86-64 subset —
+40/40 objects** (core + `elf.c`/`elflink.c` + `elf64.c`/`elf64-gen.c`/
+`elf64-x86-64.c` + archive/link support) also compiles clean against the SDK.
+The `ar`/`as`/`ld` tools are the immediate next step. The build surfaced and
+closed a first batch of real SDK gaps (see "SDK gaps closed (binutils)"):
+`float.h`, `sys/param.h`, `sys/resource.h`, `malloc.h`, `strings.h`, C99
+`intmax_t`/`uintmax_t`, `sigset_t`/signal-set APIs, `F_*`/`FD_CLOEXEC`,
+`realpath`/`sysconf`/`getpagesize`/`pathconf`, extra `errno` codes — all
+userspace-only (no new syscalls).
+
+**Generated headers:** BFD's configure normally generates `bfd.h`, `bfdver.h`,
+`bfd_stdint.h`, `targmatch.h`, `elf64-target.h`/`elf32-target.h`. These are
+committed in `contrib/binutils/` (found first via `-I`) so no autotools run is
+needed: `bfd.h` is the `bfd-in2.h` template with the 5 host-type placeholders
+substituted for a 64-bit host (`file_ptr`=`long`, `BFD64`); `targmatch.h` is a
+hand-written single-target table (ELF64 x86-64 + l1om/k1om, `&vec` pointer
+entries); `elf64-target.h`/`elf32-target.h` are `sed s/NN/64|32/` of
+`elfxx-target.h`.
 
 **Diagnostic note:** the GPF64 handler no longer halts the VM on **user** faults —
 it dumps RIP/CR2/regs then kills the child and resumes the parent (sets

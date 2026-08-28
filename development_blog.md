@@ -2,6 +2,49 @@
 
 ## 2026-08-28 (Manila, UTC+8)
 
+### 11:27 — libbfd (ELF x86-64) compiles 40/40 against the SDK
+
+**Status:** the in-OS toolchain effort keeps producing results. On top of
+libiberty (102/102, see 10:35), the curated **libbfd — 40/40 objects** — now
+compiles clean with host gcc against the ICS-OS SDK: the BFD core
+(`bfd.c`/`bfdio.c`/`bfdwin.c`/`cache.c`/`opncls.c`/`archures.c`/`targets.c`/
+`section.c`/`syms.c`/`reloc.c`/`hash.c`/`linker.c`/`format.c`/`init.c`/
+`cpu-i386.c`/...), the archives (`archive.c`/`archive64.c`/`coffgen.c`), and
+the **ELF64 x86-64 target** (`elf.c`/`elflink.c` + `elf64.c`/`elf64-gen.c`/
+`elf64-x86-64.c` + `elf-strtab.c`/`elf-eh-frame.c`/`elf-attrs.c`/`elf-ifunc.c`)
+plus `dwarf2.c`. `make -C ics-os/contrib/binutils libbfd` → "40 objects built
+OK". The `ar`/`as`/`ld` tools are next.
+
+**How:** BFD's configure normally *generates* several headers. Instead of
+running autotools, I committed the generated headers into `contrib/binutils/`
+(found first via `-I`):
+- `bfd.h` = the shipped `bfd-in2.h` template with its 5 host-type
+  placeholders substituted for a 64-bit host (`file_ptr`/`ufile_ptr` =
+  `long`/`unsigned long`, `BFD_ARCH_SIZE`=64, `BFD_DEFAULT_TARGET_SIZE`=64,
+  `BFD_SUPPORTS_PLUGINS`=0, `BFD_HOST_64_BIT`=`long`).
+- `targmatch.h` = hand-written single-target table (ELF64 x86-64 + l1om/k1om),
+  with `&vec` pointer entries matching the real sed output.
+- `elf64-target.h`/`elf32-target.h` = `sed s/NN/64|32/` of `elfxx-target.h`.
+- `bfdver.h` (version 2.23) and `bfd_stdint.h` (C99 fixed-width typedefs).
+`config.h` also gained `DEBUGDIR "/debug"` (dwarf2.c) and no plugins/NLS.
+
+**Gaps this closed:** `strings.h` (new SDK header: `strcasecmp`/`strncasecmp`,
+backed by libiberty) was the only missing header — `sysdep.h`'s other includes
+(`stdio`/`stdlib`/`string`/`sys/types`/`sys/stat`/`sys/time`/`time`/`unistd`/
+`fcntl`/`errno`) all existed. The libbfd build was otherwise clean against the
+SDK, confirming the libiberty-round gap list was comprehensive.
+
+**Next (in order):**
+1. Build **`ar`** (uses libbfd archive + libiberty) into a static ELF64 `.exe`;
+   then **`as`** (gas) and **`ld`**.
+2. Stage `ar`/`as`/`ld` on `/work`; in-OS `test-bintools`: `ar rcs` +
+   `as prog.s` + `ld -o prog.exe` + exec `prog.exe` → PASS.
+3. Regressions (`test-integration`/`test-spawn`/`test-make`) + commit.
+
+**Files touched:** `contrib/binutils/{Makefile,config.h,bfd.h,bfdver.h,
+bfd_stdint.h,targmatch.h,elf64-target.h,elf32-target.h}`, `sdk/include/
+strings.h`, `docs/gcc-selfhost.md`, this blog.
+
 ### 10:35 — libiberty builds 102/102 against the SDK (first real gap list)
 
 **Status:** the in-OS toolchain effort (see 09:35 pivot) is producing its first
