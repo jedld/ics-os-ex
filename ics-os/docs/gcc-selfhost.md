@@ -32,14 +32,15 @@ host-gcc make runs a recipe — both paths PASS). `waitpid(-1)`/`WNOHANG`, `wait
 (same flags as `apps/make.exe`). The curated **libbfd ELF x86-64 subset —
 40/40 objects** (core + `elf.c`/`elflink.c` + `elf64.c`/`elf64-gen.c`/
 `elf64-x86-64.c` + archive/link support) compiles clean against the SDK.
-**Two tools now build:** `ar.exe` (ar frontend + libbfd + libiberty) and
-`as.exe` (GAS core 33 objects + opcodes i386 + libbfd + libiberty) both link
+**Three tools now build:** `ar.exe` (ar frontend + libbfd + libiberty),
+`as.exe` (GAS core 33 objects + opcodes i386 + libbfd + libiberty) and
+`ld.exe` (ld core + the `elf_x86_64` emulation + libbfd + libiberty) all link
 as statically-linked ELF64 x86-64 ICS-OS user executables (`int 0x30` ABI).
 Key i386 finding: the cgen/itbl table backends (`itbl-ops.c`/`cgen.c`, MIPS
 only, `HAVE_ITBL_CPU`) are NOT part of the i386 build — `as.c` compiles
 `#define itbl_init()` (no-op) for non-itbl targets, and the target files
 (`obj-elf.c`/`atof-ieee.c`/`tc-i386.c`) come from `gas/config/`. `DEFAULT_ARCH`
-must be the string `"x86_64"`, not a BFD enum. `ld` is the next tool. The build
+must be the string `"x86_64"`, not a BFD enum. The build
 surfaced and closed a first batch of real SDK gaps (see "SDK gaps closed
 (binutils)"):
 `float.h`, `sys/param.h`, `sys/resource.h`, `malloc.h`, `strings.h`, C99
@@ -91,6 +92,62 @@ Closed while compiling libiberty against the SDK (all in `sdk/`):
 `RLIMIT_NOFILE`=256) — no kernel backing yet. **Open kernel item:** the SDK
 `fcntl` is a stub (returns 0); `F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL` need a
 kernel side before libbfd file I/O is fully correct.
+
+## ld (the linker) round
+
+`ld.exe` builds from the 2.23 `ld/` core (`ldctor/ldemul/ldexp/ldfile/ldlang/
+ldmain/ldmisc/ldver/ldwrite/lexsup/mri/ldcref/pe-dll/pep-dll/ldlex-wrapper/
+ldgram/deffilep`) + the `elf_x86_64` emulation, linked against libbfd +
+libiberty + the SDK runtime. Findings and the build's quirks:
+
+- **Emulation is generated, so it is committed.** `ld/Makefile.in` produces
+  `eelf_x86_64.c` from `emulparams/elf_x86_64.sh` + `emultempl/elf.em` +
+  `scripttempl/elf.sc` via `genscripts.sh` (it inlines the `elf_x86_64`
+  linker script as a C string). We ran that script once and commit
+  `contrib/binutils/eelf_x86_64.c` (found via `-I$(CONFDIR)` before
+  `$(SRC)/ld`). `ldemul-list.h` (the `EMULATION_LIST`) is a one-line
+  `&ld_elf_x86_64_emulation` hand-written to match the `Makefile.in` rule.
+  Both are found in `CONFDIR` before `$(SRC)/ld`, so `#include
+  "ldemul-list.h"` and `#include "eelf_x86_64.c"` resolve to our committed
+  copies.
+
+- **Configure-injected defines.** Upstream passes `-DDEFAULT_EMULATION='"
+  $(EMUL)"'`, `-DSCRIPTDIR=...`, `-DBINDIR=...`, `-DTOOLBINDIR=...` on the ld
+  objects. We inject the same via `LDDEFS` (`DEFAULT_EMULATION` must equal the
+  emulation's `.name`, `elf_x86_64`).
+
+- **`#ifdef` vs `#if 0` traps (config.h).** `ld/sysdep.h` does
+  `#ifdef HAVE_DLFCN_H → #include <dlfcn.h>` and the plugin code is gated by
+  `#ifdef ENABLE_PLUGINS` — *definition* tests, not value tests. A plugins-off
+  upstream build therefore leaves **both undefined**, so `config.h` must not
+  `#define ENABLE_PLUGINS 0` / `#define HAVE_DLFCN_H 0` (a 0 definition still
+  triggers `#ifdef` and pulls in `<dlfcn.h>`). They are intentionally undefined
+  in our `config.h`.
+
+- **`ldlex.c` compiles through `ldlex-wrapper.c`.** The checked-in 2.23
+  `ldlex.c` (flex output) includes `bfd.h` with no prior `sysdep.h`/`config.h`,
+  but `ldlex-wrapper.c` is just `#include "sysdep.h"` + `#include "ldlex.c"` —
+  so it compiles `ldlex.c` with `config.h` loaded first. Upstream compiles
+  *only* the wrapper (`CFILES` lists `ldlex-wrapper.c`, not `ldlex.c`); listing
+  both gives "multiple definition of `yy*`/`lex_*`". We follow that.
+
+- **`strpbrk`** was missing from the SDK (ld's `ldlang.c` uses it for option
+  parsing). Added to `tccsdk.c` + declared in `sdk/include/string.h`
+  (alongside `strspn`/`strcspn`).
+
+- **No C++ demangler.** libiberty's `cp-demangle.c` is not built (no C++
+  runtime). `demangle-stub.c` now provides `cplus_demangle` (→NULL), the
+  `current_demangling_style` global, and `cplus_demangle_set_style` /
+  `cplus_demangle_name_to_style` (ldlang.c / lexsup.c call these
+  unconditionally for symbol display). `demangle.h` is self-contained, so the
+  stub includes it for the exact enum.
+
+**Host-run caveat:** `as.exe`/`ld.exe`/`ar.exe` are `int 0x30`-ABI ICS-OS user
+executables (SDK runtime), so running them on host Linux segfaults at the first
+syscall (expected — the `int 0x30` gate does not exist in Linux). Their
+functional test is **in-OS** (the `test-bintools` target, next step): `ar rcs`,
+`as prog.s -o prog.o`, `ld -o prog.exe prog.o`, then exec `prog.exe` and check
+the output on serial.
 
 ## Why TinyCC-kbuild is deferred
 

@@ -1052,6 +1052,20 @@ size_t strspn(const char *s1, const char *s2){
    return (p - 1 - s1);
 }
 
+/* Return a pointer to the first occurrence in s1 of any character in s2,
+ * or NULL if none. (Used by GNU ld's ldlang.c for option parsing.) */
+char *strpbrk(const char *s1, const char *s2){
+   const char *p;
+   char c;
+
+   for (p = s1; *p; p++){
+      c = *p;
+      if (c != 0 && strchr(s2, c) != 0)
+         return (char *)p;
+   }
+   return 0;
+}
+
 char *strcat(char *s, const char *append){
    char *save = s;
 

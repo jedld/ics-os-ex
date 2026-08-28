@@ -155,6 +155,37 @@ GAS_O       := $(patsubst %.c,$(OBJ)/gas/%.o,$(GAS_C))
 GAS_CFG_O   := $(patsubst %.c,$(OBJ)/gas/%.o,$(GAS_CFG_C))
 AS_EXE      := $(CURDIR)/as.exe
 
+# ---- ld (the linker) ----
+# Core from ld/Makefile.in CFILES + GENERATED_CFILES. The bison/flex outputs
+# (ldgram.c, ldlex.c, deffilep.c) are checked into the 2.23 tarball, so no
+# yacc/lex run is needed. The two *generated* build artifacts we provide
+# ourselves:
+#   eelf_x86_64.c  - the elf_x86_64 emulation. Upstream it is produced by
+#                    genscripts.sh (emulparams/elf_x86_64.sh + emultempl/elf.em
+#                    + scripttempl/elf.sc). We ran that script once and commit
+#                    the result here (found via -I$(CONFDIR) before $(SRC)/ld).
+#   ldemul-list.h  - the EMULATION_LIST; for our single target it is just
+#                    &ld_elf_x86_64_emulation (hand-written, same shape as the
+#                    Makefile.in rule produces).
+# ldemul.c does `#include "ldemul-list.h"` and it must find OUR single-target
+# list (CONFDIR) before any in $(SRC)/ld — the -I order already guarantees
+# that.
+LD_C := \
+	ldctor.c ldemul.c ldexp.c ldfile.c ldlang.c \
+	ldmain.c ldmisc.c ldver.c ldwrite.c lexsup.c \
+	mri.c ldcref.c pe-dll.c pep-dll.c ldlex-wrapper.c \
+	ldgram.c deffilep.c
+LD_EMU_C := eelf_x86_64.c
+
+LD_O   := $(patsubst %.c,$(OBJ)/ld/%.o,$(LD_C))
+LD_EMU := $(OBJ)/ld/eelf_x86_64.o
+LD_EXE := $(CURDIR)/ld.exe
+
+# ld core includes live in ld/ (in the global INC). The emulation file
+# includes "elf/common.h" / "elf-bfd.h" (in $(SRC)/bfd, also global). No extra
+# include dirs are required beyond the global INC + CONFDIR (for ldemul-list.h
+# and eelf_x86_64.c).
+
 # GAS includes use the repo-root prefix ("bfd/elf-bfd.h", "opcodes/...") and
 # the gas/config dir for target headers, which the global INC does not have.
 # $(OBJ)/gas is added so the generated target headers below are found.
@@ -178,7 +209,7 @@ $(OBJ)/gas/targ-cpu.h: $(SRC)/gas/config/tc-i386.h
 
 .PHONY: libiberty libbfd opcodes gas all ar as ld clean
 
-all: ar
+all: ar as ld
 
 libiberty: $(LIBIBERTY_O)
 	@echo "libiberty: $(words $(LIBIBERTY_O)) objects built OK"
@@ -213,12 +244,12 @@ $(AR_EXE): $(AR_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
 		$(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
 	@echo "ar: linked $(AR_EXE)"
 
-install: ar
+install: ar as ld
 	mkdir -p $(ICSOS_ROOT)/apps
-	cp $(AR_EXE) $(ICSOS_ROOT)/apps
+	cp $(AR_EXE) $(AS_EXE) $(LD_EXE) $(ICSOS_ROOT)/apps
 
 uninstall:
-	rm -f $(ICSOS_ROOT)/apps/ar.exe
+	rm -f $(ICSOS_ROOT)/apps/ar.exe $(ICSOS_ROOT)/apps/as.exe $(ICSOS_ROOT)/apps/ld.exe
 
 # ---- opcodes + GAS (assembler) ----
 opcodes: $(OPCODES_O)
@@ -258,8 +289,39 @@ $(AS_EXE): $(GAS_O) $(GAS_CFG_O) $(OPCODES_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLI
 		$(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
 	@echo "as: linked $(AS_EXE)"
 
-ld: libiberty
-	@echo "ld: (libbfd + ld next)"
+# ld: compile the core objects + the emulation object, then link against
+# libbfd + libiberty + the SDK runtime into a single static ELF64 user
+# executable (same pattern as ar.exe / as.exe).
+ld: $(LD_EXE)
+
+# ld's configure injects the install dirs + default emulation as -D string
+# literals. ldfile.c's find_scripts_dir() uses the dirs to locate linker
+# scripts (for the in-OS tool the scripts are embedded in eelf_x86_64.c via
+# genscripts.sh, so the paths are nominal). DEFAULT_EMULATION is the name
+# matched in ldemul.c (must equal the emulation's .name, "elf_x86_64").
+LDDEFS := -DSCRIPTDIR=\"/usr/lib\" -DBINDIR=\"/usr/bin\" -DTOOLBINDIR=\"/usr/bin\" \
+	-DDEFAULT_EMULATION=\"elf_x86_64\"
+
+# Every ld core file includes ld/sysdep.h before bfd.h, and ld/sysdep.h in turn
+# includes config.h (which defines PACKAGE/PACKAGE_VERSION that bfd.h requires).
+# The pre-generated ldlex.c is compiled through ldlex-wrapper.c, which includes
+# sysdep.h first, so no force-include is needed anywhere.
+$(OBJ)/ld/%.o: $(SRC)/ld/%.c $(CONF) $(CURDIR)/ldemul-list.h
+	@mkdir -p $(OBJ)/ld
+	$(CC) $(CFLAGS) $(LDDEFS) -c $< -o $@
+
+# The emulation file lives in $(CURDIR) (committed generated source), so it is
+# compiled directly rather than from $(SRC)/ld.
+$(LD_EMU): $(CURDIR)/eelf_x86_64.c $(CONF) $(CURDIR)/ldemul-list.h
+	@mkdir -p $(OBJ)/ld
+	$(CC) $(CFLAGS) $(LDDEFS) -c $< -o $@
+
+$(LD_EXE): $(LD_O) $(LD_EMU) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
+	   $(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
+	$(CC) $(CFLAGS) $(APP_LDFLAGS) -o$@ \
+		$(LD_O) $(LD_EMU) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
+		$(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
+	@echo "ld: linked $(LD_EXE)"
 
 clean:
 	rm -rf $(STAGE)

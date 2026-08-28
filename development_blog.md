@@ -2,6 +2,87 @@
 
 ## 2026-08-28 (Manila, UTC+8)
 
+### 17:40 — ld (GNU ld 2.23) builds and links: `ld.exe`
+
+**Goal:** the third binutils tool — the GNU linker. `ld` is the last
+binutils piece before the GCC 4.7.4 self-host step (GCC emits `.o` via
+`as` and needs `ld` to produce the final executable).
+
+**Approach:** mirror the `ar`/`as` recipe. `ld` core = 17 `ld/*.c` files
+(the 2.23 `CFILES` + the checked-in generated `ldgram.c`/`ldlex.c`/
+`deffilep.c`) plus the `elf_x86_64` emulation, linked against the
+already-built libbfd + libiberty + SDK runtime.
+
+**Findings / obstacles:**
+
+- **The emulation is a *generated* file, so it must be committed.**
+  Upstream `ld/Makefile.in` produces `eelf_x86_64.c` by running
+  `genscripts.sh emulparams/elf_x86_64.sh emultempl/elf.em
+  scripttempl/elf.sc` (it inlines the `elf_x86_64` linker script as a C
+  string). I ran that script once and committed the result as
+  `contrib/binutils/eelf_x86_64.c`, plus a hand-written
+  `contrib/binutils/ldemul-list.h` (the one-entry `EMULATION_LIST`). Both
+  sit in the `CONFDIR` include dir, which is searched *before*
+  `$(SRC)/ld`, so `#include "ldemul-list.h"` (from `ldemul.c`) and
+  `#include "eelf_x86_64.c"` (from `ldctor.c`) resolve to our copies.
+
+- **Configure-injected `-D` strings.** `ldmain.c` needs
+  `DEFAULT_EMULATION` (the default `emulparams` name), and `ldfile.c`'s
+  `find_scripts_dir()` needs `SCRIPTDIR`/`BINDIR`/`TOOLBINDIR`. Upstream
+  injects these per-object from `Makefile.in`; we do the same via `LDDEFS`
+  in the Makefile (`DEFAULT_EMULATION=\"elf_x86_64\"` must equal the
+  emulation's `.name`).
+
+- **`#ifdef` vs `#if 0` trap in config.h.** `ld/sysdep.h` does
+  `#ifdef HAVE_DLFCN_H → #include <dlfcn.h>`, and the plugin code is gated
+  by `#ifdef ENABLE_PLUGINS`. Those are *definition* tests — a
+  `#define HAVE_DLFCN_H 0` still trips `#ifdef` and fails on the missing
+  `<dlfcn.h>`. A plugins-off upstream build leaves both macros
+  **undefined**, so I removed `#define ENABLE_PLUGINS 0` and
+  `#define HAVE_DLFCN_H 0` from `config.h` (documented there).
+
+- **`ldlex.c` must be compiled through `ldlex-wrapper.c`, not directly.**
+  The checked-in 2.23 `ldlex.c` includes `bfd.h` with no prior
+  `sysdep.h`/`config.h`, but `bfd.h` refuses to parse unless
+  `PACKAGE`/`PACKAGE_VERSION` are already defined. `ldlex-wrapper.c` is
+  literally `#include "sysdep.h"` + `#include "ldlex.c"` (sysdep.h includes
+  config.h first). Upstream `CFILES` lists only `ldlex-wrapper.c` — I had
+  also listed `ldlex.c`, which produced a wall of "multiple definition of
+  `yy*`/`lex_*`". Removed `ldlex.c` from `LD_C`; a force-include of
+  `config.h` is then unnecessary anywhere.
+
+- **`strpbrk` was missing from the SDK** (ld's `ldlang.c` uses it for
+  option parsing). Implemented in `sdk/tccsdk.c` (alongside
+  `strspn`/`strcspn`) and declared in `sdk/include/string.h`.
+
+- **No C++ demangler in the tree** (no C++ runtime). `demangle-stub.c`
+  now also provides `current_demangling_style` (global),
+  `cplus_demangle_set_style()` and `cplus_demangle_name_to_style()` —
+  `ldlang.c`/`lexsup.c` call these unconditionally for symbol display.
+  `demangle.h` is self-contained, so the stub includes it for the exact
+  enum.
+
+**Result:** `make ld` compiles all 18 ld objects + `eelf_x86_64.c` and
+links `ld.exe` — a statically-linked ELF64 x86-64 **ICS-OS user
+executable** (1.28 MB). As with `as.exe`/`ar.exe` it does not run on the
+host (it uses `int 0x30` syscalls; `./ld.exe --version` segfaults on the
+host, same as `as.exe`) — it is an in-OS tool. Functional in-OS
+validation is the next step: a QEMU `test-bintools` that runs
+`ar`/`as`/`ld` in-OS (assemble a `.s`, link it, exec the result) against
+the FAT `/work` disk, following the `test-spawn`/`test-make` harness
+pattern.
+
+**Files touched:** `contrib/binutils/Makefile` (LD_C/LD_EMU/LDDEFS,
+`ld` target + compile/link rules), `contrib/binutils/config.h` (dropped
+`ENABLE_PLUGINS`/`HAVE_DLFCN_H` defines), `contrib/binutils/ldemul-list.h`
+(new), `contrib/binutils/eelf_x86_64.c` (new, generated once),
+`contrib/binutils/demangle-stub.c` (3 new symbols), `sdk/tccsdk.c`
+(`strpbrk`), `sdk/include/string.h` (prototype),
+`docs/gcc-selfhost.md` (ld round).
+
+**Next:** the in-OS `test-bintools` QEMU harness (run as/ar/ld in-OS,
+exec the linked output, grep `BINTOOLS_PASS`), then GCC 4.7.4 (C-only).
+
 ### 11:27 — libbfd (ELF x86-64) compiles 40/40 against the SDK
 
 **Status:** the in-OS toolchain effort keeps producing results. On top of

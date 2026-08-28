@@ -40,8 +40,11 @@
 /* GNU debuglink search directory (dwarf2.c). A path string literal. */
 #define DEBUGDIR "/debug"
 
-/* No plugins (needs dlopen), no NLS/gettext, no demangling C++ */
-#define ENABLE_PLUGINS 0
+/* No plugins (needs dlopen), no NLS/gettext, no demangling C++.
+ * ENABLE_PLUGINS and HAVE_DLFCN_H must be LEFT UNDEFINED (not #define'd 0):
+ * the sources gate on `#ifdef ENABLE_PLUGINS` / `#ifdef HAVE_DLFCN_H`
+ * (definition, not value), and sysdep.h does `#ifdef HAVE_DLFCN_H ->
+ * #include <dlfcn.h>`. A plugins-off upstream build defines neither. */
 #define DISABLE_NLS 1
 #define HAVE_W32_API 0
 
@@ -168,7 +171,8 @@
 #define HAVE_MLOCKALL 0
 #define HAVE_SHM_GET 0
 #define HAVE_MACH_O_DYLD_H 0
-#define HAVE_DLFCN_H 0
+/* HAVE_DLFCN_H intentionally undefined (see note at top): it is #ifdef-tested
+ * and a 0 definition would still pull in <dlfcn.h>. */
 #define HAVE_DLOPEN 0
 #define HAVE_DLERROR 0
 #define HAVE_DLADDR 0
