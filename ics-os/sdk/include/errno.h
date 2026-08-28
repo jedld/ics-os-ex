@@ -19,5 +19,12 @@ extern int errno;
 #define ENOSYS  38
 #define ENOEXEC 8
 #define ECHILD  10
+#define ENAMETOOLONG 36
+#define ELOOP     40
+#define EISDIR    21
+#define ENOTEMPTY 39
+#define EPIPE     32
+#define ESRCH     3
+#define EDEADLK   35
 
 #endif

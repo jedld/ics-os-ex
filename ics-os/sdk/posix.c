@@ -1098,3 +1098,180 @@ void *icsos_alloca(unsigned long n)
       n = 1;
    return malloc(n);
 }
+
+/*
+ * Path / memory / resource queries. Added for the in-OS toolchain
+ * (GNU binutils: libbfd getpagesize, ld realpath, libiberty pathconf /
+ * sysconf / getrlimit). Userspace-only: no new syscalls.
+ */
+#include <sys/resource.h>
+#include <sys/param.h>
+
+#define ICS_PAGE_SIZE 4096
+
+int getpagesize(void)
+{
+   return ICS_PAGE_SIZE;
+}
+
+long sysconf(int name)
+{
+   switch (name) {
+   case _SC_PAGESIZE:
+      return ICS_PAGE_SIZE;
+   case _SC_CLK_TCK:
+      return 100;
+   case _SC_NPROCESSORS_CONF:
+   case _SC_NPROCESSORS_ONLN:
+      return 1;   /* conservative; no user-visible cpu count syscall */
+   default:
+      return -1;
+   }
+}
+
+long pathconf(const char *path, int name)
+{
+   (void)path;
+   switch (name) {
+   case _PC_PATH_MAX:
+      return PATH_MAX;
+   case _PC_NAME_MAX:
+      return NAME_MAX;
+   default:
+      return -1;
+   }
+}
+
+/* Canonicalise a path without following symlinks beyond the final
+   component (ICS-OS has no symlinks yet). Resolves "." and ".." lexically. */
+char *realpath(const char *path, char *resolved)
+{
+   char *out, *w;
+   const char *p;
+   size_t len;
+   int nseg, i, segs[64];
+   char names[64][256];
+   int abs;
+
+   if (!path || !*path) { errno = ENOENT; return 0; }
+   abs = (path[0] == '/');
+
+   nseg = 0;
+   p = path;
+   while (nseg < 64) {
+      while (*p == '/') p++;
+      if (!*p) break;
+      w = names[nseg];
+      len = 0;
+      while (*p && *p != '/' && len < 255) w[len++] = *p++;
+      w[len] = 0;
+      if (len == 0) continue;
+      if (len == 1 && w[0] == '.') continue;
+      if (len == 2 && w[0] == '.' && w[1] == '.') {
+         if (nseg > 0) nseg--;
+         continue;
+      }
+      names[nseg][255] = 0;
+      nseg++;
+   }
+   if (nseg >= 64) { errno = ENAMETOOLONG; return 0; }
+
+   out = resolved ? resolved : (char *)malloc(PATH_MAX);
+   if (!out) { errno = ENOMEM; return 0; }
+
+   if (abs) out[0] = '/'; else out[0] = 0;
+   w = out + (abs ? 1 : 0);
+   for (i = 0; i < nseg; i++) {
+      if (w != out) *w++ = '/';
+      len = strlen(names[i]);
+      memcpy(w, names[i], len);
+      w += len;
+   }
+   *w = 0;
+   if (out[0] == 0) out[0] = '/';
+   return out;
+}
+
+/* Per-process resource limits. ICS-OS keeps them in the SDK (no kernel
+   backing); defaults are "unlimited" so tools that probe them (binutils
+   stack-limit) behave. */
+static struct rlimit ics_rlimits[16];
+static int ics_rlimits_init = 0;
+
+static void rlimits_init(void)
+{
+   int i;
+   for (i = 0; i < 16; i++) {
+      ics_rlimits[i].rlim_cur = RLIM_INFINITY;
+      ics_rlimits[i].rlim_max = RLIM_INFINITY;
+   }
+   ics_rlimits[RLIMIT_NOFILE].rlim_cur = 256;
+   ics_rlimits[RLIMIT_NOFILE].rlim_max = 256;
+   ics_rlimits_init = 1;
+}
+
+int getrlimit(int resource, struct rlimit *rlim)
+{
+   if (!ics_rlimits_init) rlimits_init();
+   if (!rlim || resource < 0 || resource > 15) { errno = EINVAL; return -1; }
+   *rlim = ics_rlimits[resource];
+   return 0;
+}
+
+int setrlimit(int resource, const struct rlimit *rlim)
+{
+   if (!ics_rlimits_init) rlimits_init();
+   if (!rlim || resource < 0 || resource > 15) { errno = EINVAL; return -1; }
+   ics_rlimits[resource] = *rlim;
+   return 0;
+}
+
+/* POSIX signal sets. ICS-OS has no per-process hardware signal delivery;
+   the set is tracked in the SDK so mask APIs are functional for binutils
+   (libiberty sigsetmask.c, ld job control). */
+static sigset_t ics_sigmask;
+
+void sigemptyset(sigset_t *set)
+{
+   if (set) memset(set, 0, sizeof(*set));
+}
+void sigfillset(sigset_t *set)
+{
+   if (set) memset(set, 0xff, sizeof(*set));
+}
+void sigaddset(sigset_t *set, int signum)
+{
+   if (set && signum > 0 && signum <= 128)
+      set->bits[signum / 64] |= 1UL << (signum % 64);
+}
+void sigdelset(sigset_t *set, int signum)
+{
+   if (set && signum > 0 && signum <= 128)
+      set->bits[signum / 64] &= ~(1UL << (signum % 64));
+}
+int sigismember(const sigset_t *set, int signum)
+{
+   if (!set || signum <= 0 || signum > 128) return 0;
+   return (set->bits[signum / 64] >> (signum % 64)) & 1;
+}
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
+{
+   if (oldset) *oldset = ics_sigmask;
+   if (set) {
+      if (how == SIG_BLOCK) {
+         int i; for (i = 0; i < 4; i++) ics_sigmask.bits[i] |= set->bits[i];
+      } else if (how == SIG_UNBLOCK) {
+         int i; for (i = 0; i < 4; i++) ics_sigmask.bits[i] &= ~set->bits[i];
+      } else { /* SIG_SETMASK */
+         ics_sigmask = *set;
+      }
+   }
+   return 0;
+}
+int raise(int sig)
+{
+   /* No delivery mechanism; a fatal self-raise terminates like kill. */
+   if (sig > 0 && sig <= 128)
+      _exit(128 + (sig & 127));
+   return 0;
+}

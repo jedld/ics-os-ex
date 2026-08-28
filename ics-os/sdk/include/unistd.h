@@ -48,6 +48,27 @@ int getgid(void);
 int getegid(void);
 int mkstemp(char *template);
 
+/* Path / memory queries (GNU binutils: libbfd getpagesize, ld realpath,
+   libiberty pathconf/_PC_PATH_MAX). */
+char *realpath(const char *path, char *resolved);
+long sysconf(int name);
+int getpagesize(void);
+long pathconf(const char *path, int name);
+
+#define _SC_PAGESIZE    30
+#define _SC_PAGE_SIZE   30
+#define _SC_NPROCESSORS_CONF 83
+#define _SC_NPROCESSORS_ONLN 84
+#define _SC_PHYS_PAGES 80
+#define _SC_AVPHYS_PAGES 81
+#define _SC_CLK_TCK   2
+
+#define _PC_NAME_MAX  0
+#define _PC_PATH_MAX  1
+#define _PC_LINK_MAX  2
+#define _PC_MAX_CANON 3
+#define _PC_MAX_INPUT 4
+
 extern char **environ;
 
 #endif

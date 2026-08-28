@@ -2,6 +2,64 @@
 
 ## 2026-08-28 (Manila, UTC+8)
 
+### 10:35 — libiberty builds 102/102 against the SDK (first real gap list)
+
+**Status:** the in-OS toolchain effort (see 09:35 pivot) is producing its first
+concrete results. `contrib/binutils/` (config.h + Makefile overlay, no
+autotools) now compiles the entire curated **libiberty** — **102/102 objects** —
+with host gcc against the ICS-OS SDK headers (`-nostdinc -I sdk/include`,
+`-DHAVE_CONFIG_H`). libbfd and the as/ld/ar tools are next.
+
+**How it works:** the Makefile compiles each libiberty source with the SDK
+include tree first (so SDK headers win over host libc), our `config.h`
+(`-I contrib/binutils`), and the binutils include trees; objects go to
+`/tmp/icsos-binutils/obj`. The SDK is the authoritative type source, so
+`config.h` deliberately does **not** re-typedef `mode_t`/`pid_t`/etc. (early
+builds failed on `mode_t` conflicts until that was removed).
+
+**OS gaps this closed (the "gap list" the pivot promised):**
+- **New SDK headers:** `float.h` (IEEE float limits), `sys/param.h`
+  (`PATH_MAX`/`PAGE_SIZE`/`MAXPATHLEN`/`MIN`/`MAX`/`roundup`), `sys/resource.h`
+  (`struct rlimit`, `RLIMIT_*`), `malloc.h` (legacy shim over `stdlib.h`).
+- **C99 types:** added `intmax_t`/`uintmax_t` + 64-bit limits to `sdk/include/
+  stdint.h` (binutils `strtoumax`, `PRIxMAX` need them).
+- **`signal.h`:** added `sigset_t`, `sigaction`, `SA_*`, and `sig*`/`raise`
+  prototypes (libiberty `sigsetmask.c`, ld job control).
+- **`fcntl.h`:** added `F_DUPFD`/`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL` and
+  `FD_CLOEXEC` (libiberty `pex-unix.c`; libbfd may use `fcntl`).
+- **`unistd.h`:** added `realpath`, `sysconf`, `getpagesize`, `pathconf` and
+  the `_SC_*`/`_PC_*` names (libbfd `getpagesize`, ld `realpath`,
+  `pathconf(_PC_PATH_MAX)`).
+- **`errno.h`:** added `ENAMETOOLONG`, `ELOOP`, `EISDIR`, `ENOTEMPTY`, `EPIPE`,
+  `ESRCH`, `EDEADLK`.
+- **`posix.c` implementations:** `getpagesize` (4096), `sysconf` (`_SC_PAGESIZE`,
+  `_SC_CLK_TCK`=100, `_SC_NPROCESSORS_*`=1), `pathconf` (`_PC_PATH_MAX`/
+  `_PC_NAME_MAX`), lexical `realpath`, in-SDK `getrlimit`/`setrlimit`
+  (default unlimited, `RLIMIT_NOFILE`=256), and POSIX signal-set ops
+  (`sigemptyset`/`sigfillset`/`sigaddset`/`sigdelset`/`sigismember`/
+  `sigprocmask`/`raise`). All userspace-only — **no new kernel syscalls**.
+  `posix.c` re-verified to compile cleanly under the SDK flags.
+
+**Decisions:** libiberty files with no consumer in as/ld/ar, or that would
+duplicate an SDK symbol (`gettimeofday.c`, `getpagesize.c`, `lrealpath.c`), are
+excluded from the build list. `config.h` sets `HAVE_STDDEF_H`/`HAVE_STDLIB_H`/
+`HAVE_SYS_PARAM_H`/`HAVE_SYS_RESOURCE_H`/`HAVE_FLOAT_H`/`HAVE_GETPAGESIZE`/
+`HAVE_SYSCONF`/`HAVE_PATHCONF`/`HAVE_GETRLIMIT`/`HAVE_SETRLIMIT`/`HAVE_TIME_H`
+so libiberty/libbfd gate the right includes.
+
+**Next (in order):**
+1. Implement/verify the `fcntl(F_GETFD/F_SETFD/F_GETFL)` kernel side so
+   libbfd's file handling is correct (SDK `fcntl` is currently a stub returning
+   0).
+2. Build **libbfd** (ELF x86-64 subset) against the SDK; close its gaps.
+3. Build `ar` (then `as`, then `ld`) into `apps/`; stage on `/work`.
+4. In-OS `test-bintools`: `ar rcs` + `as prog.s` + `ld` link + exec → PASS.
+5. Regressions (`test-integration`/`test-spawn`/`test-make`) + commit.
+
+**Files touched:** `contrib/binutils/{Makefile,config.h}`, `sdk/include/
+{float.h,sys/param.h,sys/resource.h,malloc.h,stdint.h,signal.h,fcntl.h,
+unistd.h,errno.h}`, `sdk/posix.c`, this blog.
+
 ### 09:35 — Pivot: host-built toolchain self-build (Phase 1: binutils)
 
 **Direction change (user):** drop the TCC bootstrap. The capstone goal is for

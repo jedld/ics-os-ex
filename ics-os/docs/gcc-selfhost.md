@@ -27,11 +27,41 @@ Overlay: `contrib/binutils/` (config.h + Makefile, same pattern as
 host-gcc make runs a recipe — both paths PASS). `waitpid(-1)`/`WNOHANG`, `wait()`,
 `posix_spawn`, `dirent`, FAT `/work`, virtio-blk are in.
 
+**binutils (this round):** `contrib/binutils/` builds the curated **libiberty —
+102/102 objects** — with host gcc against `sdk/include` + `tccsdk.c`/`posix.c`
+(same flags as `apps/make.exe`). libbfd and the `as`/`ld`/`ar` tools are the
+immediate next step. The build surfaced and closed a first batch of real SDK
+gaps (see "SDK gaps closed (binutils)"): `float.h`, `sys/param.h`,
+`sys/resource.h`, `malloc.h`, C99 `intmax_t`/`uintmax_t`, `sigset_t`/signal-set
+APIs, `F_*`/`FD_CLOEXEC`, `realpath`/`sysconf`/`getpagesize`/`pathconf`,
+extra `errno` codes — all userspace-only (no new syscalls).
+
 **Diagnostic note:** the GPF64 handler no longer halts the VM on **user** faults —
 it dumps RIP/CR2/regs then kills the child and resumes the parent (sets
 `dex32_child_faulted`), mirroring the page-fault path. Kernel faults still halt.
 This is how the TCC-linked make's startup GPF (`rip=0x8`, `call *%rax`, `rax=0`)
 was captured.
+
+## SDK gaps closed (binutils round)
+
+Closed while compiling libiberty against the SDK (all in `sdk/`):
+
+| Gap | Where | Notes |
+|-----|-------|-------|
+| `float.h` | new header | IEEE-754 float limits (floatformat.c) |
+| `sys/param.h` | new header | `PATH_MAX`/`PAGE_SIZE`/`MIN`/`MAX`/`roundup` |
+| `sys/resource.h` | new header | `struct rlimit`, `RLIMIT_*` |
+| `malloc.h` | new header | legacy shim over `stdlib.h` (hashtab.c) |
+| `intmax_t`/`uintmax_t` | `stdint.h` | C99; `strtoumax`/`PRIxMAX` |
+| `sigset_t` + `sig*`/`raise` | `signal.h` + `posix.c` | SDK-side masks (no HW delivery) |
+| `F_*`, `FD_CLOEXEC` | `fcntl.h` | `pex-unix.c`, libbfd file I/O |
+| `realpath`/`sysconf`/`getpagesize`/`pathconf` | `unistd.h` + `posix.c` | libbfd `getpagesize`, ld `realpath` |
+| `ENAMETOOLONG`/`ELOOP`/`EISDIR`/`ENOTEMPTY`/`EPIPE`/`ESRCH`/`EDEADLK` | `errno.h` | |
+
+`getrlimit`/`setrlimit` are implemented in-SDK (defaults unlimited,
+`RLIMIT_NOFILE`=256) — no kernel backing yet. **Open kernel item:** the SDK
+`fcntl` is a stub (returns 0); `F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL` need a
+kernel side before libbfd file I/O is fully correct.
 
 ## Why TinyCC-kbuild is deferred
 
