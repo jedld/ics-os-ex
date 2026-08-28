@@ -55,5 +55,8 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size);
 int fileno(FILE *f);
 int putc(int c, FILE *f);
 int ferror(FILE *f);
+int getc(FILE *f);
+int clearerr(FILE *f);
+#define getc(f) fgetc(f)
 
 #endif

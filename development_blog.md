@@ -1013,3 +1013,51 @@ pointer, or the PF frame is itself corrupt).
 `process.h` (`USER_SYSCALL_STACK`), `module/elf_module.c` (use it),
 `hardware/exceptions.c` (`exc_doublefault`), `hardware/chips/irqhandlers.c`
 (IDT vector 8 → `doublefaultwrapper` + extern).
+
+## 2026-08-28 (Manila, UTC+8)
+
+### 12:00–13:00 — GCC self-host, step 2: binutils `ar` builds (libbfd + libiberty in the ICS-OS SDK)
+
+**Goal:** move past TinyCC + GNU make and build the next toolchain stage — GNU
+binutils. Per `docs/gcc-selfhost.md` the order is TinyCC → **make** → **binutils**
+→ GCC 4.7.4. This session lands the first linkable binutils artifact: `ar.exe`,
+which pulls in the full `libbfd` (ELF x86-64 backend + generic-ELF core + all
+`cpu-*.c` arch tables) and `libiberty` against the ICS-OS SDK.
+
+**What blocked it (and the fix):**
+- `libbfd` was a hand-picked file list. Adding the real `ar` exposed that
+  `archures.c`'s master `bfd_arch_list[]` references *every* `bfd_*_arch`, so a
+  `cpu-i386.c`-only build left ~77 arch symbols undefined. Fix: build the whole
+  `cpu-*.c` set (all self-contained static tables; `cpu-ia64-opc.c` excluded —
+  it is `#include`d by `cpu-ia64.c`, not standalone).
+- The generic-ELF core is a pair of **`elfcode.h` shims**: `elf64.c`
+  (`ARCH_SIZE=64`, already built) and `elf32.c` (`ARCH_SIZE=32`, was missing).
+  Adding `elf32.c` supplies the `elf32_*` symbols `elf.c`/`elflink.c` call.
+  `dwarf1.c` was likewise missing and added.
+- `elf64-x86-64.c` references `nacl_modify_segment_map`/`nacl_modify_program_headers`
+  (in `elf-nacl.c`) and `cpu-ns32k.c` references `_bfd_ns32k_relocate_contents`
+  (in `aout-ns32k.c`) — both added to the build.
+- `binemul.c` needs the emulation vector; upstream `#define`s it via
+  `-Dbin_dummy_emulation=$(EMULATION_VECTOR)`. Added
+  `-Dbin_dummy_emulation=bin_vanilla_emulation` (defined in `emul_vanilla.c`).
+- `ar`'s frontend needs libc/POSIX the SDK lacked: `getc`/`clearerr` (stdio),
+  and `lstat`/`chown`/`utime`/`mktemp` (posix). Added minimal implementations to
+  `sdk/posix.c` + `sdk/tccsdk.c` and declared them in the SDK headers
+  (`stdio.h`, `stdlib.h`, `unistd.h`, `sys/stat.h` — the latter also gained the
+  `S_IS*` file-type test macros + `struct utimbuf`).
+- `bfd.c`'s `bfd_demangle()` calls `cplus_demangle()`; the C++ demangler is not
+  built, so a small `demangle-stub.c` (returns NULL) satisfies the link.
+
+**Result:** `make ar` in `ics-os/contrib/binutils` links a 1 MB statically-linked
+ELF64 x86-64 `ar.exe` (an ICS-OS user ELF using `int 0x30` syscalls — it runs
+in-OS, not on the host). This is the first binutils tool to build.
+
+**Next (binutils):** implement the `as` (gas) and `ld` frontends — `as` needs the
+GAS source + `opcode` library, `ld` needs `ldemul`/BFD linking. Then a QEMU
+`test-binutils` that runs `ar`/`as`/`ld` in-OS. After that, GCC 4.7.4 (C-only).
+
+**Files touched this session:** `contrib/binutils/Makefile` (libbfd/libiberty
+file lists, `CPUC` wildcard, `bin_dummy_emulation` def, `ar` link line),
+`contrib/binutils/config.h` (`TARGET`, `DEFAULT_AR_DETERMINISTIC`),
+`contrib/binutils/demangle-stub.c` (new), `sdk/{posix.c,tccsdk.c}`,
+`sdk/include/{stdio,stdlib,unistd,sys/stat}.h`.

@@ -1275,3 +1275,51 @@ int raise(int sig)
       _exit(128 + (sig & 127));
    return 0;
 }
+
+/* ---- extra POSIX helpers needed by host tools (binutils ar/objcopy, make) ---- */
+
+/* lstat: same as stat (no symlinks in the ICS-OS VFS). */
+int lstat(const char *path, struct stat *buf)
+{
+   return stat(path, buf);
+}
+
+/* chown: no ownership model; accept as no-op success. */
+int chown(const char *path, uid_t uid, gid_t gid)
+{
+   (void)path; (void)uid; (void)gid;
+   return 0;
+}
+
+/* utime: no timestamps preserved; accept as no-op success (POSIX allows the
+   implementation to ignore the times). */
+int utime(const char *path, const struct utimbuf *times)
+{
+   (void)path; (void)times;
+   return 0;
+}
+
+/* mktemp: replace the trailing run of 'X' with a unique hex sequence
+   (getpid + counter), returning a name not yet in use (POSIX). */
+static int ics_mktmp_cnt;
+char *mktemp(char *template)
+{
+   char *s, *e;
+   int pid = getpid();
+   static const char digits[] = "0123456789abcdef";
+   if (!template) return 0;
+   e = template + __builtin_strlen(template);
+   s = e;
+   while (s > template && s[-1] == 'X') s--; /* s = first X */
+   if (s == e) return 0; /* no X run */
+   for (;;) {
+      int v = ((pid & 0xffff) << 4) + (ics_mktmp_cnt & 0xffff);
+      char *p;
+      ics_mktmp_cnt++;
+      for (p = s; p < e; p++) { *p = digits[v & 15]; v >>= 4; }
+      *e = '\0';
+      if (access(template, 0) != 0)
+         break; /* name is free */
+   }
+   return template;
+}

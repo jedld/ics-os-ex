@@ -20,8 +20,16 @@
 #define TARGET_ARCH "i386"
 #define TARGET_MACHINE ""
 
+/* BFD target name string used by bucomm.c set_default_bfd_target() via
+   bfd_set_default_target(TARGET). Must match an entry in targmatch.h. */
+#define TARGET "x86_64"
+
 /* The one target we build: x86-64 ELF */
 #define TARGET_DEFAULT elf64_littleswap
+
+/* ar/ranlib default determinism (binutils configure
+   --enable-deterministic-archives). 0 = standard GNU ar behaviour. */
+#define DEFAULT_AR_DETERMINISTIC 0
 
 /* GNU debuglink search directory (dwarf2.c). A path string literal. */
 #define DEBUGDIR "/debug"

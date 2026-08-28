@@ -1153,6 +1153,12 @@ int feof(FILE *f){
    return dexsdk_systemcall(0x52,(long)f,0,0,0,0);
 };
 
+int clearerr(FILE *f){
+   /* FILE is an opaque fd; no user-visible error/EOF flags to clear. */
+   (void)f;
+   return 0;
+};
+
 /* POSIX fstat() lives in posix.c */
 
 FILE *fopen(const char *filename,const char *s){

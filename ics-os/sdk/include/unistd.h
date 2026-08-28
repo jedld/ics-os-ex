@@ -27,6 +27,7 @@ char *getcwd(char *buf, size_t size);
 int chdir(const char *path);
 int isatty(int fd);
 int access(const char *path, int mode);
+int chown(const char *path, uid_t uid, gid_t gid);
 int chmod(const char *path, mode_t mode);
 void *sbrk(int inc);
 unsigned int sleep(unsigned int seconds);

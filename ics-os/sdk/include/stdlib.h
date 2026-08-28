@@ -43,5 +43,6 @@ long labs(long n);
 int rand(void);
 void srand(unsigned int seed);
 int system(const char *cmd);
+char *mktemp(char *template);
 
 #endif

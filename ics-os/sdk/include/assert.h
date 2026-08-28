@@ -1,7 +1,7 @@
 #ifndef _ASSERT_H
 #define _ASSERT_H
 
-void abort(void);
+#include <stdlib.h> /* abort() */
 
 #ifdef NDEBUG
 #define assert(x) ((void)0)
