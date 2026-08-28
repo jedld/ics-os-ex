@@ -247,9 +247,15 @@ $(AR_EXE): $(AR_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
 install: ar as ld
 	mkdir -p $(ICSOS_ROOT)/apps
 	cp $(AR_EXE) $(AS_EXE) $(LD_EXE) $(ICSOS_ROOT)/apps
+	# ld locates its default linker script (ldscripts/elf_x86_64.x) via
+	# find_scripts_dir()'s "next to the binary" fallback, so stage it next to
+	# ld.exe. Without it a bare `ld in.o -o out` cannot find a script.
+	mkdir -p $(ICSOS_ROOT)/apps/ldscripts
+	cp $(CURDIR)/ldscripts/elf_x86_64.x $(ICSOS_ROOT)/apps/ldscripts/
 
 uninstall:
 	rm -f $(ICSOS_ROOT)/apps/ar.exe $(ICSOS_ROOT)/apps/as.exe $(ICSOS_ROOT)/apps/ld.exe
+	rm -rf $(ICSOS_ROOT)/apps/ldscripts
 
 # ---- opcodes + GAS (assembler) ----
 opcodes: $(OPCODES_O)

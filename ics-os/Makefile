@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -75,6 +75,10 @@ apps:
 	$(MAKE) -C contrib/tcc install
 	-$(MAKE) -C contrib/gnumake
 	-$(MAKE) -C contrib/gnumake install
+	-$(MAKE) -C contrib/bintest
+	-$(MAKE) -C contrib/bintest install
+	-$(MAKE) -C contrib/binutils all
+	-$(MAKE) -C contrib/binutils install
 
 boot-floppy:
 	$(QEMU_I386) $(QEMU_NET) -fda ics-os-floppy.img -boot a -m $(QEMU_MEM)
@@ -411,6 +415,47 @@ test-spawn: kernel/Kernel64.bin apps/spawn.exe apps/hello.exe
 	@! grep -aq "SPAWN_FAIL" /tmp/icsos-spawn.log
 	@! grep -aq "WORK_DISK_FAIL" /tmp/icsos-spawn.log
 	@echo "test-spawn PASS"
+
+# Artifacts for test-bintools (file rules so the target works standalone).
+apps/bintest.exe:
+	$(MAKE) -C contrib/bintest install
+apps/as.exe apps/ld.exe apps/ar.exe:
+	$(MAKE) -C contrib/binutils all
+	$(MAKE) -C contrib/binutils install
+
+# In-OS binutils: run as/ar/ld inside the OS (posix_spawn + waitpid), verify
+# their output files (the kernel does not propagate a child's exit status).
+# ld is invoked WITHOUT -T: it must find its default script in
+# /icsos/apps/ldscripts/ (staged next to the binary) — the same mechanism the
+# later GCC self-host depends on. Intermediates live on /ramdisk (16 MiB RAM),
+# so no virtio /work disk is needed.
+test-bintools: kernel/Kernel64.bin apps/bintest.exe apps/as.exe apps/ld.exe apps/ar.exe
+	@echo "Building Multiboot2 ISO for in-OS binutils test..."
+	@rm -rf /tmp/icsos-bintools-iso
+	@mkdir -p /tmp/icsos-bintools-iso/boot/grub /tmp/icsos-bintools-iso/apps/ldscripts
+	@cp kernel/Kernel64.bin /tmp/icsos-bintools-iso/vmdex
+	@cp apps/bintest.exe /tmp/icsos-bintools-iso/apps/bintest.exe
+	@cp apps/as.exe /tmp/icsos-bintools-iso/apps/as.exe
+	@cp apps/ld.exe /tmp/icsos-bintools-iso/apps/ld.exe
+	@cp apps/ar.exe /tmp/icsos-bintools-iso/apps/ar.exe
+	@cp apps/ldscripts/elf_x86_64.x /tmp/icsos-bintools-iso/apps/ldscripts/
+	@cp contrib/bintest/mini.s /tmp/icsos-bintools-iso/mini.s
+	@printf '%s\n' 'bintest' 'reboot' > /tmp/icsos-bintools-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-bintools-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-bintools.iso /tmp/icsos-bintools-iso >/dev/null 2>&1
+	@echo "Running in-OS binutils test (KVM)..."
+	@-timeout 90 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-bintools.iso -boot d \
+		> /tmp/icsos-bintools.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-bintools.log
+	@grep -aq "AS_PASS" /tmp/icsos-bintools.log
+	@grep -aq "AR_PASS" /tmp/icsos-bintools.log
+	@grep -aq "LD_PASS" /tmp/icsos-bintools.log
+	@grep -aq "LD_EXEC_PASS" /tmp/icsos-bintools.log
+	@grep -aq "BINTOOLS_PASS" /tmp/icsos-bintools.log
+	@! grep -aq "AS_FAIL\|AR_FAIL\|LD_FAIL\|LD_EXEC_FAIL" /tmp/icsos-bintools.log
+	@echo "test-bintools PASS"
 
 # In-OS TinyCC compiles GNU make 3.82 onto FAT /work, then make posix_spawns hello.exe.
 apps/make.exe:

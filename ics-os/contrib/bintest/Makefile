@@ -1,0 +1,26 @@
+# In-OS functional test driver for the ICS-OS binutils (as / ar / ld).
+# Builds bintest.exe (SDK user program) that posix_spawns the tools in-OS and
+# verifies their output files. See bintest.c for the checks.
+include ../../sdk/app.mk
+
+NAME=bintest
+SRC=bintest.c
+EXE=bintest.exe
+CC=gcc
+ICSOS_ROOT=../..
+SDK=../../sdk
+CFLAGS=$(APP_CFLAGS) -nostdinc -I$(SDK)/include
+LIBS=$(SDK)/tccsdk.c $(SDK)/posix.c $(SDK)/libtcc1.c $(SDK)/crt1.c
+
+$(EXE): $(SRC) $(SDK)/posix.c $(SDK)/tccsdk.c
+	$(CC) $(CFLAGS) $(APP_LDFLAGS) -o${EXE} $(SRC) $(LIBS)
+
+install: $(EXE)
+	mkdir -p $(ICSOS_ROOT)/apps
+	cp $(EXE) $(ICSOS_ROOT)/apps
+
+uninstall:
+	rm -f $(ICSOS_ROOT)/apps/$(EXE)
+
+clean:
+	rm -f $(EXE)
