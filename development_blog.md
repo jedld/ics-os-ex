@@ -1205,3 +1205,54 @@ slot + `fgetc` patch), `sdk/posix.c` (`localtime` + `strftime`),
 **Next:** build `ld` (ldemul/`elf.em` + BFD linking), then a QEMU
 `test-binutils` that runs `as`/`ar`/`ld` in-OS against a real source file,
 then GCC 4.7.4 (C-only).
+
+## 2026-08-29 (Manila, UTC+8)
+
+### 05:50–09:35 — GCC self-host, step 3: in-OS `as`/`ar`/`ld` test; **root-caused & fixed broken seeked/positioned file writes in the VFS**
+
+**Current problem:** `make test-bintools` failed: in-OS `as` produced a
+corrupt `/ramdisk/mini.o` (512 bytes, ELF header all zero, 45 nonzero bytes
+in the tail) yet exited 0 with no error and no GPF.
+
+**Method:** added instrumented probes to `contrib/bintest/bintest.c`:
+`SEEKPROBE` (DEX `fopen` w → close → `fopen` r+ → `fseek(3)` → `fwrite` →
+close → readback) and `PSEEKPROBE` (POSIX `open`/`write`/`lseek(3)`/`write`).
+
+**Root cause (two VFS bugs, both in `kernel/vfs/vfs_core.c`):**
+1. `fseek()` clamped `ptrlow` to the current file size. For a freshly opened
+   *write* handle the data is still in the 512-byte buffer, so `size==0` and
+   every seek collapsed to 0 → `lseek` was a silent no-op and positioned
+   writes landed at offset 0 (PSEEKPROBE read back `[XX23456789]`).
+2. `vfs_writechar()` accepted a write into an already-buffered region
+   without a contiguity check, leaving uninitialised bytes between `endsize`
+   and the write offset; the flush overwrote the file with that stale region
+   (SEEKPROBE read back empty).
+
+GAS/BFD finalize an object by writing the body then **seeking back** to patch
+the ELF header and section table — so with positioned writes broken, *both*
+`as` and `ld` emit garbage. This was the real gate for the whole
+binutils→GCC chain (not the SDK, not the toolchain).
+
+**Fix (commit 33ddcfa):** `fseek` sets the requested offset without clamping
+(SEEK_END = size+offset, standard sign; negative → error); `vfs_writechar`
+only extends the current buffer region when the write is contiguous with it,
+otherwise flushes and restarts the region at the new position (no recursion:
+`vfs_flushbuffer`'s internal `fseek` never flushes because `bufferwrite` is
+already 0 there).
+
+**Result:** in-OS GNU `as` now emits a valid ELF64 `ET_REL` object —
+`AS_PASS` in `test-bintools`. No regressions: `test-integration` PASS
+(boot+SMP+exec), `test-posixio` PASS (POSIX fds + io_uring).
+
+Two test bugs found along the way: `"\x7fELF"` in C is `{0xFE,'L','F'}`
+(hex escapes are greedy — `\x7fE` consumes the `E`); must use `"\177ELF"`.
+And `ar` needs an operation: `ar r archive member`, not bare `ar archive member`.
+
+**Next blocker (identified, not yet fixed):** `ar` (and `ld`) fail with
+`bfd_openw ... No error` — they create their output with **`FILE_READWRITE`
+(`r+`) positioned writes** (archive index / symbol table), and that path is
+still broken: SEEKPROBE (`r+` seek+write) still reads back empty, while
+FILE_WRITE and POSIX `O_WRONLY` positioned writes now work. Likely in the
+`openfilex` FILE_READWRITE setup vs the flush/FAT write-size interaction
+(FILE_WRITE truncates via `rewritefile`; FILE_READWRITE does not). This is the
+immediate task before `ld` and GCC 4.7.4 can run in-OS.
