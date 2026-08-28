@@ -425,6 +425,8 @@ apps/as.exe apps/ld.exe apps/ar.exe:
 
 # In-OS binutils: run as/ar/ld inside the OS (posix_spawn + waitpid), verify
 # their output files (the kernel does not propagate a child's exit status).
+# autoexec.bat must name "bintest.exe" explicitly: the console's generic
+# "not a builtin" path maps $PATH/<name> verbatim and does NOT append ".exe".
 # ld is invoked WITHOUT -T: it must find its default script in
 # /icsos/apps/ldscripts/ (staged next to the binary) — the same mechanism the
 # later GCC self-host depends on. Intermediates live on /ramdisk (16 MiB RAM),
@@ -440,7 +442,7 @@ test-bintools: kernel/Kernel64.bin apps/bintest.exe apps/as.exe apps/ld.exe apps
 	@cp apps/ar.exe /tmp/icsos-bintools-iso/apps/ar.exe
 	@cp apps/ldscripts/elf_x86_64.x /tmp/icsos-bintools-iso/apps/ldscripts/
 	@cp contrib/bintest/mini.s /tmp/icsos-bintools-iso/mini.s
-	@printf '%s\n' 'bintest' 'reboot' > /tmp/icsos-bintools-iso/autoexec.bat
+	@printf '%s\n' 'bintest.exe' 'reboot' > /tmp/icsos-bintools-iso/autoexec.bat
 	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
 		> /tmp/icsos-bintools-iso/boot/grub/grub.cfg
 	@grub-mkrescue -o /tmp/icsos-bintools.iso /tmp/icsos-bintools-iso >/dev/null 2>&1

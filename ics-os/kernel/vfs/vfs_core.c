@@ -326,21 +326,26 @@ int vfs_writechar(file_PCB *handle, char character)
             return vfs_directwrite(&character,1,1,handle);
         };
         //If it reached this point then there is a valid buffer, now
-        //we check if it is within range.
-        if  ( handle->startptr<=pos && pos < handle->startptr + handle->bufsize &&
-            ( character!='\n' || handle->buffertype == FILE_IOFBF) ) 
+        //we check if the write is contiguous with the buffered region.
+        //A buffered write may only continue immediately after the data
+        //already in the buffer; a seek (or any non-sequential write) must
+        //flush the region and start a new one. Using a stale region for a
+        //positioned write leaves uninitialised bytes between endsize and the
+        //write offset, and the flush then overwrites the file with them.
+        if  ( pos == (int)(handle->startptr + handle->endsize) &&
+            handle->endsize < handle->bufsize &&
+            ( character!='\n' || handle->buffertype == FILE_IOFBF) )
         {
 
-            handle->buffer[relative_position] = character;
+            handle->buffer[handle->endsize] = character;
             //adjust the size of the data in the buffer
-            if (relative_position + 1 >= handle->endsize)
-                handle->endsize = relative_position + 1;
-            handle->ptrlow = pos + 1;   
+            handle->endsize = handle->endsize + 1;
+            handle->ptrlow = pos + 1;
             handle->bufferwrite = 1;
-            return 1;   
+            return 1;
         }
         else
-            //buffer out of range or too small
+            //seek or out of range: flush and restart at the new position
         {
             //flushdata
             vfs_flushbuffer(handle);
@@ -350,8 +355,8 @@ int vfs_writechar(file_PCB *handle, char character)
             handle->bufferwrite = 1;
             handle->buffer[0] = character;
             handle->endsize = 1;
-            handle->ptrlow = pos + 1;   
-            return 1;   
+            handle->ptrlow = pos + 1;
+            return 1;
 
         };
 
@@ -1012,18 +1017,27 @@ int fseek(file_PCB *fhandle, long offset, int whence)
     if (fhandle!=0)
         if (file_ok(fhandle)) //validate this handle
         {
+            long pos;
             if (whence==SEEK_SET)
-                fhandle->ptrlow=offset;
+                pos = offset;
             else
                 if (whence== SEEK_CUR)
-                    fhandle->ptrlow+=offset;
+                    pos = (long)fhandle->ptrlow + offset;
                 else
-                    if (whence== SEEK_END){
-                        fhandle->ptrlow=fhandle->ptr->size-offset;
-                    }
+                    if (whence== SEEK_END)
+                        pos = (long)fhandle->ptr->size + offset;
+                    else
+                        return -1;
 
-            if (fhandle->ptrlow>fhandle->ptr->size) fhandle->ptrlow=fhandle->ptr->size;
-            ;
+            /* Do NOT clamp to the current file size. Write handles must be
+               able to seek past EOF to extend the file, and buffered write
+               data is not yet reflected in ptr->size (a freshly opened file
+               reports size 0 until its buffer is flushed) - clamping there
+               made lseek(fseek) a silent no-op and positioned writes land at
+               the wrong offset. The read path already bounds at ptr->size. */
+            if (pos < 0)
+                return -1;
+            fhandle->ptrlow = (DWORD)pos;
         };
     return -1;
 };
