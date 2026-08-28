@@ -523,14 +523,26 @@ static int makeboot_run(void)
    fclose(of);
    printf("MAKE_TCC_OK\n");
 
-   /* The TinyCC-linked make.exe currently GPFs at rip=0x8 (mixed tcc/gcc
-      objects, same class as early tccboot). Run the host-gcc make.exe for
-      the posix_spawn recipe until that link is fixed. */
-   printf("makeboot: running /icsos/apps/make.exe -f /work/t.mk\n");
+   /* First run the TinyCC-linked make (the real self-host target). Until
+      its mixed tcc/gcc link is fixed it faults at rip=0x8; the GPF64
+      handler now recovers from user faults (dump + kill child + resume
+      parent) and sets dex32_child_faulted, so we detect the crash here and
+      fall back to the host-gcc make to keep the recipe step green. */
+   dex32_child_faulted = 0;
+   printf("makeboot: running /work/make.exe -f /work/t.mk (tcc-linked)\n");
+   user_execp("/work/make.exe", 0, "/work/make.exe -f /work/t.mk");
+   if (dex32_child_faulted) {
+      printf("MAKE_TCC_LINK_FAULT (falling back to host make)\n");
+   } else {
+      printf("MAKE_PASS\n");
+      return 1;
+   }
+   printf("makeboot: running /icsos/apps/make.exe -f /work/t.mk (host gcc)\n");
+   dex32_child_faulted = 0;
    if (!user_execp("/icsos/apps/make.exe", 0, "/icsos/apps/make.exe -f /work/t.mk")) {
       printf("MAKE_FAIL run make\n");
       return 0;
    }
-   printf("MAKE_PASS\n");
+   printf("MAKE_PASS (host make)\n");
    return 1;
 }

@@ -1,27 +1,37 @@
 # GCC self-host path (ICS-OS)
 
-TinyCC stays the **bootstrap C compiler**. It will not compile `kernel32.c`.
-The intended in-OS chain is:
+**Capstone goal:** ICS-OS self-hosts a GCC build. The way to discover every OS
+gap that blocks it is to run the **real toolchain in-OS** and close what's missing.
+
+Host Linux `gcc`/`make`/`ld`/`as`/`ar` cannot run here as-is (glibc + Linux
+syscalls). So "host-compiled" means **rebuilt by the host toolchain against the
+ICS-OS SDK** — the same pattern as the working `apps/make.exe`.
+
+## Approach (Phase 1: binutils)
 
 ```
-TinyCC → GNU make → binutils (as, ld, ar) → GCC 4.7.4 (C only) → ICS-OS kernel
+host make → as, ld, ar (built vs SDK, shipped on /work) → in-OS: ar + as + ld + exec
+   → (later) GCC C-only cross-build vs SDK, in-OS self-build → ICS-OS kernel
 ```
 
-GCC 4.7.4 is the last GCC that TinyCC can build (no C++). A full GCC build
-needs gigabytes of disk and a driver that `fork`s `as`/`ld`.
+Phase 1 builds GNU binutils (`as`/`ld`/`ar`) with host gcc against
+`sdk/include` + `tccsdk.c`/`posix.c` (same flags as `apps/make.exe`), then an
+in-OS `test-bintools` runs: `ar rcs libx.a x.o`, `as prog.s -o prog.o`,
+`ld -o prog.exe ...`, exec `prog.exe` and check output. Each missing POSIX
+piece (getcwd, stat/access, unlink/rename, time, ...) is an OS gap to close.
 
-This document is the map for that work.
+Overlay: `contrib/binutils/` (config.h + Makefile, same pattern as
+`contrib/gnumake/`). Sources under `references/binutils-2.X/` (not committed).
 
-**Current round:** in-OS TinyCC builds GNU make 3.82 onto `/work` (`make test-make`,
-**green**). Stock make `fork`s recipes; ICS-OS uses `posix_spawn` in a patched `job.c`
-until x86_64 fork works. `waitpid(-1)` / `WNOHANG`, `wait()`, and `dirent` are in.
-Overlay: `contrib/gnumake/`. Stage with `scripts/stage-make-short.sh` (host `tcc -E`,
-then in-OS per-file `-c` + link against host-built `sdkobj/`).
+**Status:** make in-OS is green (`test-make`: in-OS TinyCC builds make, or the
+host-gcc make runs a recipe — both paths PASS). `waitpid(-1)`/`WNOHANG`, `wait()`,
+`posix_spawn`, `dirent`, FAT `/work`, virtio-blk are in.
 
-`test-make` runs the **host-gcc** `apps/make.exe` for the recipe because the
-TinyCC-linked `make.exe` (in-OS tcc objects + host-gcc `sdkobj/`) still GPFs at
-`rip=0x8` (mixed-object class, same as tccnew). Next: make that link run so makeboot
-executes the in-OS-built make.
+**Diagnostic note:** the GPF64 handler no longer halts the VM on **user** faults —
+it dumps RIP/CR2/regs then kills the child and resumes the parent (sets
+`dex32_child_faulted`), mirroring the page-fault path. Kernel faults still halt.
+This is how the TCC-linked make's startup GPF (`rip=0x8`, `call *%rax`, `rax=0`)
+was captured.
 
 ## Why TinyCC-kbuild is deferred
 

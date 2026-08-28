@@ -2,6 +2,29 @@
 
 ## 2026-08-28 (Manila, UTC+8)
 
+### 09:35 — Pivot: host-built toolchain self-build (Phase 1: binutils)
+
+**Direction change (user):** drop the TCC bootstrap. The capstone goal is for
+ICS-OS to self-host a **GCC build**, and the way to find every OS gap that
+blocks it is to run the real toolchain in-OS. Host Linux `gcc`/`make`/`ld`/`as`/
+`ar` can't run here as-is (glibc + Linux syscalls), so "host-compiled" means
+**rebuilt by the host toolchain against the ICS-OS SDK** — the same, already
+proven pattern as `apps/make.exe`.
+
+**Phase 1 (this round):** build host-gcc `as`/`ld`/`ar` (binutils) + the already
+working `make` targeting the SDK; ship them on the `/work` disk; in-OS: `ar rcs`,
+`as prog.s`, `ld` link, exec the result. Every missing POSIX piece surfaced is a
+documented OS gap to close (getcwd/stat/access/unlink/rename/time/...). This is
+the gap-closing engine for the eventual GCC self-build.
+
+**Also this session (GPF64):** `GPFhandler64` no longer halts the VM on a
+**user** fault — it dumps RIP/CR2/regs, then `exc_recover()` (kill child +
+resume parent + set `dex32_child_faulted`), mirroring the page-fault path.
+Kernel faults still halt. `makeboot` now runs the TCC-linked `/work/make.exe`
+first, captures its `rip=0x8` fault, and falls back to the host-gcc make so
+`test-make` stays green. This fault-capture is the diagnostic that found the
+TCC-linked make GPFs at startup (entry `0x43FC4F` → `call *%rax` with `rax=0`).
+
 ### 07:35 — Green `make test-make`: POSIX `wait()` for GNU make
 
 **Current problem:** `test-make` hung 1800 s. In-OS TinyCC compiled make
