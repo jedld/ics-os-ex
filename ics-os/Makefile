@@ -440,7 +440,7 @@ test-bintools: kernel/Kernel64.bin apps/bintest.exe apps/as.exe apps/ld.exe apps
 	@cp apps/as.exe /tmp/icsos-bintools-iso/apps/as.exe
 	@cp apps/ld.exe /tmp/icsos-bintools-iso/apps/ld.exe
 	@cp apps/ar.exe /tmp/icsos-bintools-iso/apps/ar.exe
-	@cp apps/ldscripts/elf_x86_64.x /tmp/icsos-bintools-iso/apps/ldscripts/
+	@cp apps/ldscripts/elf_x86_64.x* /tmp/icsos-bintools-iso/apps/ldscripts/
 	@cp contrib/bintest/mini.s /tmp/icsos-bintools-iso/mini.s
 	@printf '%s\n' 'bintest.exe' 'reboot' > /tmp/icsos-bintools-iso/autoexec.bat
 	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \

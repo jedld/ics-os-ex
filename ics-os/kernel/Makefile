@@ -46,7 +46,7 @@ scheduler.o: process/scheduler.c process/process.h
 fat.o: filesystem/fat12.c filesystem/fat12.h
 	$(CC) $(CFLAGS) -o fat.o filesystem/fat12.c
 	
-iso9660.o:
+iso9660.o: filesystem/iso9660.c filesystem/iso9660.h
 	$(CC) $(CFLAGS) -o iso9660.o filesystem/iso9660.c
 
 ramdisk.o: filesystem/ramdisk.c filesystem/ramdisk.h

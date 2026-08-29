@@ -1256,3 +1256,61 @@ FILE_WRITE and POSIX `O_WRONLY` positioned writes now work. Likely in the
 `openfilex` FILE_READWRITE setup vs the flush/FAT write-size interaction
 (FILE_WRITE truncates via `rewritefile`; FILE_READWRITE does not). This is the
 immediate task before `ld` and GCC 4.7.4 can run in-OS.
+
+### 09:40–11:20 — `ld` cannot find its default linker script (`LD_FAIL`): root-caused to the missing **combreloc** script variant, not a VFS/path bug
+
+Picking up from the seeked-write fix: `as` and `ar` now pass, but `ld`
+failed with `LD_FAIL` — it could not open its default linker script. This was
+the last gate before the in-OS toolchain could link a program.
+
+**Why it looked like a VFS bug (and wasn't).** The failure was `errno=2`
+(ENOENT) from `ldfile_try_open()` inside `ldfile_find_command_file()`
+(`references/binutils-2.23/ld/ldfile.c`). Because fast child (ld) serial
+output is lossy, I built a **child→file→parent diagnostic relay**: `ld`
+writes its state to `/ramdisk/ld.diag` (the only location it demonstrably
+writes to — `mini.o`/`mini.exe` land there), and the parent `bintest` reads it
+back and prints it. That relay produced the decisive evidence:
+
+- In the **parent**, `fopen`/`open` of every path form on `/icsos`
+  (single/double/triple leading slash) all succeed → not a path-collapse bug.
+- In the **child** (ld), every `stat` succeeds, and a *literal* `fopen` of the
+  script path (single and double slash) **also succeeds** — yet `try_open()`
+  on the *concatenated* path still returns NULL/errno=2.
+
+The relay printed the exact string `try_open` was handed:
+`len=36 path=/icsos/apps//ldscripts/elf_x86_64.xc` — a trailing **`c`**.
+
+**Root cause.** The `c` is not corruption. `gldelf_x86_64_get_script()`
+(`ld/eelf_x86_64.c`) selects the script by link flags: with default
+`link_info.combreloc` true it returns `ldscripts/elf_x86_64.xc` (the
+*-combreloc* variant), **not** the bare `elf_x86_64.x`. The build staged only
+the base `.x`, so the `.xc` variant simply did not exist → ENOENT. The
+"identical `fopen` succeeds but `try_open` fails" mystery was a red herring:
+the probe had been `fopen`-ing the base name, while `try_open` was trying the
+combreloc name.
+
+**Fix.** Stage the whole script family, not one file. Copied the 12
+non-base variants (`elf_x86_64.x{bn,c,d,dc,dw,n,r,s,sc,sw,u,w}`) from the
+binutils references tree into `contrib/binutils/ldscripts/` (source) and
+`apps/ldscripts/` (installed); updated both `contrib/binutils/Makefile`
+(`install`) and the top-level `test-bintools` ISO staging to copy
+`elf_x86_64.x*` (wildcard) instead of a single file. `mini.o` is self-contained
+(`int 0x30` syscalls only, no libc), so the references-tree variants — which
+lack the ICS-OS `SEARCH_DIR` customization in the committed base `.x` — link
+it fine.
+
+**Cleanup.** Removed all the temporary diagnostics: the `ldfile.c`
+`/ramdisk/ld.diag` relay (plus its `stat`/`fopen`/`strlen` probes and the
+`<errno.h>`/`<sys/stat.h>` includes) and the `bintest.c` `dump_file()` helper +
+`LDSCRIPTPROBE` block. The permanent `diag_file()` (size/hex dumper used for
+`mini.o`/`mini.exe`/`mini.out`) stays.
+
+**Result:** `make test-bintools` fully green — `AS_PASS`, `AR_PASS`,
+`LD_PASS`, `LD_EXEC_PASS` (linked `mini.exe` runs and writes
+`BINTOOLS_MINI_OK`), `BINTOOLS_PASS`. No regressions: `test-integration` and
+`test-posixio` still pass. The in-OS GNU `as`/`ar`/`ld` chain now links a real
+ELF64 user program end-to-end.
+
+**Next:** GCC 4.7.4 self-host step 4 — build the in-OS GCC (C-only) against
+this working binutils, then have that GCC compile ICS-OS (see
+`docs/gcc-selfhost.md`).

@@ -25,7 +25,9 @@ Overlay: `contrib/binutils/` (config.h + Makefile, same pattern as
 
 **Status:** make in-OS is green (`test-make`: in-OS TinyCC builds make, or the
 host-gcc make runs a recipe — both paths PASS). `waitpid(-1)`/`WNOHANG`, `wait()`,
-`posix_spawn`, `dirent`, FAT `/work`, virtio-blk are in.
+`posix_spawn`, `dirent`, FAT `/work`, virtio-blk are in. **binutils is green too**:
+`test-bintools` runs `as`→`ar`→`ld` in-OS, links a default-script ELF64, and execs
+it (`AS_PASS`/`AR_PASS`/`LD_PASS`/`LD_EXEC_PASS`/`BINTOOLS_PASS`).
 
 **binutils (this round):** `contrib/binutils/` builds the curated **libiberty —
 102/102 objects** — with host gcc against `sdk/include` + `tccsdk.c`/`posix.c`
@@ -142,12 +144,23 @@ libiberty + the SDK runtime. Findings and the build's quirks:
   unconditionally for symbol display). `demangle.h` is self-contained, so the
   stub includes it for the exact enum.
 
+- **The default script is the combreloc variant, not the bare `.x`.**
+  `gldelf_x86_64_get_script()` (`eelf_x86_64.c`) picks the script by link
+  flags: with the default `link_info.combreloc` it returns
+  `ldscripts/elf_x86_64.xc` (the *-combreloc* variant), **not**
+  `elf_x86_64.x`. So the build stages the whole `elf_x86_64.x*` family (13
+  variants) next to `ld.exe` and into the `test-bintools` ISO (wildcard in both
+  `contrib/binutils/Makefile` and the top-level ISO staging). Staging only the
+  bare `.x` makes a plain `ld in.o -o out` fail with ENOENT on `.xc` — a
+  confusing red herring because a *literal* `fopen` of the base name in the same
+  process still succeeds.
+
 **Host-run caveat:** `as.exe`/`ld.exe`/`ar.exe` are `int 0x30`-ABI ICS-OS user
 executables (SDK runtime), so running them on host Linux segfaults at the first
 syscall (expected — the `int 0x30` gate does not exist in Linux). Their
-functional test is **in-OS** (the `test-bintools` target, next step): `ar rcs`,
-`as prog.s -o prog.o`, `ld -o prog.exe prog.o`, then exec `prog.exe` and check
-the output on serial.
+functional test is **in-OS** (the `test-bintools` target, now green):
+`as mini.s -o mini.o`, `ar r test.a mini.o`, `ld mini.o -o mini.exe` (default
+script), then exec `mini.exe` and check its output on serial.
 
 ## Why TinyCC-kbuild is deferred
 
@@ -179,8 +192,12 @@ Historic DEX `user_execp` always **waits** (spawn+join). Console and
 | `fork` / `forkprocess` | Still 32-bit paging (`disablepaging` / `dex32_copy_pg`). Unsafe on x86_64. Do not use. |
 | `user_execp` (`0x5B`) | Unchanged: still waits |
 
-The ISO 9660 root is 8.3 unless Joliet is selected; `spawn.exe` is the
-packed test binary (`contrib/spawntest`, console command `spawntest`).
+The ISO 9660 root is 8.3 unless Joliet is selected; Rock Ridge `NNM`
+(absolute-path) records are now honoured on name lookup, so long names like
+`ldscripts` / `elf_x86_64.xc` resolve even where the base 8.3 name is
+truncated (this is what lets `ld` find its linker-script dir on the CD root).
+`spawn.exe` is the packed test binary (`contrib/spawntest`, console command
+`spawntest`).
 
 Stock GCC `pexecute` can be wrapped with `posix_spawn` until fork is fixed.
 
@@ -202,10 +219,12 @@ later round.
 FAT 8.3 still bites some GCC names even with LFN on create; that is a later
 FS issue.
 
-## Later rounds (not this one)
+## Rounds
 
-1. Then **binutils** (`as`, `ld`, `ar`).
-2. Then **GCC 4.7.4** (`--enable-languages=c --disable-multilib`).
+1. **binutils** (`as`, `ld`, `ar`) — **done**: `test-bintools` builds, links,
+   and execs an ELF64 in-OS.
+2. **GCC 4.7.4** (`--enable-languages=c --disable-multilib`) — next; built in-OS
+   against this working binutils.
 3. That GCC compiles ICS-OS; kexec as today.
 
 ## Tests
@@ -214,6 +233,7 @@ FS issue.
 cd ics-os
 make -C kernel bzImage
 make test-make           # MAKE_PASS (in-OS tcc → make.exe → hello.exe)
+make test-bintools       # AS_PASS + AR_PASS + LD_PASS + BINTOOLS_PASS
 make test-spawn          # SPAWN_PASS + WORK_DISK_PASS
 make test-posixio        # still green (unformatted vblk → no /work)
 make test-virtio

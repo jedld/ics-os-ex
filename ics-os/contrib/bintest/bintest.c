@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <errno.h>
 
 /* Run tool (path + argv) and wait for it. Returns 0 if spawn+wait succeed. */
@@ -41,17 +42,20 @@ static int run_tool(const char *path, char *const argv[])
    int st = 0;
    int r;
    r = posix_spawn(&pid, path, 0, 0, argv, 0);
-   if (r != 0) {
-      printf("  spawn %s -> errno=%d\n", path, r);
-      return -1;
-   }
-   printf("  spawned %s pid=%d\n", path, (int)pid);
-   if (waitpid(pid, &st, 0) != pid) {
-      printf("  waitpid %s failed\n", path);
-      return -1;
-   }
-   printf("  waitpid %s -> st=0x%x\n", path, (unsigned)st);
-   return 0;
+    if (r != 0) {
+       printf("  spawn %s -> errno=%d\n", path, r);
+       return -1;
+    }
+    /* Wait BEFORE printing: the child writes to the same serial console and
+       the SDK printf is char-at-a-time, so printing while the child runs
+       interleaves the two streams into an unreadable blob. The child's own
+       output then appears as clean lines above. */
+    if (waitpid(pid, &st, 0) != pid) {
+       printf("  waitpid %s failed\n", path);
+       return -1;
+    }
+    printf("  ran %s pid=%d st=0x%x\n", path, (int)pid, (unsigned)st);
+    return 0;
 }
 
 /* Report a file's size (lseek to end) + first bytes, to localize tool
@@ -393,7 +397,7 @@ int main(void)
       }
    }
 
-  printf("bintest: as --64 mini.s -> /ramdisk/mini.o\n");
+ printf("bintest: as --64 mini.s -> /ramdisk/mini.o\n");
    if (run_tool("/icsos/apps/as.exe", asv) != 0) {
       diag_file("/ramdisk/mini.o");
       printf("AS_FAIL\n");
@@ -422,11 +426,14 @@ int main(void)
    printf("AR_PASS\n");
 
    printf("bintest: ld mini.o -> /ramdisk/mini.exe (default script)\n");
-   if (run_tool("/icsos/apps/ld.exe", ldv) != 0) {
-      diag_file("/ramdisk/mini.exe");
-      printf("LD_FAIL\n");
-      return 1;
-   }
+    {
+      int ldr = run_tool("/icsos/apps/ld.exe", ldv);
+       if (ldr != 0) {
+         diag_file("/ramdisk/mini.exe");
+         printf("LD_FAIL\n");
+         return 1;
+      }
+    }
    diag_file("/ramdisk/mini.exe");
    if (check_file("/ramdisk/mini.exe", "\177ELF") < 0) {
       printf("LD_FAIL\n");

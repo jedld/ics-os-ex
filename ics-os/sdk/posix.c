@@ -1267,16 +1267,21 @@ char *realpath(const char *path, char *resolved)
    out = resolved ? resolved : (char *)malloc(PATH_MAX);
    if (!out) { errno = ENOMEM; return 0; }
 
-   if (abs) out[0] = '/'; else out[0] = 0;
-   w = out + (abs ? 1 : 0);
-   for (i = 0; i < nseg; i++) {
-      if (w != out) *w++ = '/';
-      len = strlen(names[i]);
-      memcpy(w, names[i], len);
-      w += len;
-   }
-   *w = 0;
-   if (out[0] == 0) out[0] = '/';
+   if (abs) {
+       out[0] = '/';
+       w = out + 1;
+    } else {
+       out[0] = 0;
+       w = out;
+    }
+    for (i = 0; i < nseg; i++) {
+       if (i > 0) *w++ = '/';
+       len = strlen(names[i]);
+       memcpy(w, names[i], len);
+       w += len;
+    }
+    *w = 0;
+    if (out[0] == 0) out[0] = '/';
    return out;
 }
 

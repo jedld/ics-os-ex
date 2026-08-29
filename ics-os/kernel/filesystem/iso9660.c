@@ -174,18 +174,60 @@
    };
    
    /*unicode to ascii converter*/
-   char *iso9660_iso_unicodetoascii(WORD *unicodestr,char *targ,int length)
-   {
-   int i;
-   for (i=0;unicodestr[i]&&i<(length/2);i++)
-   {
-      char ascii = (char)( (unicodestr[i]&0xFF00) >> 8);
-      if (ascii == ';') break;
-      targ[i]=ascii;
-   };
-   targ[i]=0;
-   return targ;
-   };
+    char *iso9660_iso_unicodetoascii(WORD *unicodestr,char *targ,int length)
+    {
+    int i;
+    for (i=0;unicodestr[i]&&i<(length/2);i++)
+    {
+       char ascii = (char)( (unicodestr[i]&0xFF00) >> 8);
+       if (ascii == ';') break;
+       targ[i]=ascii;
+    };
+    targ[i]=0;
+    return targ;
+    };
+
+    /*Rock Ridge (SUSP) support. Modern ISO9660 writers (xorriso/grub-mkrescue,
+      mkisofs -R) store the true Unix filename in a system-use record even when
+      the level-1 (8.3) name differs (e.g. "LDSCRIPT" vs "ldscripts"). Extract the
+      NNM ("Network Name") long name from the record's system-use area.
+
+      In this tree the directory record uses a 33-byte fixed header (file
+      identifier at offset 33), so the system-use area begins right after the
+      identifier, padded to the next even offset. Each SUSP descriptor is
+      [signature(2)][len(1)][version(1)][data...]; the NNM data is
+      [flags(1)][name...]. Returns 1 and fills targ when a long name is found. */
+    int iso9660_rockname(const iso9660_directory *dir, char *targ, int tlen)
+    {
+       const unsigned char *rec = (const unsigned char *)dir;
+       int reclen = dir->size;
+       int susp = 33 + dir->ident_length;
+       int dlen;
+
+       if (tlen < 2) return 0;
+       if (susp >= reclen) return 0;
+       if (susp & 1) susp++;
+       if (susp >= reclen) return 0;
+
+       while (susp + 4 <= reclen)
+       {
+          dlen = rec[susp + 2];
+          if (dlen < 5 || susp + dlen > reclen)
+             return 0;
+          if (rec[susp] == 'N' && rec[susp + 1] == 'M')
+          {
+             int nl = dlen - 5;
+             int i;
+             if (nl > tlen - 1) nl = tlen - 1;
+             for (i = 0; i < nl && rec[susp + 5 + i] != 0; i++)
+                targ[i] = (char)rec[susp + 5 + i];
+             targ[i] = 0;
+             return 1;
+          }
+          susp += dlen;
+       }
+       return 0;
+    };
 
 /*Gets bytes per block assuming mode 1*/   
 int iso9660_getbytesperblock()
@@ -305,10 +347,16 @@ int iso9660_mountdirectory(vfs_node *directory, int id)
             if (dir->ident_length == 1 && dir->ident[0] == 1)  
             strcpy(node->name,"..");
               else
-            if (mountpoint->misc_flag)  //Joliet Extensions?? 
-            iso9660_iso_unicodetoascii(dir->ident,node->name,dir->ident_length); 
+            if (mountpoint->misc_flag)  //Joliet Extensions??
+            iso9660_iso_unicodetoascii(dir->ident,node->name,dir->ident_length);
               else
-            iso9660_convertname(dir->ident,node->name,dir->ident_length);
+            {
+               /* Level-1 name first, then prefer the Rock Ridge NNM long
+                  name when the record carries one (e.g. "LDSCRIPT" ->
+                  "ldscripts"). */
+               iso9660_convertname(dir->ident,node->name,dir->ident_length);
+               iso9660_rockname(dir,node->name,sizeof(node->name));
+            }
             
             node->memid = devid;
             node->fsid = iso9660_myid;

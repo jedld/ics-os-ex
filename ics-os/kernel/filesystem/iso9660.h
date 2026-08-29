@@ -113,7 +113,8 @@ typedef struct __attribute__((packed)) _iso9660_directory {
    int iso9660_loaddirectory(iso9660_directory *dirinfo, void **buffer,int id);
    int iso9660_mountroot(vfs_node *node,int id);
    char *iso9660_convertname(const char *identifier, char *targ, int length);
-   char *iso9660_iso_unicodetoascii(WORD *unicodestr,char *targ,int length);
+    char *iso9660_iso_unicodetoascii(WORD *unicodestr,char *targ,int length);
+    int iso9660_rockname(const iso9660_directory *dir, char *targ, int tlen);
    int iso9660_getbytesperblock();
    int iso9660_openfile(vfs_node *f,char *buffer,int start,int end,int id);
    int iso9660_unmount(vfs_node *directory,int id);
