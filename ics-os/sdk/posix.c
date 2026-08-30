@@ -1412,7 +1412,107 @@ char *mktemp(char *template)
       for (p = s; p < e; p++) { *p = digits[v & 15]; v >>= 4; }
       *e = '\0';
       if (access(template, 0) != 0)
-         break; /* name is free */
-   }
-   return template;
-}
+          break; /* name is free */
+    }
+    return template;
+ }
+
+ /* ---- GCC front-end (cc1) support ---------------------------------- */
+ /* Unlocked stdio variants: this libc has no per-stream locks, so the
+    "unlocked" forms behave identically to the plain forms. */
+ FILE *fdopen_unlocked(int fd, const char *mode)
+ {
+    return fdopen(fd, mode);
+ }
+
+ FILE *fopen_unlocked(const char *path, const char *mode)
+ {
+    return fopen(path, mode);
+ }
+
+ int setbuf(FILE *f, char *buf)
+ {
+    return setvbuf(f, buf, buf ? _IOFBF : _IONBF, buf ? (size_t)BUFSIZ : (size_t)1);
+ }
+
+ void unlock_std_streams(void)
+ {
+    /* No per-stream locks; nothing to release. */
+ }
+
+ static int ics_tolower_i(int c)
+ {
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+    return c;
+ }
+
+ int strcasecmp(const char *a, const char *b)
+ {
+    while (*a && *b) {
+       int ca = ics_tolower_i((unsigned char)*a);
+       int cb = ics_tolower_i((unsigned char)*b);
+       if (ca != cb) return ca - cb;
+       a++; b++;
+    }
+    return ics_tolower_i((unsigned char)*a) - ics_tolower_i((unsigned char)*b);
+ }
+
+ int strncasecmp(const char *a, const char *b, size_t n)
+ {
+    while (n && *a && *b) {
+       int ca = ics_tolower_i((unsigned char)*a);
+       int cb = ics_tolower_i((unsigned char)*b);
+       if (ca != cb) return ca - cb;
+       a++; b++; n--;
+    }
+    if (n) return ics_tolower_i((unsigned char)*a);
+    return 0;
+ }
+
+ const char *strsignal(int sig)
+ {
+    static char buf[64];
+    snprintf(buf, sizeof buf, "Signal %d", sig);
+    return buf;
+ }
+
+ int __popcountdi2(unsigned long long x)
+ {
+    int c = 0;
+    while (x) { x &= x - 1ULL; c++; }
+    return c;
+ }
+
+ static const char *ics_asctime_wday[] =
+   { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+ static const char *ics_asctime_mon[] =
+   { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+ char *asctime(const struct tm *t)
+ {
+    static char buf[64];
+    if (!t) return 0;
+    int w = (t->tm_wday >= 0 && t->tm_wday <= 6) ? t->tm_wday : 0;
+    int m = (t->tm_mon  >= 0 && t->tm_mon  <= 11) ? t->tm_mon : 0;
+    snprintf(buf, sizeof buf, "%.3s %.3s %2d %02d:%02d:%02d %d\n",
+             ics_asctime_wday[w], ics_asctime_mon[m], t->tm_mday,
+             t->tm_hour, t->tm_min, t->tm_sec, t->tm_year + 1900);
+    return buf;
+ }
+
+ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
+               int (*compar)(const void *, const void *))
+ {
+    const char *lo = (const char *)base;
+    const char *hi = lo + nmemb * size;
+    while (lo < hi) {
+        size_t mid = (hi - lo) / 2 / size;
+        const char *midp = lo + mid * size;
+        int c = compar(key, midp);
+        if (c == 0) return (void *)midp;
+        if (c < 0) hi = midp;
+        else lo = midp + size;
+    }
+    return 0;
+ }

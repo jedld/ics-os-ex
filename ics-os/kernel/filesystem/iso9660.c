@@ -237,30 +237,54 @@ int iso9660_getbytesperblock()
 
 int iso9660_openfile(vfs_node *f,char *buffer,int start,int end,int id)
 {
-    DWORD startblock, endblock, totalblocks;
-    DWORD startadj, endadj;
+    DWORD startblock, endblock;
     iso9660_directory *dir = f->misc;
     DWORD firstblock = dir->first_sector_le;
-    DWORD handle;    
-    char *data_buffer,*bufptr;    
-    int i;
-    //compute for the starting block
-    startblock  = start / 2048;
-    endblock    = end / 2048;
-    startadj    = start%2048;
-    totalblocks = endblock - startblock + 1;
-    
-    data_buffer = malloc( 2048 * totalblocks );
-    
-   
-    handle = dex32_requestIO(id,IO_READ, firstblock + startblock, totalblocks, data_buffer);
-    while (!dex32_IOcomplete(handle))
-       taskswitch();
-    dex32_closeIO(handle);       
+    enum { CHUNK_BLOCKS = 32 };                 /* 64 KiB per CD request */
+    char *chunk = malloc(CHUNK_BLOCKS * 2048);
+    DWORD b, cb;
+    int destoff = 0;
 
-    memcpy(buffer, data_buffer + startadj, end - start +1);
-    free(data_buffer);
-    
+    if (end < start)
+        return 0;
+    if (!chunk)
+        return 0;
+
+    /* Read the CD in bounded 64KiB chunks directly into the caller's buffer.
+       The previous implementation malloc'd an intermediate buffer the size of
+       the whole transfer (2048 * totalblocks); for large executables (e.g. the
+       18MiB in-OS GCC cc1) that doubled the peak kernel-heap requirement and
+       the oversized single DMA read left the destination zeroed. Bounded
+       multi-block reads keep the transfer efficient while never allocating an
+       unbounded intermediate buffer. */
+    startblock = start / 2048;
+    endblock   = end / 2048;
+
+    for (b = startblock; b <= endblock; ) {
+        DWORD n = endblock - b + 1;
+        if (n > CHUNK_BLOCKS)
+            n = CHUNK_BLOCKS;
+
+        {
+            DWORD handle = dex32_requestIO(id, IO_READ, firstblock + b, n, chunk);
+            while (!dex32_IOcomplete(handle))
+                taskswitch();
+            dex32_closeIO(handle);
+        }
+
+        for (cb = 0; cb < n; cb++) {
+            DWORD block = b + cb;
+            int src_begin = (block == startblock) ? (int)(start % 2048) : 0;
+            int src_end   = (block == endblock)   ? (int)(end % 2048)   : 2047;
+            int copylen   = src_end - src_begin + 1;
+            if (copylen <= 0)
+                continue;
+            memcpy(buffer + destoff, chunk + cb * 2048 + src_begin, copylen);
+            destoff += copylen;
+        }
+        b += n;
+    }
+    free(chunk);
     return 1;
 };
 

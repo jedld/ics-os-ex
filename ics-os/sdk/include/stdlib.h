@@ -38,6 +38,8 @@ char *getenv(const char *name);
 int setenv(const char *name, const char *value, int replace);
 void qsort(void *base, size_t nmemb, size_t size,
            int (*compar)(const void *, const void *));
+void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
+              int (*compar)(const void *, const void *));
 int abs(int n);
 long labs(long n);
 int rand(void);

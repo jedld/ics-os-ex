@@ -72,8 +72,7 @@ static const mem_range mem_reserved[] = {
    { MEM_USER_ELF_BASE,    MEM_USER_ELF_END,    "user-elf" },
    { MEM_KEXEC_STAGE,      MEM_KEXEC_STAGE_END, "kexec-stage" },
    { MEM_KHEAP_BASE,       MEM_KHEAP_END,       "kheap" },
-   { MEM_KMODE_BASE,       MEM_KMODE_END,       "kmode" },
-   { MEM_USERPD_BASE,      MEM_USERPD_END,      "userpd-pool" },
+    { MEM_USERPD_BASE,      MEM_USERPD_END,      "userpd-pool" },
    { MEM_USER_WIN_BASE,    MEM_USER_WIN_END,    "user-windows" },
 };
 

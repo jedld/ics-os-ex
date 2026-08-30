@@ -188,8 +188,8 @@ int user_execp(char *fname, DWORD mode, char *params){
    }
 
    printf("execp: loading %s (%u bytes)%s\n", fname, (unsigned)size,
-          from_cache ? " [cached]" : " [mmap]");
-   {
+           from_cache ? " [cached]" : " [mmap]");
+    {
          char temp[255];
 
          /* Load synchronously from the caller. The historic process_dispatcher
@@ -1100,11 +1100,46 @@ int console_execute(const char *str){
          printf("POSIXIO_FAIL\n");
    }else
    if (strcmp(u,"spawntest") == 0){
-      printf("spawntest: running /icsos/apps/spawn.exe\n");
-      if (!user_execp("/icsos/apps/spawn.exe", 0, "/icsos/apps/spawn.exe"))
-         printf("SPAWN_FAIL\n");
-   }else
-   if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
+       printf("spawntest: running /icsos/apps/spawn.exe\n");
+       if (!user_execp("/icsos/apps/spawn.exe", 0, "/icsos/apps/spawn.exe"))
+          printf("SPAWN_FAIL\n");
+    }else
+    if (strcmp(u,"cc1test") == 0){  //-- Run host-built GCC cc1 to compile a trivial file in-OS.
+       char cmd[512];
+       int ok = 1;
+       file_PCB *f;
+      printf("cc1test: /icsos/apps/cc1.exe /icsos/apps/cc1probe.c -o /ramdisk/cc1probe.s\n");
+        if (ok) {
+           /* cc1 is the C frontend: it emits assembly directly. '-c' is a
+              gcc *driver* option (compile+assemble, no link) and is rejected
+              by cc1, so it must not appear on the cc1 command line. */
+           sprintf(cmd, "/icsos/apps/cc1.exe /icsos/apps/cc1probe.c -o /ramdisk/cc1probe.s");
+          if (!user_execp("/icsos/apps/cc1.exe", 0, cmd)) {
+             printf("CC1_TEST_FAIL compile\n");
+             ok = 0;
+          }
+       }
+       if (ok) {
+          f = openfilex("/ramdisk/cc1probe.s", FILE_READ);
+          if (f) {
+             vfs_stat info;
+             fstat(f, &info);
+             fclose(f);
+             if (info.st_size < 32) {
+                printf("CC1_TEST_FAIL output size %lu\n", (unsigned long)info.st_size);
+                ok = 0;
+             } else {
+                printf("cc1test: /ramdisk/cc1probe.s is %lu bytes\n", (unsigned long)info.st_size);
+             }
+          } else {
+             printf("CC1_TEST_FAIL no output file\n");
+             ok = 0;
+          }
+       }
+       if (ok)
+          printf("CC1_TEST_PASS\n");
+    }else
+    if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
       char cmd[512];
       int ok = 1;
       /* Stage onto ramdisk so compiles do not re-hit ATAPI mid-run. */

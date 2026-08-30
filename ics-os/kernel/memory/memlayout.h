@@ -19,13 +19,11 @@
  *  |  + kstacks in BSS|
  *  |  + frame-stack   |          immediately after bssEnd
  *  +------------------+ 0x00400000  MEM_KERNEL_LIMIT / MEM_USER_ELF_BASE
- *  | user ELF window  |          TinyCC ELF_START_ADDR; private PTEs
- *  +------------------+ 0x01000000  MEM_KEXEC_STAGE
- *  | kexec staging    |          16MiB, not in mempop
+ *  | user ELF window  |          ELF_START_ADDR; private PTEs (cc1 ~22MB)
+ *  +------------------+ 0x01800000  MEM_KEXEC_STAGE
+ *  | kexec staging    |          8MiB, not in mempop (kernel image < 4MiB)
  *  +------------------+ 0x02000000  MEM_KHEAP_BASE
- *  | kernel heap      |          sbrk/dlmalloc; identity; 32MiB cap
- *  +------------------+ 0x04000000  MEM_KMODE_BASE
- *  | kmode / spare    |          kernel-mode process VA
+ *  | kernel heap      |          sbrk/dlmalloc; identity; 48MiB cap
  *  +------------------+ 0x05000000
  *  | mempop frames    |          anonymous 4KiB pages (PF, legacy PT)
  *  +------------------+ 0x06000000  MEM_USERPD_BASE
@@ -68,18 +66,21 @@
 #define MEM_FRAME_STACK_SIZE   0x00040000UL   /* 256KiB of page pointers */
 
 #define MEM_USER_ELF_BASE      0x00400000UL
-#define MEM_USER_ELF_END       0x01000000UL   /* 12MiB for large EXEs */
+#define MEM_USER_ELF_END       0x01800000UL   /* 20MiB window for large EXEs (cc1 ~22MB) */
 
-#define MEM_KEXEC_STAGE        0x01000000UL
-#define MEM_KEXEC_STAGE_SIZE   0x01000000UL   /* 16MiB */
+#define MEM_KEXEC_STAGE        0x01800000UL
+#define MEM_KEXEC_STAGE_SIZE   0x00800000UL   /* 8MiB (kernel image < 4MiB) */
 #define MEM_KEXEC_STAGE_END    (MEM_KEXEC_STAGE + MEM_KEXEC_STAGE_SIZE)
 
 #define MEM_KHEAP_BASE         0x02000000UL
-#define MEM_KHEAP_SIZE         0x02000000UL   /* 32MiB */
+#define MEM_KHEAP_SIZE         0x03000000UL   /* 48MiB: absorbs retired kmode slot */
 #define MEM_KHEAP_END          (MEM_KHEAP_BASE + MEM_KHEAP_SIZE)
 
-#define MEM_KMODE_BASE         0x04000000UL
-#define MEM_KMODE_END          0x05000000UL
+/* Former 16MiB kmode slot is now part of the kernel heap.  MEM_KMODE_*
+   marks the anonymous mempop-frame gap that follows the heap; it is NOT a
+   reserved range, so mempop() still seeds pages from it. */
+#define MEM_KMODE_BASE         0x05000000UL
+#define MEM_KMODE_END          0x06000000UL
 
 #define MEM_USERPD_BASE        0x06000000UL
 #define MEM_USERPD_END         0x08000000UL

@@ -1,5 +1,79 @@
 # Development blog
 
+## 2026-08-30 (Manila, UTC+8)
+
+### ~15:00 — In-OS GCC `cc1` runs and compiles C: `test-cc1` PASS
+
+**Goal (user):** the staged, compile-only milestone — run the *host-built* GCC
+`cc1` (the C frontend, 18 MiB statically-linked ELF64) inside ICS-OS and have it
+compile a trivial C file to assembly. `make test-cc1` boots the ISO, stages
+`/tmp/icsos-gcc/cc1` as `/icsos/apps/cc1.exe`, runs `cc1test`, and greps for
+`CC1_TEST_PASS`.
+
+**Three root causes found and fixed (all blocked the 18 MiB load/run):**
+
+1. **Kernel heap too small for the executable buffer.** `user_execp()` →
+   `vfs_mapfile()` allocates the whole ELF into a kernel buffer
+   (`malloc(18180320)`) before the ELF loader maps it into user frames. The
+   kernel heap was a closed 32 MiB window; with existing heap usage the 18 MiB
+   allocation failed (`mapfile: malloc(...)`). Expanded the kernel heap
+   32 → **48 MiB** in `memory/memlayout.h` (`MEM_KHEAP_SIZE=0x03000000`,
+   `MEM_KHEAP_END=0x05000000`), absorbing the former `kmode` slot
+   (`0x04000000..0x05000000`). Removed the `kmode` entry from `mem_reserved[]`
+   in `memory/dexmem.c`; `MEM_KMODE_*` now mark the *unreserved* 16 MiB `mempop`
+   free-page gap (`0x05000000..0x06000000`), which is preserved. The
+   compile-time layout asserts (`kmode after heap`, `userpd after kmode`) still
+   hold.
+
+2. **CD-ROM `readfile` allocated a second whole-file buffer.**
+   `iso9660_openfile()` did `data_buffer = malloc(2048 * totalblocks)` — a
+   *second* ~18 MiB allocation for the whole transfer — DMA-read it in one shot,
+   then `memcpy`'d the slice out. For `cc1` that doubled the peak heap need and,
+   worse, the oversized single DMA read left the caller's destination **zeroed**
+   (the ELF magic came back `00 00 00 00`, so the loader reported
+   "unidentified executable format"). Rewrote `iso9660_openfile()` to read the
+   CD **one 2048-byte block at a time** directly into the caller's buffer, using
+   a tiny per-call `malloc(2048)` and copying the correct slice on the first/last
+   partial blocks. This path is shared by all CD reads, so block-at-a-time is now
+   the CD baseline (regression-checked with `test-iobench`).
+
+3. **The test drove `cc1` with a driver-only flag.** `cc1test` invoked
+   `cc1.exe -c in.c -o out.s`. `-c` (compile+assemble, no link) is a `gcc`
+   *driver* option and is **rejected by `cc1`** (`error: command line option
+   '-c' is valid for the driver but not for C`). `cc1` is the C frontend and
+   emits assembly directly, so the `-c` was dropped: `cc1.exe in.c -o out.s`.
+
+**Result:** `make test-cc1` **PASS**. The 18 MiB ELF64 loads into a private PML4
+(`elf64: loaded ... entry=0x109C2B9`), `cc1` runs the real frontend (`Analyzing
+compilation unit` → `Performing interprocedural optimizations` → `Assembling
+functions: cc1_probe`), and writes `/ramdisk/cc1probe.s` (465 bytes).
+`CC1_TEST_PASS`.
+
+**Regressions (all PASS after rebuild):** `test-integration` (boot + SMP + exec),
+`test-iobench` (CD sequential + 4 KiB page cache), `test-selfhost` (in-OS TinyCC
+compile+run). The host-side `contrib/gnumake`/`contrib/binutils` link errors
+(multiple definition of `strcasecmp`/`strncasecmp`/`strsignal`/
+`fopen_unlocked`/`bsearch` — SDK `posix.c` vs the staged sources) are
+**pre-existing** and the Makefile marks them `(ignored)`; they do not affect the
+passing tests above.
+
+**Files touched:** `kernel/memory/memlayout.h` (48 MiB kernel heap),
+`kernel/memory/dexmem.c` (dropped `kmode` from `mem_reserved[]`),
+`kernel/filesystem/iso9660.c` (block-at-a-time CD read),
+`kernel/console/console.c` (`cc1test` command; removed temporary magic/fread
+diagnostics), `ics-os/Makefile` (`test-cc1` target).
+
+**Next:** GCC 4.7.4 (C-only) self-host is the stated capstone. Near-term
+enablers: (a) fix the pre-existing SDK `posix.c` symbol conflicts so the host
+`make.exe`/`ar.exe`/`as.exe`/`ld.exe` link (unblocks running the in-OS toolchain
+end-to-end), then (b) drive `cc1` → `as` → `ld` in-OS to produce a real ICS-OS
+executable. The memory-map work (48 MiB kernel heap, per-process PML4, userpd
+bitmap pool) is in and regression-clean.
+
+**Activity now:** `test-cc1` is green — the host-built GCC `cc1` runs in-OS and
+compiles C to assembly. Next: the GCC 4.7.4 self-host chain (close the SDK symbol
+conflicts so the binutils/make tools link, then compile+link+run a real ELF in-OS).
+
 ## 2026-08-28 (Manila, UTC+8)
 
 ### 17:40 — ld (GNU ld 2.23) builds and links: `ld.exe`
@@ -1314,3 +1388,472 @@ ELF64 user program end-to-end.
 **Next:** GCC 4.7.4 self-host step 4 — build the in-OS GCC (C-only) against
 this working binutils, then have that GCC compile ICS-OS (see
 `docs/gcc-selfhost.md`).
+
+## 2026-08-29 (Manila, UTC+8)
+
+### libcpp stage complete — 15 preprocessor objects compile
+
+The first GCC 4.7.4 self-host stage (the `contrib/gcc` overlay, `make libcpp`)
+is green: all 15 target-independent preprocessor objects (`charset`,
+`directives`, `directives-only`, `errors`, `expr`, `files`, `identifiers`,
+`init`, `lex`, `line-map`, `macro`, `mkdeps`, `pch`, `symtab`, `traditional`)
+compile cleanly against the SDK with the hand-written `config.h`.
+`makeucnid.c` is a build-time code-gen tool and is correctly kept out of the
+link set. This de-risks the preprocessor before the heavier cc1 stage.
+
+### GMP 5.1.3 builds and is host-verified (`make test-gmp`)
+
+**Goal:** build the GMP 5.1.3 arbitrary-precision integer/ration library as a
+freestanding `libgmp.a` against the ICS-OS SDK. cc1 uses GMP for
+integer/ration constant arithmetic, so this must link and run the same way the
+other library stages do.
+
+**Approach:** a dedicated `contrib/gmp` overlay (GMP is a self-contained
+library, kept separate from the `contrib/gcc` one): host gcc with the same
+`-nostdlib -ffreestanding -nostdinc` SDK flags, a hand-written `config.h`, and a
+*generated* `gmp.h` that maps the short public names (`mpz_add`, `mpn_mul_1`,
+...) to the `__gmp`/`__gmpn`-prefixed symbols the archive defines. Limbs are
+64-bit long-long (`GMP_LIMB_BITS=64`, `GMP_NAIL_BITS=0`,
+`mp_limb_t = unsigned long long int`).
+
+**Findings / obstacles (all fixed):**
+
+- **SDK gaps.** GMP 5.1.3 needs C99 least-width int typedefs
+  (`uint_least32_t`) — added to `sdk/include/stdint.h`; it probes for
+  `memcpy`/`memmove`/`memset` (suppressed via `HAVE_MEM*` so the SDK `string.h`
+  wins) and `stdarg.h` (defined `HAVE_STDARG`); and it references `localeconv`
+  for a decimal-point fallback — the locale macros were removed since the SDK
+  has no locale support.
+
+- **Generated tables must be committed.** GMP's build generates
+  `mpn_fib_table.c`/`fib_table.h`, `mpn_bases_table.c`/`mp_bases.h`,
+  `fac_table.h`, `jacobitab.h`, `trialdivtab.h`, and `perfsqr.h` from C
+  generator programs. Each generator was run once (with `64 0` limb/nail bits)
+  and the results committed into the overlay, which is on the include path.
+
+- **Multi-compiled generic files.** Four `mpn/generic/*.c` files each define
+  several `mpn` entry points selected by an `OPERATION_*` macro: `logops_n.c`
+  → 8 bitwise ops, `popham.c` → `popcount`/`hamdist`, `sb_div_sec.c` and
+  `sbpi1_div_sec.c` → 2 sec-division variants each. The Makefile compiles each
+  once per operation with `-DOPERATION_<name>=1`.
+
+- **`GENERIC_C` self-reference left the whole `mpn` tier out (the big one).**
+  The rule was `GENERIC_C := $(filter-out $(DUAL_C),$(GENERIC_C))` — with `:=`
+  the RHS expanded `$(GENERIC_C)` to *itself* (empty) at define-time, so
+  `mpn/generic/*.c` contributed nothing and the archive silently lacked every
+  low-level `mpn_*` symbol. Fixed by widening the RHS to the actual wildcard:
+  `$(filter-out $(DUAL_C),$(wildcard $(SRC)/mpn/generic/*.c))`.
+
+- **`ar` member-name collisions.** Objects were named by basename, so
+  `mpz/add.c`, `mpf/add.c`, `mpq/add.c`, and `mpn/generic/add.c` all produced
+  `add.o` and clobbered each other in `libgmp.a`. Object names are now flattened
+  to unique basenames (`mpz/add.c` → `mpz_add.o`, `mpn/generic/add_1.c` →
+  `mpn_generic_add_1.o`) via a `SRC2OBJ` transform, and the per-source compile
+  rules are generated with `define` / `$(foreach ... $(eval ...))`.
+
+- **`$(dir $$@)` in a `define`-generated rule.** A per-object
+  `mkdir -p $(dir $$@)` was expanded at *parse* time (when `$@` is empty) to
+  `./`, so it never created the real object dir. Replaced with an order-only
+  `| $(OBJ)` prerequisite on every generated rule plus a single
+  `$(OBJ): ; mkdir -p $(OBJ)` target.
+
+- **Assertion handler was missing from the build.** `assert.c` (which provides
+  `__gmp_assert_fail` / `__gmp_assert_header`) was not in `TOP_C`, so any GMP
+  assertion path would be an undefined reference. Added it; its only external
+  deps are `abort`, `fprintf`, and `stderr`, all provided by the SDK link set
+  (`sdk/tccsdk.c` defines `stderr`, `sdk/posix.c` defines `abort`/`fprintf`)
+  that the cc1 overlay already uses.
+
+**Result:** `make -C contrib/gmp libgmp` builds a `libgmp.a` of 461 objects
+(521 defined `T` symbols); every internal `__gmp*` reference resolves and the
+only external undefineds are `abort`/`fprintf`/`stderr`. A host functional test
+(`contrib/gmp/test_gmp.c`, run by `make test-gmp`) links against the archive and
+exercises `mpz_add`/`mpz_mul`/`mpz_powm`/`mpz_get_str`, `mpf_add`, `mpq_add`,
+`gmp_randinit_mt`, and the internal `mpn_add_1`/`mpn_mul_1` — all pass:
+`GMP_HOST_TEST_PASS`.
+
+**Next:** MPFR 3.0.1 (float constant arithmetic; needs the SDK `libm` to grow),
+then wire GMP+MPFR into the `contrib/gcc` overlay and build `cc1`.
+
+### MPFR 3.0.1 builds and is host-verified (`make test-mpfr`) + two SDK correctness gaps fixed
+
+**Goal:** build MPFR 3.0.1 (the floating-point library cc1 uses for
+`__float128`/constant arithmetic) as a freestanding `libmpfr.a` against the SDK,
+linking the GMP stage above it.
+
+**Approach:** a dedicated `contrib/mpfr` overlay. Unlike GMP, MPFR 3.0.1 is
+configured through **`DEFS` (command-line `-D` flags), not a `config.h`** —
+`HAVE_CONFIG_H` is absent, so every `#ifdef HAVE_CONFIG_H` guard stays false. The
+configure-generated `mparam.h` (tuning constants) is shipped in the overlay, and
+the 217 library `.c` files are pulled in by wildcard with 5 exclusions
+(`ansi2knr.c` K&R tool; `speed.c`/`tuneup.c` standalone programs; `jyn_asympt.c`
+and `round_raw_generic.c` which are `#include`d by `jn.c`/`yn.c` and
+`round_prec.c`).
+
+**Findings / obstacles (all fixed):**
+
+- **`__gmp_const` gap in the GMP header.** MPFR's `mpfr.h` types
+  `mpfr_srcptr` as `__gmp_const __mpfr_struct *` and uses `__gmp_const`
+  throughout, but GMP 5.1.3's `gmp-h.in` never defines the `__gmp_const` /
+  `__gmp_unsigned` / `__gmp_signed` portability macros (it uses bare `const`).
+  Added the three `#define`s to the overlay `gmp.h` (after the
+  `__GMP_DECLSPEC` block). GMP still passes.
+
+- **The overlay must build with `-nostdinc -I$(SDK)/include`.** The first MPFR
+  `Makefile` forgot the `-nostdinc` include guard that the GMP overlay uses, so
+  `#include <...>` silently resolved to **host glibc** headers. glibc's `ctype.h`
+  implements `isspace`/`isalpha` as macros over the glibc-internal
+  `__ctype_b_loc`, which leaked into `libmpfr.a`'s undefined set. Matching the
+  GMP include path fixed it: `isspace`/`isalpha` now resolve to the SDK's real
+  functions. (The objects live in `obj/`, so a header change requires
+  `rm -f obj/*.o`, not `rm -f *.o`.)
+
+- **SDK gap: `SIZE_MAX` missing from `stdint.h`.** MPFR's `vasprintf.c` uses the
+  C99 `SIZE_MAX`. Added `SIZE_MAX` (plus the 8/16-bit and `INT32_MIN` limits) to
+  `sdk/include/stdint.h`.
+
+- **SDK bug: `LONG_MAX` was the 32-bit value on a 64-bit platform (the big one).**
+  `sdk/include/limits.h` defined `LONG_MAX 2147483647L` (a 32-bit constant) even
+  though on x86-64 long mode `long` is 64-bit. GMP's `MP_SIZE_T_MAX` derives from
+  `LONG_MAX` (when `__GMP_MP_SIZE_T_INT==0`, i.e. `mp_size_t` is `long`), so it
+  came out 32-bit. MPFR's `init2.c` runs the sanity assertion
+  `MP_SIZE_T_MAX >= MPFR_PREC_MAX / BYTES_PER_MP_LIMB`; with a 64-bit
+  `mpfr_prec_t` (chosen because `__GMP_MP_SIZE_T_INT==0`) that is
+  `2147483647 >= 1152921504606846975` → **aborts at first `mpfr_init2`**. The GMP
+  test never caught this because `MP_SIZE_T_MAX` only feeds algorithm thresholds
+  (still astronomically large, so results were right). Fixed `limits.h`:
+  `LONG_MIN/MAX`/`ULONG_MAX` are now 64-bit under `__x86_64__` (32-bit otherwise)
+  and `LLONG_*/ULLONG_MAX` were added. Both GMP and MPFR were rebuilt; GMP still
+  passes.
+
+- **Test-file comment bug.** `test_mpfr.c`'s header comment contained the literal
+  sequence `*/` (from `__gmp*/__gmpn*`), which terminated the block comment early
+  and turned the rest of the file into garbage (cascading `size_t` errors).
+  Reworded the comment.
+
+**Result:** `make -C contrib/mpfr libmpfr` builds a `libmpfr.a` of 217 objects
+(1,020,760 bytes). A host functional test (`contrib/mpfr/test_mpfr.c`,
+`make test-mpfr`) exercises add/sub/mul/div, `sqrt`, `pow`, `exp`, `log`,
+`sin(pi/2)`, `cos(0)` and an mpfr→mpz round-trip — all pass:
+`MPFR_HOST_TEST_PASS`. A strict in-OS link simulation
+(`test_mpfr.c` + `libmpfr.a` + `libgmp.a` + the SDK objects,
+`-nostdlib -Wl,--no-undefined`) links cleanly, and a definitive `nm` check shows
+all 28 of MPFR's external symbols (memory/string/stdio, no libm) are defined in
+the SDK — **0 MISS**. Notably MPFR implements its own transcendentals (series +
+argument reduction + AGM), so **no host `libm` is required** — the earlier
+"SDK libm must grow" note does not apply to the core path.
+
+**Next:** wire GMP+MPFR into the `contrib/gcc` overlay, then `libiberty`, then
+`cc1`.
+
+### GMP+MPFR wired into the `contrib/gcc` overlay + `libiberty` stage built
+
+**Goal:** make the `contrib/gcc` overlay compile `cc1` against the SDK-built
+GMP/MPFR (so its constant-arithmetic calls resolve to our libs, not the host's)
+and build the `libiberty` stage `cc1` links against.
+
+**GMP/MPFR wiring (the latent bug found):** the overlay's include path pointed
+`GMPINC` at the **host** `gmp.h` (`/usr/include/x86_64-linux-gnu`). That header
+maps the public `mpz_*`/`mpn_*` names to *bare* symbols, but our `libgmp.a`
+exports the `__gmp*`/`__gmpn*`-prefixed ones (our `contrib/gmp/gmp.h` does that
+mapping). Compiling `cc1` against the host header would leave every `mpz_*`
+reference undefined at link time. Fixed: `GMPINC` now points at
+`contrib/gmp` (our `gmp.h`) + `contrib/mpfr`, and `SDKLIBS` gained
+`libmpfr.a` + `libgmp.a`. Verified with a new `make test-gmpmpfr` regression
+target: a tiny program calling both `mpz_add` and `mpfr_mul`, built with the
+*exact* `cc1` flags (`-DHAVE_CONFIG_H`, the GCC internal include dirs, our
+overlay headers) and linked with `-Wl,--no-undefined` against the SDK — passes
+(`GCC_GMPMPFR_WIRING_OK`, 226 KB static binary). Also confirmed the public
+`mpfr.h`/our `gmp.h` do not `#include "config.h"`, so `-DHAVE_CONFIG_H` (GCC's
+`config.h`) does not leak into them.
+
+**Link-order fix:** the first wiring attempt failed with undefined
+`__gmpn_sub_1`/`__gmpn_lshift`/`__gmpn_add_1` — MPFR's objects reference GMP's
+internal limb functions, so `libmpfr.a` must come **before** `libgmp.a` (a
+dependency, then its dependency). `GMPMPFR` now lists them in that order.
+
+**`gmp.h` cleanup:** two unexpanded Autoconf `@HAVE_HOST_CPU_FAMILY_*@`
+placeholders (PowerPC detection, unused on x86-64) were left in the generated
+header; set both to `0` so the macros are well-formed.
+
+**`libiberty` (stage 2):** the GNU common library `cc1` needs, built as a static
+`libiberty.a` so the `cc1` link pulls in only referenced members. 41 portable
+objects: allocation/structures (`xmalloc`, `obstack`, `objalloc`, `hashtab`,
+`fibheap`, `splay-tree`, `sort`, `partition`, `dyn-string`), utilities
+(`getopt`/`getopt1`, `basename`/`lbasename`, `concat`, `hex`, `ffs`, `insque`,
+`strverscmp`, `floatformat`, `md5`, `crc32`, `copysign`, `xatexit`, `xexit`,
+`xstr*`, `asprintf`/`vasprintf`, temp-file helpers), and `cplus-dem`
+(demangling). Deliberately omitted: files duplicating SDK libc (`memcpy`,
+`strcmp`, `strtod`, ...) and files making OS calls the in-OS kernel does not
+serve (`pexecute`/`pex-*`/`vfork`/`waitpid`/`tmpnam`/`getpwd`) — process
+spawning is the gcc *driver's* job, not `cc1`'s. All 41 compile cleanly against
+the SDK; `libiberty.a` is 226 KB.
+
+**Next:** build `cc1` (the C frontend + middle end + `config/i386` target), the
+heavy stage.
+
+### 11:30–19:20 — All `insn-*` generators run: complete x86_64-linux machine-description support set produced
+
+**Goal:** run the full GCC `gen*` pipeline (host-side, x86_64-linux target) to
+produce every generated file `cc1` needs — the long pole of the `cc1` build,
+because each generator is itself a small C program that must first be compiled
+against the same generated headers.
+
+**Root cause of the `unknown mode XF` blocker:** `genmodes` reads its machine
+modes from `machmode.def`, which only lists the *standard* modes. Target-specific
+modes (x86 `XF`/`TF`, the `CC*` condition-code modes, the `V16QI`/`OI` vector
+modes) come from a second file pulled in by `machmode.def`'s
+`# include EXTRA_MODES_FILE`. GCC's `config.gcc` sets that to
+`config/i386/i386-modes.def`. So `genmodes` (and every other generator that
+includes `machmode.def`) had to be compiled with
+`-DEXTRA_MODES_FILE="config/i386/i386-modes.def"`. Recompiling `genmodes` with
+that flag and regenerating `insn-modes.{c,h}` + `min-insn-modes.c` gave 19
+i386-mode symbols (`XFmode`, `CCGC`, `V16QI`, `OI`, ...).
+
+**The generator chain (each step unblocks the next):**
+1. `genmodes` (with `EXTRA_MODES_FILE`) → `insn-modes.c/h`, `min-insn-modes.c`.
+2. Recompile the `BUILD_RTL` set (`rtl`, `read-rtl`, `ggc-none`, `vec`,
+   `gensupport`, `print-rtl`, `min-insn-modes`) **and every generator** against
+   the new `insn-modes.h`, then relink all of them (`genautomata` also needs
+   `-lm`).
+3. `genconditions i386.md` → `build/gencondmd.c` (16071 lines).
+4. `gencondmd.c` would not compile until its generated-header dependencies
+   existed; produced each: `genconstants i386.md` → `insn-constants.h`;
+   `mkconfig.sh` → `tm_p.h` (wraps `i386/i386-protos.h`); `opt-gather`/`opth-gen`
+   over `c.opt common.opt i386.opt linux.opt` → `options.h` (the `linux.opt`
+   file is what defines `linux_libc`); hand-wrote `all-tree.def`
+   (`tree.def` + `c-common.def`); `gencheck` → `tree-check.h`; `genpreds -c` →
+   `tm-constrs.h`; and regenerated `tm.h` **with** the `config.gcc` `tm_defines`
+   (`USE_IX86_FRAME_POINTER=1 LIBC_GLIBC=1 LIBC_UCLIBC=2 LIBC_BIONIC=3
+   DEFAULT_LIBC=LIBC_GLIBC`) plus `defaults.h` in the header list (mkconfig only
+   emits `# include "defaults.h"` when `defaults.h` is actually in `HEADERS`).
+5. `gencondmd` → `insn-conditions.md` (2842 lines). This is the linchpin: nearly
+   every downstream generator consumes it.
+6. Ran the rest with `gen* i386.md insn-conditions.md`: `gencodes`→`insn-codes.h`,
+   `genflags`→`insn-flags.h`, `genattr`→`insn-attr.h`, `genattr-common`→
+   `insn-attr-common.h`, `genconfig`→`insn-config.h`, `genattrtab`→`insn-attrtab.c`,
+   `genautomata`→`insn-automata.c`, `genemit`→`insn-emit.c`, `genextract`→
+   `insn-extract.c`, `genopinit`→`insn-opinit.c`, `genoutput`→`insn-output.c`,
+   `genpeep`→`insn-peep.c`, `genrecog`→`insn-recog.c`, `genenums`→`insn-enums.c`.
+7. `genpreds i386.md`→`insn-preds.c`; `genpreds -h`→`tm-preds.h`;
+   `gengenrtl`→`genrtl.h`.
+
+**Result — the full generated set (28 files) now exists in `/tmp/icsos-gcc/gen`:**
+`insn-modes.{c,h}`, `min-insn-modes.c`, `insn-constants.h`, `insn-conditions.md`,
+`insn-codes.h`, `insn-flags.h`, `insn-attr.h`, `insn-attr-common.h`,
+`insn-config.h`, `insn-attrtab.c`, `insn-automata.c`, `insn-emit.c`,
+`insn-extract.c`, `insn-opinit.c`, `insn-output.c`, `insn-peep.c`,
+`insn-recog.c`, `insn-enums.c`, `insn-preds.c`, `tm-preds.h`, `tm-constrs.h`,
+`genrtl.h`, `tree-check.h`, `options.h`, `all-tree.def`, `tm.h`, `tm_p.h`.
+The big ones are real target tables: `insn-recog.c` 166K lines, `insn-output.c`
+141K, `insn-attrtab.c` 175K, `insn-emit.c` 79K, `insn-automata.c` 35K.
+
+**Note for the `cc1` build:** `genchecksum`/`cc1-checksum.c` is deliberately not
+generated yet — it is fed the *actual* `cc1` object list plus the link-options
+file, so it belongs to the `cc1` link step, not the generator step.
+
+**Next:** build `cc1` itself — the C frontend + middle end + `config/i386`
+target objects — compiled against this generated set and linked with
+`libcpp.a`, `libiberty.a`, `libmpfr.a`, `libgmp.a` and the SDK libc.
+
+### 19:20–20:55 — cc1 smoke-test: the x86_64 target backend compiles (`i386.c`, `i386-c.c`, `dwarf2out.c`, `c-parser.c`, `tree.c`, `alias.c`)
+
+Generator milestone done; moved to compiling `cc1` itself against the generated
+set. Ran the middle-end + target files through a host smoke-compile (SDK
+freestanding flags + the generated include dir) to surface missing generated
+files, target defines, and SDK gaps.
+
+**Files now compiling OK** (host gcc 13.3, `-DIN_GCC -DHAVE_CONFIG_H`):
+`alias.c`, `tree.c` (core), `dwarf2out.c`, `c-parser.c`, `config/i386/i386-c.c`,
+and finally **`config/i386/i386.c`** (947 KB object). The whole x86_64 target
+backend now builds.
+
+**Root causes fixed to get there:**
+1. `-DIN_GCC` was missing (GCC's `INTERNAL_CFLAGS`). Without it,
+   `include/ansidecl.h:193` mis-parses and cascades into bogus
+   `LAST_AND_UNUSED_RTX_CODE` / `N_REG_CLASSES` / `CUMULATIVE_ARGS` errors.
+2. `enum rtx_code` / `LAST_AND_UNUSED_RTX_CODE` are **not** generated — they are
+   defined inline in `gcc/rtl.h` (lines 46–57) via `#include "rtl.def"`. So
+   `genrtl.h` (only `gen_rtx_fmt_*` helpers) and `insn-codes.h` (only
+   `enum insn_code`) are correct as-is; nothing to regenerate.
+3. `target-hooks-def.h` is produced by **`genhooks "Target Hook"`** (not
+   genconfig). Built `genhooks` and generated `target-hooks-def.h`,
+   `c-family/c-target-hooks-def.h`, `common/common-target-hooks-def.h` (the
+   latter two into `gen/c-family/` and `gen/common/` so the quoted includes
+   resolve).
+4. i386 register-number constants (`AX_REG`…`DI_REG`, `XMM0_REG`) and the
+   `UNSPECV_*` values come from `define_constants` in `i386.md` →
+   `insn-constants.h` (genconstants). **No header includes `insn-constants.h`**,
+   so `gen/tm.h` was edited to `#include "insn-constants.h"` alongside
+   `insn-flags.h` (a force-include test confirmed this clears the `DI_REG`
+   errors).
+5. `i386.c:24677` needs `i386-builtin-types.inc`; generated it from
+   `i386-builtin-types.def` via `awk -f i386-builtin-types.awk` (868 lines).
+6. The assembler/gas capability macros are **configure-time** values, absent
+   from a hand-built config. Added to the smoke `GASDEFS` (x86_64-linux, modern
+   gas): `HAVE_COMDAT_GROUP`, `HAVE_GAS_SHF_MERGE`,
+   `HAVE_GAS_CFI_SECTIONS_DIRECTIVE`, `HAVE_GAS_HIDDEN`,
+   `HAVE_GAS_MAX_SKIP_P2ALIGN=65535`, `HAVE_AS_GOTOFF_IN_DATA`,
+   `HAVE_AS_IX86_CMOV_SUN_SYNTAX`, `HAVE_AS_IX86_FFREEP`, `HAVE_AS_IX86_FILDQ`,
+   `HAVE_AS_IX86_FILDS`, `HAVE_AS_IX86_REP_LOCK_PREFIX`, `HAVE_AS_TLS`,
+   `HAVE_AS_GOTTPLTPCALL`, `HAVE_AS_TLSDIRECT`, `HAVE_AS_CFI_SECTIONS`,
+   `HAVE_AS_X86_CMPXCHG16B`.
+7. **`TARGET_CPU_DEFAULT` was `""`** in `contrib/gcc/config.h:35`. `i386.c:3148`
+   does `cpu_names[TARGET_CPU_DEFAULT]`, which became `cpu_names[""]` →
+   "array subscript is not an integer". A real x86 build leaves the macro to
+   `i386.h:193`'s `#ifndef` fallback. Changed it to the enum constant
+   `TARGET_CPU_DEFAULT_generic`.
+
+**Note:** `i386.c:39128` includes `gt-i386.h` (gengtype output); it exists in the
+gen dir and the file linked through. `gengtype` phase 2 still exits rc=1 with
+nonblocking warnings but emits usable `gtype-desc.{c,h}` + `gt-*.h`.
+
+**Next:** batch-compile the full `cc1` object list (the `OBJS` middle-end set +
+ `i386.o` + `C_OBJS`/`c-family` + `i386-c.o` + `ggc-none.o` + `main.o` +
+ `OBJS-libcommon[-target]`), fix any remaining SDK gaps, then add the `cc1`
+ build section to `contrib/gcc/Makefile` and link.
+
+## 2026-08-30 (Manila, UTC+8)
+
+### 03:00–03:35 — **MILESTONE: in-OS `cc1` links clean** (18.2 MB x86-64 ELF, 0 undefined refs)
+
+The 36-symbol undefined-reference wall from the third link is fully cleared. `cc1`
+now links to a valid `EXEC` ELF (entry + `main` present, `.text` ~7 MB). Fixes landed:
+
+- **Constraint macros (6):** `CONSTRAINT_LEN`, `CONST_OK_FOR_CONSTRAINT_P`,
+  `CONST_DOUBLE_OK_FOR_CONSTRAINT_P`, `REG_CLASS_FROM_CONSTRAINT`,
+  `EXTRA_ADDRESS_CONSTRAINT`, `EXTRA_MEMORY_CONSTRAINT` are all `#define`s in
+  `defaults.h`. The undefined refs were **stale objects** (compiled before the
+  force-include took effect). Recompiling `recog`, `ira-conflicts`, `ira-costs`,
+  `ira-lives`, `postreload`, `regmove`, `reload1`, `reload`, `stmt` → 0 refs.
+- **`targetcm` / `targetm_common`:** compiled `config/default-c.c` → `default-c.o`
+  (exports `targetcm`) and `common/config/i386/i386-common.c` → `i386-common.o`
+  (exports `targetm_common`). Note: `default-c.c` lives in `gcc/config/`, which
+  `compile_one.sh` does not search, so it needed a direct compile.
+- **GGC allocs:** `ggc_alloc_cleared_machine_function` / `ggc_alloc_stack_local_entry`
+  are called by ~18 targets but defined nowhere (not generated, not in headers).
+  Added `gen/shim-ggc-alloc.c` defining both via `ggc_internal_cleared_alloc_stat`.
+  `struct machine_function` is complete in `i386.h`; `struct stack_local_entry` is
+  file-local to `i386.c` so the shim mirrors its 4 fields (2+2+pad+8+8 = 24 B) to
+  size the allocation.
+- **Mudflap:** `mudflap_init` is only in `tree-mudflap.o`, which collides with
+  `tree-nomudflap.o` on 5 other symbols. Kept `tree-nomudflap.o` and added a no-op
+  `mudflap_init` stub to `shim-ggc-alloc.c` (only called under runtime `flag_mudflap`).
+- **Host funcs → libiberty.a:** compiled `physmem.c`(physmem_total),
+  `getruntime.c`(get_run_time), `getpwd.c`(getpwd), `lrealpath.c`(lrealpath),
+  `cp-demint.c`(cplus_demangle_v3_components).
+- **libdecnumber bid/ieee → libdecnumber.a:** compiled `bid2dpd_dpd2bid.c`,
+  `host-ieee32/64/128.c`.
+- **SDK libc gaps:** added `asctime` (macro.c) and `bsearch` (files.c) to
+  `sdk/posix.c` + declarations to `sdk/include/{time,stdlib}.h`.
+- **hwint log fns (5):** `floor_log2`, `exact_log2`, `ctz_hwi`, `clz_hwi`,
+  `ffs_hwi` are `static inline` in `hwint.h` only for `GCC_VERSION >= 3004`, but the
+  prebuilt objects reference them as out-of-line symbols. Added `gen/shim-hwint.c`
+  with self-contained out-of-line defs (HOST_WIDE_INT=`long`, 64-bit; includes
+  `<limits.h>` for `CHAR_BIT`).
+
+`cc1_objs.txt` now 348 entries. Archives extended in place.
+
+**Next:** (1) integrate `cc1` into the in-OS self-host build (stage it to `/work`,
+wire a `make test-cc1` target); (2) run it in-OS to compile a trivial `.c` and
+confirm it emits runnable assembly; (3) add the `cc1` build section to
+`contrib/gcc/Makefile` so the whole chain is reproducible from `make`.
+
+### 06:34–06:48 — **MILESTONE: reproducible `cc1` build from `contrib/gcc/Makefile`**
+
+Completed the "Next (3)" item from 03:35: the whole `cc1` host build now runs
+from `make -C ics-os/contrib/gcc cc1` (or `all`) with no manual steps. From a
+pristine scratch (`rm -rf /tmp/icsos-gcc`) it builds 349/349 cc1 objects,
+4/4 archives (`libcpp`/`libiberty`/`libdecnumber`/`libz`), links the 3
+prebuilt math archives, and emits a valid `cc1` (18,180,320 B, `T main`, 0
+undefined). Incremental `make cc1` is a correct no-op.
+
+Repo additions (all under `ics-os/contrib/gcc/`, untracked):
+
+- **`gen/`** — 94-file (19 MB) snapshot of the generated headers/sources the
+  build needs: 14 `.c` (gtype-desc, insn-*, options, options-save), 78 `.h`,
+  `all-tree.def`, `i386-builtin-types.inc`, and the `c-family`/`common`
+  target-hooks defs. State files (`gtype.state`, `tmp-gtype.state`) and build
+  artifacts were excluded; there is **no** `gen/config.h` so it cannot shadow
+  `contrib/gcc/config.h`.
+- **`shims/`** — `shim-ggc-alloc.c`, `shim-hwint.c`, `cc1-checksum.c`
+  (hand-written stand-in for genchecksum output; provides `executable_checksum`).
+- **`cc1-objs.txt`** — the 349-entry object list (each entry already `.o`).
+- **`decnuminc/config.h`** — minimal decNumber config (`WORDS_BIGENDIAN 0`);
+  `dconfig.h` pulls in `tconfig.h` + this `config.h`.
+- **`Makefile`** — rewritten. Builds the 4 libc archives, falls back to
+  `$(MAKE) -C <gmp|mpfr|mpc>` for the math archives if missing, compiles the 349
+  cc1 objects via a pattern rule (5-candidate source search: `gen/`, `shims/`,
+  `gcc/`, `gcc/config/i386/`, `gcc/config/`), and links with
+  `--start-group … --end-group -Wl,--no-undefined`.
+
+Difficulties hit and fixed:
+
+- **Double `.o`:** `CC1_OBJS` used `$(patsubst %.c,%.o,…)` on a list that already
+  carried `.o`, producing `alias.o.o`. Switched to `$(addprefix $(CC1_OBJDIR)/,…)`.
+- **VERDEFS quoting (the real blocker):** `toplev.o` failed with
+  `‘ics’ undeclared` / `‘os’ undeclared` from `TARGET_NAME`. Root cause: in a
+  make variable expanded onto the recipe command line, `-DTARGET_NAME="…"` has
+  its quotes stripped by the single shell pass. `compile_one.sh` never hit this
+  because the quotes lived *inside* a bash variable passed via unquoted
+  `$CFLAGS` (no re-parsing). Fix: backslash-escape the quotes in the make
+  variable (`-DTARGET_NAME=\"x86_64-ics-os\"`) so the shell preserves them.
+  Verified with a scratch Makefile that `\"` (not single-quoting) survives.
+- **libiberty** needed 2 files beyond the 5 known host funcs: `cp-demangle.c`,
+  `safe-ctype.c` (now 48 members).
+- **libdecnumber** builds *without* `-fno-builtin`/`-fno-asynchronous` and uses
+  the staged `decnuminc/`; **libz** builds *without* `-nostdinc` (its `zconf.h`
+  needs `sys/feature_tests.h` + `unistd.h`). `crc32` is in both libiberty and
+  libz; link order (libiberty first in the group) resolves it.
+
+**Next:** (1) in-OS validation via QEMU — stage `cc1` to `/work`, wire a
+`make test-cc1`, run it in-OS to compile a trivial `.c` and confirm runnable
+output (host `./cc1 --version` is meaningless: the SDK uses the ICS-OS
+`int 0x30` syscall ABI); (2) optionally make GMP/MPFR/MPC build-from-source
+reproducible too (today they are prebuilt `.a` + a fallback rule).
+
+### 07:00–07:16 — **GMP/MPFR/MPC made source-reproducible; GMP default-goal bug fixed**
+
+Per user direction the next step was (2): make the three math libraries
+build-from-source reproducible through `contrib/gcc/Makefile` before any QEMU
+work. Wiping the three `.a` + `obj/` dirs and the `/tmp/icsos-gcc` stage, then
+`make -C gcc -j4 cc1`, rebuilt MPFR and MPC from `references/` source, but
+**`libgmp.a` did not build** and the cc1 link failed with
+`/usr/bin/ld: cannot find ../../contrib/gmp/libgmp.a`.
+
+Root cause (GMP Makefile): the `dual_rule`/`src_rule` `$(foreach … $(eval …))`
+blocks emit the object-file targets *before* the `all: libgmp` line, so the
+first target in the file — `obj/logops_n-and_n.o` — becomes make's default
+goal. A bare `make -C gmp` built only that one object and exited 0 without
+creating the archive. `make -C gmp -n` confirmed it planned just that object;
+`make -C gmp -n all` planned all 460 compiles. MPFR/MPC were unaffected because
+their `all:` precedes their object rules.
+
+Fix: pinned the default goal in `contrib/gmp/Makefile` with
+`.DEFAULT_GOAL := all` (just before the `.PHONY`/`all` block, with a comment
+explaining the foreach/eval ordering). Made the gcc overlay's math fallback
+rules robust by invoking `$(MAKE) -C <dir> all` explicitly (was a bare
+`$(MAKE) -C <dir>`), and added a standalone `mathlibs` target to
+`contrib/gcc/Makefile` that regenerates all three archives from source.
+
+Verification (all green):
+
+- Full source rebuild (wiped all three `.a`+`obj/` + cc1 stage, then
+  `make -C gcc -j4 cc1`) → exit 0: `libgmp.a` 461 members, `libmpfr.a` 217,
+  `libmpc.a` 78 (all from `references/`); `cc1` relinked 18,180,320 B, `T main`,
+  **0 undefined** symbols.
+- Host functional tests: `GMP_HOST_TEST_PASS`, `MPFR_HOST_TEST_PASS`,
+  `MPC_TEST_PASS` (each runs its rebuilt archive on the host).
+- `make -C gcc test-gmpmpfr` → `GCC_GMPMPFR_WIRING_OK`.
+- `mathlibs` target: deleting only `mpc/libmpc.a` then `make -C gcc mathlibs`
+  rebuilt just MPC; `all` still defaults to cc1; incremental `make cc1` is a
+  no-op when up to date.
+
+The whole chain is now source-reproducible: `make -C contrib/gcc cc1`
+regenerates GMP/MPFR/MPC from `references/` (when a `.a` is missing) and builds
+a link-clean `cc1`.
+
+**Next:** in-OS validation via QEMU — stage `cc1` to `/work`, wire a
+`make test-cc1`, run it in-OS to compile a trivial `.c` and confirm runnable
+output (host `./cc1 --version` is meaningless: the SDK uses the ICS-OS
+`int 0x30` syscall ABI).

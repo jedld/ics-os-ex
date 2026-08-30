@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools test-cc1
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -497,6 +497,33 @@ test-make: vmdex apps/tcc.exe apps/hello.exe apps/make.exe
 	@grep -aq "MAKE_PASS" /tmp/icsos-make.log
 	@! grep -aq "MAKE_FAIL" /tmp/icsos-make.log
 	@echo "test-make PASS"
+
+# In-OS GCC cc1 compile test: run the host-built cc1 (a full GCC C frontend,
+# ~18MB) to compile a trivial C file to assembly, proving the GCC frontend
+# runs on ICS-OS. cc1 runs from the CD (too large for the 16MiB ramdisk).
+test-cc1: kernel/Kernel64.bin
+	@if [ ! -s /tmp/icsos-gcc/cc1 ]; then \
+	   echo "Building host cc1 (contrib/gcc)..." ; \
+	   $(MAKE) -C contrib/gcc cc1 ; \
+	fi
+	@echo "Building Multiboot2 ISO for in-OS GCC cc1 compile test..."
+	@rm -rf /tmp/icsos-cc1-iso
+	@mkdir -p /tmp/icsos-cc1-iso/boot/grub /tmp/icsos-cc1-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-cc1-iso/vmdex
+	@cp /tmp/icsos-gcc/cc1 /tmp/icsos-cc1-iso/apps/cc1.exe
+	@printf 'int cc1_probe(int a, int b) { return a + b; }\n' > /tmp/icsos-cc1-iso/apps/cc1probe.c
+	@printf '%s\n' 'set PATH=/icsos/apps' 'cc1test' 'reboot' > /tmp/icsos-cc1-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-cc1-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-cc1.iso /tmp/icsos-cc1-iso >/dev/null 2>&1
+	@echo "Running in-OS GCC cc1 compile test (KVM)..."
+	@-timeout 300 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+		-cdrom /tmp/icsos-cc1.iso -boot d > /tmp/icsos-cc1.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-cc1.log
+	@grep -aq "cc1test:" /tmp/icsos-cc1.log
+	@grep -aq "CC1_TEST_PASS" /tmp/icsos-cc1.log
+	@! grep -aq "CC1_TEST_FAIL" /tmp/icsos-cc1.log
+	@echo "test-cc1 PASS"
 
 # Full QEMU integration suite for the x86_64 / SMP / ELF64 path.
 test-integration: vmdex apps/hello.exe

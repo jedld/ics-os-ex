@@ -1121,6 +1121,7 @@ void *vfs_mapfile(const char *path, DWORD *out_size)
     }
     buf = (char*)malloc(size + 511);
     if (!buf) {
+        printf("mapfile: malloc(%lu) failed\n", (unsigned long)size);
         fclose(f);
         return 0;
     }
@@ -1128,6 +1129,7 @@ void *vfs_mapfile(const char *path, DWORD *out_size)
     if (size <= 0x10000)
         vfs_setbuffer(f, 0, size, FILE_IOFBF);
     if (fread(buf, size, 1, f) != size) {
+        printf("mapfile: fread(%lu) failed\n", (unsigned long)size);
         free(buf);
         fclose(f);
         return 0;

@@ -7,6 +7,8 @@ extern int errno;
 #define ENOENT  2
 #define EINTR   4
 #define EIO     5
+#define ENXIO   6
+#define E2BIG   7
 #define EBADF   9
 #define ENOMEM  12
 #define EACCES  13
