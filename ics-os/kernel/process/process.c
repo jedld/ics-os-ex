@@ -1196,16 +1196,29 @@ int dex32_thread_join(DWORD threadid){
 
 //wait for a given process given its id
 int dex32_waitpid(int pid,int status){
-   (void)status;
-   while (1) {
-      PCB386 *p = ps_findprocess(pid);
-      if (p == (PCB386*)-1)
-         return 0;
-      /* Directly switch to the child. The ctx_load_in_progress guard
-         in context_load prevents a nested ps_switchto from clobbering
-         the child's saved ctx if a timer fires during context_load. */
-      ps_switchto(p);
-   }
+    (void)status;
+    while (1) {
+       PCB386 *self = current_process;
+       int i;
+       /* If the child is already in our waitq it has exited.  Its PCB is
+          only reclaimed on a later timer pass (deferred zombie free), so
+          ps_findprocess() would still return the live (zombie) PCB and we
+          would keep re-switching into a dead process forever.  Return now
+          instead of re-entering the zombie. */
+       if (self != (PCB386*)-1) {
+          for (i = 0; i < self->waitq_n; i++) {
+             if (self->waitq_pid[i] == pid)
+                return 0;
+          }
+       }
+       PCB386 *p = ps_findprocess(pid);
+       if (p == (PCB386*)-1)
+          return 0;
+       /* Directly switch to the child. The ctx_load_in_progress guard
+          in context_load prevents a nested ps_switchto from clobbering
+          the child's saved ctx if a timer fires during context_load. */
+       ps_switchto(p);
+    }
 };
 
 

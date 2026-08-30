@@ -197,6 +197,7 @@ void api_init(){
    api_addsystemcall(0xB2,sys_spawn,0,API_REQUIRE_INTS);
    api_addsystemcall(0xB3,sys_execve,0,API_REQUIRE_INTS);
    api_addsystemcall(0xB4,sys_getdents,0,API_REQUIRE_INTS);
+    api_addsystemcall(0xB5,console_puts,0,0);
 };
 
 

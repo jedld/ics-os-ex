@@ -470,14 +470,22 @@ EMIT2:				if((flags & PR_LJ) == 0)
 
 /* toupper/tolower live in posix.c */
 
+int vsprintf(char *buffer, const char *fmt, va_list args);
+
+/* Format into a local buffer and emit the WHOLE line in one non-require-ints
+   syscall (0xB5 = console_puts). The int 0x30 entry leaves IF=0 for the entire
+   kernel call, so a timer IRQ / scheduler context switch cannot fire between
+   characters; the line cannot be torn by kernel teardown output. */
 int printf(const char *fmt, ...)
 {
 	va_list args;
+	char buf[1024];
 	int ret_val;
 
 	va_start(args, fmt);
-	ret_val = vprintf(fmt, args);
+	ret_val = vsprintf(buf, fmt, args);
 	va_end(args);
+	dexsdk_systemcall(0xB5, (long)buf, (long)ret_val, 0, 0, 0);
 	return ret_val;
 }
 

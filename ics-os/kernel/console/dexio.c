@@ -479,6 +479,22 @@ int printf(const char *fmt, ...)
 	return ret_val;
 }
 
+/* Emits a whole user-space string in a single non-require-ints syscall.
+   The int 0x30 entry leaves IF=0, so no timer IRQ (and therefore no
+   scheduler context switch) can fire between characters; the entire line
+   is mirrored to serial+VGA atomically. This is what keeps a user printf
+   line from being torn by kernel teardown output (e.g. "userpd: freed"). */
+api_arg_t console_puts(api_arg_t str, api_arg_t len,
+                       api_arg_t a3, api_arg_t a4, api_arg_t a5)
+{
+   const char *s = (const char *)str;
+   int i;
+   int n = (int)len;
+   for (i = 0; i < n; i++)
+      putcEX(s[i]);
+   return n;
+}
+
 int DDLprintf_help(unsigned c, DEX32_DDL_INFO **dev)
 {
 
