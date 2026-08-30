@@ -1137,7 +1137,82 @@ int console_execute(const char *str){
           }
        }
        if (ok)
-          printf("CC1_TEST_PASS\n");
+           printf("CC1_TEST_PASS\n");
+     }else
+    if (strcmp(u,"gctest") == 0){  //-- Full in-OS GCC toolchain: cc1 -> as -> ld -> exec.
+       char cmd[512];
+       int ok = 1;
+       file_PCB *f;
+       /* Stage the small inputs to /ramdisk so the spawned tool children never
+          read from the CD mid-run (the proven bintest/selfhost pattern). The
+          tools themselves (cc1/as/ld) and the linker scripts stay on the CD. */
+       if (ok) {
+          printf("gctest: staging probe + SDK runtime objects onto /ramdisk\n");
+          if (fcopy("/icsos/apps/gccprobe.c", "/ramdisk/gccprobe.c") == -1 ||
+              fcopy("/icsos/apps/crt1.o", "/ramdisk/crt1.o") == -1 ||
+              fcopy("/icsos/apps/tccsdk.o", "/ramdisk/tccsdk.o") == -1 ||
+              fcopy("/icsos/apps/libtcc1.o", "/ramdisk/libtcc1.o") == -1 ||
+              fcopy("/icsos/apps/posix.o", "/ramdisk/posix.o") == -1 ||
+              fcopy("/icsos/apps/setjmp.o", "/ramdisk/setjmp.o") == -1) {
+             printf("GCC_E2E_FAIL stage\n");
+             ok = 0;
+          }
+       }
+       /* 1. cc1 (C frontend) emits assembly for the test program. */
+       if (ok) {
+          printf("gctest: cc1 /ramdisk/gccprobe.c -o /ramdisk/gccprobe.s\n");
+          sprintf(cmd, "/icsos/apps/cc1.exe /ramdisk/gccprobe.c -o /ramdisk/gccprobe.s");
+          if (!user_execp("/icsos/apps/cc1.exe", 0, cmd)) {
+             printf("GCC_E2E_FAIL compile\n");
+             ok = 0;
+          }
+       }
+       /* 2. as (GAS) assembles the .s into an ELF64 object. */
+       if (ok) {
+          printf("gctest: as --64 /ramdisk/gccprobe.s -o /ramdisk/gccprobe.o\n");
+          sprintf(cmd, "/icsos/apps/as.exe --64 /ramdisk/gccprobe.s -o /ramdisk/gccprobe.o");
+          if (!user_execp("/icsos/apps/as.exe", 0, cmd)) {
+             printf("GCC_E2E_FAIL assemble\n");
+             ok = 0;
+          }
+       }
+       /* 3. ld (GNU ld) links the object + SDK runtime into a runnable ELF64. */
+       if (ok) {
+          printf("gctest: ld /ramdisk/gccprobe.o <sdk runtime> -o /ramdisk/gccprobe.exe\n");
+          sprintf(cmd, "/icsos/apps/ld.exe /ramdisk/gccprobe.o /ramdisk/crt1.o /ramdisk/tccsdk.o /ramdisk/libtcc1.o /ramdisk/posix.o /ramdisk/setjmp.o -o /ramdisk/gccprobe.exe");
+          if (!user_execp("/icsos/apps/ld.exe", 0, cmd)) {
+             printf("GCC_E2E_FAIL link\n");
+             ok = 0;
+          }
+       }
+       /* Verify the linked exe exists and is a plausible ELF. */
+       if (ok) {
+          f = openfilex("/ramdisk/gccprobe.exe", FILE_READ);
+          if (f) {
+             vfs_stat info;
+             fstat(f, &info);
+             fclose(f);
+             if (info.st_size < 32) {
+                printf("GCC_E2E_FAIL link size %lu\n", (unsigned long)info.st_size);
+                ok = 0;
+             } else {
+                printf("gctest: /ramdisk/gccprobe.exe is %lu bytes\n", (unsigned long)info.st_size);
+             }
+          } else {
+             printf("GCC_E2E_FAIL no gccprobe.exe\n");
+             ok = 0;
+          }
+       }
+       /* 4. Run: the kernel loads the ld-built ELF64 and runs _start -> main -> puts. */
+       if (ok) {
+          printf("gctest: exec /ramdisk/gccprobe.exe\n");
+          if (!user_execp("/ramdisk/gccprobe.exe", 0, "/ramdisk/gccprobe.exe")) {
+             printf("GCC_E2E_FAIL exec\n");
+             ok = 0;
+          }
+          if (ok)
+             printf("GCC_E2E_RUN_OK\n");
+       }
     }else
     if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
       char cmd[512];

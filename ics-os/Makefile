@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools test-cc1
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools test-cc1 test-gcc
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -524,6 +524,48 @@ test-cc1: kernel/Kernel64.bin
 	@grep -aq "CC1_TEST_PASS" /tmp/icsos-cc1.log
 	@! grep -aq "CC1_TEST_FAIL" /tmp/icsos-cc1.log
 	@echo "test-cc1 PASS"
+
+# In-OS full GCC toolchain test: cc1 (C frontend) -> as (GAS) -> ld (GNU ld)
+# -> exec. Proves the real GCC C frontend and the real binutils backend compose
+# in-OS to BUILD AND RUN a C program (the GCC self-host capstone step 8).
+# cc1 runs from the CD (too large for the ramdisk); as/ld + the SDK runtime
+# objects + the linker scripts are staged on the CD; all intermediates live on
+# /ramdisk (so the spawned tool children never read the CD mid-run).
+test-gcc: kernel/Kernel64.bin apps/as.exe apps/ld.exe
+	@if [ ! -s /tmp/icsos-gcc/cc1 ]; then \
+	   echo "Building host cc1 (contrib/gcc)..." ; \
+	   $(MAKE) -C contrib/gcc cc1 ; \
+	fi
+	@echo "Building SDK runtime objects for the in-OS ld step..."
+	@mkdir -p /tmp/icsos-gcc/rt
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/crt1.c -o /tmp/icsos-gcc/rt/crt1.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/tccsdk.c -o /tmp/icsos-gcc/rt/tccsdk.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/libtcc1.c -o /tmp/icsos-gcc/rt/libtcc1.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/posix.c -o /tmp/icsos-gcc/rt/posix.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/setjmp.c -o /tmp/icsos-gcc/rt/setjmp.o
+	@echo "Building Multiboot2 ISO for in-OS GCC toolchain (cc1 + as + ld) test..."
+	@rm -rf /tmp/icsos-gcc-iso
+	@mkdir -p /tmp/icsos-gcc-iso/boot/grub /tmp/icsos-gcc-iso/apps/ldscripts
+	@cp kernel/Kernel64.bin /tmp/icsos-gcc-iso/vmdex
+	@cp /tmp/icsos-gcc/cc1 /tmp/icsos-gcc-iso/apps/cc1.exe
+	@cp apps/as.exe /tmp/icsos-gcc-iso/apps/as.exe
+	@cp apps/ld.exe /tmp/icsos-gcc-iso/apps/ld.exe
+	@cp /tmp/icsos-gcc/rt/crt1.o /tmp/icsos-gcc/rt/tccsdk.o /tmp/icsos-gcc/rt/libtcc1.o /tmp/icsos-gcc/rt/posix.o /tmp/icsos-gcc/rt/setjmp.o /tmp/icsos-gcc-iso/apps/
+	@cp apps/ldscripts/elf_x86_64.x* /tmp/icsos-gcc-iso/apps/ldscripts/
+	@printf 'extern int puts(const char *s);\nint main(void)\n{\n   puts("GCC_E2E_OK");\n   return 0;\n}\n' > /tmp/icsos-gcc-iso/apps/gccprobe.c
+	@printf '%s\n' 'set PATH=/icsos/apps' 'gctest' 'reboot' > /tmp/icsos-gcc-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-gcc-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-gcc.iso /tmp/icsos-gcc-iso >/dev/null 2>&1
+	@echo "Running in-OS GCC toolchain test (cc1 -> as -> ld -> exec) (KVM)..."
+	@-timeout 420 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+		-cdrom /tmp/icsos-gcc.iso -boot d > /tmp/icsos-gcc.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-gcc.log
+	@grep -aq "gctest:" /tmp/icsos-gcc.log
+	@grep -aq "GCC_E2E_OK" /tmp/icsos-gcc.log
+	@grep -aq "GCC_E2E_RUN_OK" /tmp/icsos-gcc.log
+	@! grep -aq "GCC_E2E_FAIL" /tmp/icsos-gcc.log
+	@echo "test-gcc PASS"
 
 # Full QEMU integration suite for the x86_64 / SMP / ELF64 path.
 test-integration: vmdex apps/hello.exe

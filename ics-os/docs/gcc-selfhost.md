@@ -7,6 +7,13 @@ Host Linux `gcc`/`make`/`ld`/`as`/`ar` cannot run here as-is (glibc + Linux
 syscalls). So "host-compiled" means **rebuilt by the host toolchain against the
 ICS-OS SDK** — the same pattern as the working `apps/make.exe`.
 
+- Using the in-os gcc build, it should also be able to compile itself (gcc toolchain)
+with no loss in functionality. The purely ics-os generated gcc build can then compile
+the ics-os kernel sources in-os with no loss in functionality.
+
+This closes the development loop. ics-os can exist independently and can be improved upon
+and developed on indefinitely without a host OS.
+
 ## Approach (Phase 1: binutils)
 
 ```
@@ -223,8 +230,17 @@ FS issue.
 
 1. **binutils** (`as`, `ld`, `ar`) — **done**: `test-bintools` builds, links,
    and execs an ELF64 in-OS.
-2. **GCC 4.7.4** (`--enable-languages=c --disable-multilib`) — next; built in-OS
-   against this working binutils.
+2. **GCC 4.7.4** (`--enable-languages=c --disable-multilib`):
+   - **cc1 (C frontend)** — **done**: `test-cc1` runs the host-built cc1 (the
+     full GCC C frontend, ~18 MB, linked vs the SDK) in-OS to compile C →
+     assembly.
+   - **end-to-end toolchain** — **done**: `test-gcc` composes the *real* cc1
+     (C→asm) + `as` (GAS, asm→ELF64 obj) + `ld` (GNU ld, obj + SDK runtime →
+     runnable ELF64) in-OS, then the kernel **execs** the result. A C program
+     is compiled, assembled, linked and **run** entirely on ICS-OS
+     (`GCC_E2E_OK` + `GCC_E2E_RUN_OK`).
+   - **gcc driver** — next: the `gcc` front-end driver (option parsing,
+     `pexecute`/`posix_spawn` of cc1/as/ld), so a single `gcc x.c -o x` works.
 3. That GCC compiles ICS-OS; kexec as today.
 
 ## Tests
@@ -234,6 +250,8 @@ cd ics-os
 make -C kernel bzImage
 make test-make           # MAKE_PASS (in-OS tcc → make.exe → hello.exe)
 make test-bintools       # AS_PASS + AR_PASS + LD_PASS + BINTOOLS_PASS
+make test-cc1            # CC1_TEST_PASS (in-OS cc1: C -> assembly)
+make test-gcc            # GCC_E2E_OK + GCC_E2E_RUN_OK (cc1 -> as -> ld -> exec)
 make test-spawn          # SPAWN_PASS + WORK_DISK_PASS
 make test-posixio        # still green (unformatted vblk → no /work)
 make test-virtio

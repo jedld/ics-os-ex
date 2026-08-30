@@ -2,6 +2,54 @@
 
 ## 2026-08-30 (Manila, UTC+8)
 
+### ~16:00 — In-OS full GCC toolchain composes: `cc1 → as → ld → exec` builds *and* runs a C program (`test-gcc` PASS)
+
+**Goal (user):** "commit and push, then continue with the task." The cc1 milestone
+was committed/pushed (`a44b88f`). The next GCC self-host step is to prove the real
+GCC C frontend and the real binutils backend *compose* in-OS: a C program is
+compiled, assembled, linked and **run** entirely on ICS-OS.
+
+**Key realization:** cc1 (and as/ld) are **ICS-OS user-mode binaries** — they link
+the SDK runtime (`tccsdk.c posix.c libtcc1.c crt1.c setjmp.c`,
+`contrib/gcc/Makefile` line 77) and do all I/O via the `int 0x30` DEX syscall.
+`./cc1 --version` on the host prints nothing and file I/O segfaults because
+`int 0x30` is undefined under Linux. So cc1/as/ld only work **in-OS**; there is no
+host dry-run path (a host link check with host-generated `prog.o` was used only to
+validate that the runtime `.o`s resolve `_start`/`puts`/`main`).
+
+**Design:** a new `gctest` console builtin chains four `user_execp()` calls (each
+waits), all I/O on `/ramdisk`:
+1. stage `gccprobe.c` + the 5 SDK runtime `.o`s to `/ramdisk` via `fcopy` (so the
+   spawned tool children never read the CD mid-run — the bintest/selfhost pattern);
+2. `cc1 /ramdisk/gccprobe.c -o /ramdisk/gccprobe.s` (C → asm);
+3. `as --64 gccprobe.s -o gccprobe.o` (asm → ELF64 obj);
+4. `ld gccprobe.o + crt1.o tccsdk.o libtcc1.o posix.o setjmp.o -o gccprobe.exe`
+   (obj + SDK runtime → runnable ELF64; default script from `/icsos/apps/ldscripts/`);
+5. the kernel `exec`s `gccprobe.exe` → `_start → main → puts("GCC_E2E_OK")`.
+
+The runtime `.o`s are built on the host exactly as `sdk/app.mk` builds every app
+(`APP_CFLAGS` + `-Isdk/include`); the default script's `ENTRY(_start)` resolves to
+`crt1.o`'s `_start`, so individual `.o`s are linked (not a `.a`, to avoid archive
+member-order issues). `gccprobe.c` uses an `extern int puts(...)` declaration (no
+`#include`) so cc1 needs no runtime include path yet.
+
+**Result:** `make test-gcc` **PASS**. Log: cc1 (18,180,320 B) compiles
+`gccprobe.c`; `as` assembles; `ld` links to a **52,613 B** ELF64; the kernel loads it
+(`elf64: loaded /ramdisk/gccprobe.exe entry=0x4001D5`, private PML4, pool used 3)
+and runs it → `GCC_E2E_OK` + `GCC_E2E_RUN_OK`.
+
+**Regressions (all PASS):** `test-cc1`, `test-bintools`, `test-integration`
+(boot + SMP + exec).
+
+**Files touched:** `kernel/console/console.c` (`gctest` builtin), `ics-os/Makefile`
+(`test-gcc` target + `.PHONY`), `docs/gcc-selfhost.md` (rounds + tests).
+
+**Next:** the `gcc` *driver* (front-end: option parsing + `pexecute`/`posix_spawn`
+of cc1/as/ld) so a single `gcc x.c -o x` works in-OS; then that GCC compiles ICS-OS.
+
+**Activity now:** `test-gcc` is green — the real GCC C frontend + real binutils
+backend compose in-OS to build **and** run a C program. Next: the gcc driver.
+
 ### ~15:00 — In-OS GCC `cc1` runs and compiles C: `test-cc1` PASS
 
 **Goal (user):** the staged, compile-only milestone — run the *host-built* GCC
