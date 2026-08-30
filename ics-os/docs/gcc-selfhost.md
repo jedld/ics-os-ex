@@ -239,8 +239,11 @@ FS issue.
      runnable ELF64) in-OS, then the kernel **execs** the result. A C program
      is compiled, assembled, linked and **run** entirely on ICS-OS
      (`GCC_E2E_OK` + `GCC_E2E_RUN_OK`).
-   - **gcc driver** — next: the `gcc` front-end driver (option parsing,
-     `pexecute`/`posix_spawn` of cc1/as/ld), so a single `gcc x.c -o x` works.
+   - **gcc driver** — **done**: `test-gccdriver` runs the in-OS `gcc`
+      front-end driver (option parsing, `pexecute`/`posix_spawn` of
+      cc1/as/ld), so a single `gcc x.c -o x` compiles, assembles, links and
+      the driver execs the result entirely on ICS-OS (`GCC_DRIVER_OK` +
+      `GCC_DRV_OK` + `GCC_DRV_RUN_OK`).
 3. That GCC compiles ICS-OS; kexec as today.
 
 ## Tests
@@ -252,6 +255,7 @@ make test-make           # MAKE_PASS (in-OS tcc → make.exe → hello.exe)
 make test-bintools       # AS_PASS + AR_PASS + LD_PASS + BINTOOLS_PASS
 make test-cc1            # CC1_TEST_PASS (in-OS cc1: C -> assembly)
 make test-gcc            # GCC_E2E_OK + GCC_E2E_RUN_OK (cc1 -> as -> ld -> exec)
+make test-gccdriver      # GCC_DRIVER_OK (in-OS gcc driver: x.c -> x -> exec)
 make test-spawn          # SPAWN_PASS + WORK_DISK_PASS
 make test-posixio        # still green (unformatted vblk → no /work)
 make test-virtio

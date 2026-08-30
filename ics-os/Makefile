@@ -13,7 +13,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools test-cc1 test-gcc
+.PHONY: clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools test-cc1 test-gcc test-gccdriver
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -566,6 +566,54 @@ test-gcc: kernel/Kernel64.bin apps/as.exe apps/ld.exe
 	@grep -aq "GCC_E2E_RUN_OK" /tmp/icsos-gcc.log
 	@! grep -aq "GCC_E2E_FAIL" /tmp/icsos-gcc.log
 	@echo "test-gcc PASS"
+
+# In-OS gcc DRIVER test: the standalone gcc.exe (contrib/gccdriver) is a real
+# user program that spawns cc1/as/ld itself via posix_spawn and links a C
+# program, which we then exec. Unlike test-gcc (the kernel console builtin
+# chains the tools), this proves the gcc front-end DRIVER works as a user
+# program -- the glue the self-host needs (a gcc that can be invoked and that
+# can itself be built by gcc). Same CD/ramdisk staging as test-gcc.
+test-gccdriver: kernel/Kernel64.bin apps/as.exe apps/ld.exe
+	@if [ ! -s /tmp/icsos-gcc/cc1 ]; then \
+	   echo "Building host cc1 (contrib/gcc)..." ; \
+	   $(MAKE) -C contrib/gcc cc1 ; \
+	fi
+	@if [ ! -s contrib/gccdriver/gcc.exe ]; then \
+	   echo "Building gcc driver (contrib/gccdriver)..." ; \
+	   $(MAKE) -C contrib/gccdriver ; \
+	fi
+	@echo "Building SDK runtime objects for the in-OS ld step..."
+	@mkdir -p /tmp/icsos-gcc/rt
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/crt1.c -o /tmp/icsos-gcc/rt/crt1.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/tccsdk.c -o /tmp/icsos-gcc/rt/tccsdk.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/libtcc1.c -o /tmp/icsos-gcc/rt/libtcc1.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/posix.c -o /tmp/icsos-gcc/rt/posix.o
+	@gcc -m64 -std=gnu89 -w -nostdlib -fno-builtin -static -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-strict-aliasing -mcmodel=large -mno-red-zone -Isdk/include -c sdk/setjmp.c -o /tmp/icsos-gcc/rt/setjmp.o
+	@echo "Building Multiboot2 ISO for in-OS gcc driver test..."
+	@rm -rf /tmp/icsos-gccdrv-iso
+	@mkdir -p /tmp/icsos-gccdrv-iso/boot/grub /tmp/icsos-gccdrv-iso/apps/ldscripts
+	@cp kernel/Kernel64.bin /tmp/icsos-gccdrv-iso/vmdex
+	@cp /tmp/icsos-gcc/cc1 /tmp/icsos-gccdrv-iso/apps/cc1.exe
+	@cp apps/as.exe /tmp/icsos-gccdrv-iso/apps/as.exe
+	@cp apps/ld.exe /tmp/icsos-gccdrv-iso/apps/ld.exe
+	@cp contrib/gccdriver/gcc.exe /tmp/icsos-gccdrv-iso/apps/gcc.exe
+	@cp /tmp/icsos-gcc/rt/crt1.o /tmp/icsos-gcc/rt/tccsdk.o /tmp/icsos-gcc/rt/libtcc1.o /tmp/icsos-gcc/rt/posix.o /tmp/icsos-gcc/rt/setjmp.o /tmp/icsos-gccdrv-iso/apps/
+	@cp apps/ldscripts/elf_x86_64.x* /tmp/icsos-gccdrv-iso/apps/ldscripts/
+	@printf 'extern int puts(const char *s);\nint main(void)\n{\n   puts("GCC_DRV_OK");\n   return 0;\n}\n' > /tmp/icsos-gccdrv-iso/apps/drvprobe.c
+	@printf '%s\n' 'set PATH=/icsos/apps' 'gccdrv' 'reboot' > /tmp/icsos-gccdrv-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-gccdrv-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-gccdrv.iso /tmp/icsos-gccdrv-iso >/dev/null 2>&1
+	@echo "Running in-OS gcc driver test (gcc -> cc1/as/ld -> exec) (KVM)..."
+	@-timeout 420 stdbuf -oL $(QEMU_X64) -enable-kvm -cpu host -smp 1 -nographic -no-reboot -m 1024M \
+		-cdrom /tmp/icsos-gccdrv.iso -boot d > /tmp/icsos-gccdrv.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-gccdrv.log
+	@grep -aq "gccdrv:" /tmp/icsos-gccdrv.log
+	@grep -aq "GCC_DRIVER_OK" /tmp/icsos-gccdrv.log
+	@grep -aq "GCC_DRV_OK" /tmp/icsos-gccdrv.log
+	@grep -aq "GCC_DRV_RUN_OK" /tmp/icsos-gccdrv.log
+	@! grep -aq "GCC_DRV_FAIL" /tmp/icsos-gccdrv.log
+	@echo "test-gccdriver PASS"
 
 # Full QEMU integration suite for the x86_64 / SMP / ELF64 path.
 test-integration: vmdex apps/hello.exe

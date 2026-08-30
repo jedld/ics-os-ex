@@ -1204,17 +1204,76 @@ int console_execute(const char *str){
           }
        }
        /* 4. Run: the kernel loads the ld-built ELF64 and runs _start -> main -> puts. */
-       if (ok) {
-          printf("gctest: exec /ramdisk/gccprobe.exe\n");
-          if (!user_execp("/ramdisk/gccprobe.exe", 0, "/ramdisk/gccprobe.exe")) {
-             printf("GCC_E2E_FAIL exec\n");
-             ok = 0;
-          }
-          if (ok)
-             printf("GCC_E2E_RUN_OK\n");
-       }
-    }else
-    if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
+        if (ok) {
+           printf("gctest: exec /ramdisk/gccprobe.exe\n");
+           if (!user_execp("/ramdisk/gccprobe.exe", 0, "/ramdisk/gccprobe.exe")) {
+              printf("GCC_E2E_FAIL exec\n");
+              ok = 0;
+           }
+           if (ok)
+              printf("GCC_E2E_RUN_OK\n");
+        }
+     }else
+     if (strcmp(u,"gccdrv") == 0){  //-- Run the standalone in-OS gcc driver (gcc.exe):
+                                     //-- it spawns cc1/as/ld itself via posix_spawn, then exec.
+        char cmd[512];
+        int ok = 1;
+        file_PCB *f;
+        /* Stage the source + SDK runtime .o's onto /ramdisk so the children the
+           driver spawns never read the CD mid-run. The driver + cc1/as/ld ELFs
+           stay on the CD (loaded by the kernel exec path). */
+        if (ok) {
+           printf("gccdrv: staging probe + SDK runtime objects onto /ramdisk\n");
+           if (fcopy("/icsos/apps/drvprobe.c", "/ramdisk/drvprobe.c") == -1 ||
+               fcopy("/icsos/apps/crt1.o", "/ramdisk/crt1.o") == -1 ||
+               fcopy("/icsos/apps/tccsdk.o", "/ramdisk/tccsdk.o") == -1 ||
+               fcopy("/icsos/apps/libtcc1.o", "/ramdisk/libtcc1.o") == -1 ||
+               fcopy("/icsos/apps/posix.o", "/ramdisk/posix.o") == -1 ||
+               fcopy("/icsos/apps/setjmp.o", "/ramdisk/setjmp.o") == -1) {
+              printf("GCC_DRV_FAIL stage\n");
+              ok = 0;
+           }
+        }
+        /* 1. The gcc driver does the whole compile+link (cc1 -> as -> ld). */
+        if (ok) {
+           printf("gccdrv: gcc.exe /ramdisk/drvprobe.c -o /ramdisk/drvprobe.exe\n");
+           sprintf(cmd, "/icsos/apps/gcc.exe /ramdisk/drvprobe.c -o /ramdisk/drvprobe.exe");
+           if (!user_execp("/icsos/apps/gcc.exe", 0, cmd)) {
+              printf("GCC_DRV_FAIL driver\n");
+              ok = 0;
+           }
+        }
+        /* The driver's success is proven by its OUTPUT: a linked, valid ELF.
+           (The kernel does not propagate a child's exit status via waitpid.) */
+        if (ok) {
+           f = openfilex("/ramdisk/drvprobe.exe", FILE_READ);
+           if (f) {
+              vfs_stat info;
+              fstat(f, &info);
+              fclose(f);
+              if (info.st_size < 32) {
+                 printf("GCC_DRV_FAIL link size %lu\n", (unsigned long)info.st_size);
+                 ok = 0;
+              } else {
+                 printf("gccdrv: /ramdisk/drvprobe.exe is %lu bytes\n", (unsigned long)info.st_size);
+              }
+           } else {
+              printf("GCC_DRV_FAIL no drvprobe.exe\n");
+              ok = 0;
+           }
+        }
+        /* 2. Run the driver's output: the kernel loads the ELF64 and runs main. */
+        if (ok) {
+           printf("gccdrv: exec /ramdisk/drvprobe.exe\n");
+           if (!user_execp("/ramdisk/drvprobe.exe", 0, "/ramdisk/drvprobe.exe")) {
+              printf("GCC_DRV_FAIL exec\n");
+              ok = 0;
+           }
+           if (ok)
+              printf("GCC_DRV_RUN_OK\n");
+        }
+     }else
+     if (strcmp(u,"selfhost") == 0){  //-- Compile a test program with in-OS tcc and run it.
       char cmd[512];
       int ok = 1;
       /* Stage onto ramdisk so compiles do not re-hit ATAPI mid-run. */

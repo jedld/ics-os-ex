@@ -1,5 +1,79 @@
 # Development blog
 
+## 2026-08-31 (Manila, UTC+8)
+
+### ~08:00 — **MILESTONE: in-OS `gcc` driver composes `cc1/as/ld` (`test-gccdriver` PASS)** + flaky `test-spawn` fixed (atomic `printf` + `waitpid` zombie fix)
+
+**Goal (user):** "Continue if you have next steps." The `test-gcc` milestone was
+committed/pushed (`96d426e`). Two things remained: (a) finish and commit/push the
+`test-gccdriver` milestone (the in-OS `gcc` front-end driver), and (b) a flaky
+`test-spawn` (serial tearing + an intermittent `waitpid` hang) was blocking clean
+regression verification of the whole GCC self-host chain.
+
+**Problem 1 — `test-spawn` flaky (two independent root causes, both fixed):**
+
+1. **Serial tearing.** User `printf()` emitted one byte at a time (syscall `6`
+   `putcEX`, `API_REQUIRE_INTS` re-enabled interrupts per byte), so kernel console
+   output (e.g. `userpd` teardown, `ICS-OS: rebooting`) interleaved and split user
+   lines (`Heluserpd...`, `SPAWNuserpd...`). Fix: a new kernel syscall `0xB5`
+   `console_puts` (in `kernel/console/dexio.c`, registered in
+   `kernel/dexapi/dex32API.c` **without** `API_REQUIRE_INTS` so IF stays cleared for
+   the whole string) that emits a full line atomically. SDK `printf()`
+   (`sdk/tccsdk.c`) now formats into a 1024-byte stack buffer via `vsprintf()` and
+   emits the whole line with one `dexsdk_systemcall(0xB5, ...)`.
+2. **Intermittent `waitpid` hang.** Child self-exit (`exit()` → `taskswitch()`)
+   leaves a live zombie PCB until the deferred timer frees it; `schedule_from_timer()`
+   populates the parent's `waitq` and switches to the parent. The old
+   `dex32_waitpid()` only checked `ps_findprocess(pid)`, so it could still see the
+   live zombie and `ps_switchto()` into the dead child → parent/child spin → QEMU
+   timeout. Fix: `dex32_waitpid()` (`kernel/process/process.c`) now returns if the
+   target pid is already in the current process's `waitq_pid[]`.
+
+Also fixed `contrib/hello/Makefile` (link `sdk/posix.c` + `-nostdinc -I$(SDK)/include`)
+so `hello.exe` (used by `test-exec`/`test-integration`) builds with the new atomic SDK.
+
+**Result:** `make test-spawn` **5/5 PASS** with clean oracles (`SPAWN_PASS` +
+`WORK_DISK_PASS` + `Hello World from ICS-OS!` as intact lines).
+
+**Problem 2 — `test-gccdriver` (the milestone).** The in-OS `gcc` front-end driver
+(`contrib/gccdriver/gccdriver.c`, built to `gcc.exe`) parses options and drives
+`cc1 → as → ld` via `pexecute`/`posix_spawn`, so a single `gcc x.c -o x` works. New
+`gccdrv` console builtin (`kernel/console/console.c`) stages a probe + the 5 SDK runtime
+`.o`s onto `/ramdisk`, runs `gcc.exe /ramdisk/drvprobe.c -o /ramdisk/drvprobe.exe`,
+then execs the result. New `make test-gccdriver` target (`ics-os/Makefile`) builds a
+Multiboot2 ISO with `gcc.exe`/`cc1.exe`/`as.exe`/`ld.exe` + runtime `.o`s +
+`ldscripts/`, and greps `Root mount [OK]` + `gccdrv:` + `GCC_DRIVER_OK` + `GCC_DRV_OK`
++ `GCC_DRV_RUN_OK` (and no `GCC_DRV_FAIL`).
+
+**Result:** `make test-gccdriver` **PASS** — the in-OS `gcc` driver compiles,
+assembles, links and execs `drvprobe.c` entirely on ICS-OS.
+
+**Heap fix (uncommitted carry-over from the cc1 effort):** `ELF_HEAP_COMMIT` 8 MiB →
+**256 KiB** (`kernel/module/elf_module.c`) + comment (`kernel/memory/dexmem.c`). The
+userpd pool (32 MiB = 8192 frames) must hold a *parent* AND a large child (the ~18 MiB
+cc1, which grows ~9 MiB via `sbrk`) concurrently; the 8 MiB eager per-process commit
+made parent + cc1 exceed the pool and cc1's heap growth failed. 256 KiB up front is
+ample for tool startup; `sbrk`/`dex32_sbrk` cover the rest.
+
+**Regressions (all PASS):** `test-integration` (boot + SMP + exec), `test-gccdriver`,
+`test-cc1`, `test-gcc`, `test-bintools`.
+
+**Files touched:** `kernel/console/dexio.c` (`console_puts`), `kernel/dexapi/dex32API.c`
+(syscall `0xB5`), `sdk/tccsdk.c` (atomic `printf`), `kernel/process/process.c`
+(`waitpid` zombie fix), `contrib/hello/Makefile` (posix.c + include path),
+`apps/hello.exe` + `apps/spawn.exe` (rebuilt), `kernel/module/elf_module.c` +
+`kernel/memory/dexmem.c` (heap commit), `kernel/console/console.c` (`gccdrv` builtin),
+`contrib/gccdriver/` (new: `gccdriver.c` + `Makefile`), `ics-os/Makefile`
+(`test-gccdriver` target), `docs/gcc-selfhost.md` (rounds + tests), `development_blog.md`
+(this entry).
+
+**Next:** commit + push the `test-gccdriver` milestone (+ `test-spawn` fix + heap fix);
+then that GCC compiles ICS-OS.
+
+**Activity now:** `test-gccdriver` is green — the in-OS `gcc` front-end driver composes
+cc1/as/ld to build **and** run a C program; the flaky `test-spawn` is fixed. Next:
+commit + push.
+
 ## 2026-08-30 (Manila, UTC+8)
 
 ### ~16:00 — In-OS full GCC toolchain composes: `cc1 → as → ld → exec` builds *and* runs a C program (`test-gcc` PASS)
