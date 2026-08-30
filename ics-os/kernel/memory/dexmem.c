@@ -1264,8 +1264,11 @@ void dex32_restore_identity_map(void)
    kernel's identity writes would clobber the process's own private frames
    (its code/stack) -> wild RIP + GPF. Placing it below 0x08000000 keeps the
    process's private frames disjoint from everything the kernel writes by
-   identity. 32MiB = 8192 frames covers a full 8MiB heap + 1MiB stack + ELF
-   image + syscall stack + page tables for a user process. */
+   identity. 32MiB = 8192 frames must hold a PARENT plus a large child
+    concurrently (e.g. the in-OS gcc driver spawning the ~18MiB cc1): the
+    child image + a 2MiB up-front heap commit + 1MiB stack + syscall stack +
+    page tables, twice over. The heap commit is kept small (see
+    ELF_HEAP_COMMIT in elf_module.c) and grows via sbrk so two processes fit. */
 
 /* Dedicated pool allocator.
  *

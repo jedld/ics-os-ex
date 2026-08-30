@@ -30,9 +30,21 @@
 
 
 /*Defines ELF memory resource sizes, increasing the commit memory
-  may improve performance.*/
-#define ELF_HEAP_COMMIT 0x800000
-#define ELF_HEAP_RESERVE 0x2000000
+  may improve performance.
+
+  The heap commit is the amount of PHYSICAL frames mapped up front for
+  every user process; the rest of the (much larger) heap RESERVE grows
+  on demand via sbrk/dex32_sbrk (backed by userpd pool frames for
+  private-PML4 processes).
+
+  This must stay small: the userpd pool (MEM_USERPD, 32MiB = 8192 frames)
+  must hold a parent AND a large child concurrently (e.g. the in-OS gcc
+  driver spawning the ~18MiB cc1, which itself grows its heap to ~9MiB via
+  sbrk while compiling). An 8MiB eager commit per process made a parent + cc1
+  exceed the pool and cc1's heap growth failed. 256KiB up front is ample for
+  tool startup; sbrk/dex32_sbrk cover the rest.*/
+ #define ELF_HEAP_COMMIT 0x40000
+ #define ELF_HEAP_RESERVE 0x2000000
 #define ELF_STACK_COMMIT 0x100000
 #define ELF_STACK_RESERVE 0x200000
 
