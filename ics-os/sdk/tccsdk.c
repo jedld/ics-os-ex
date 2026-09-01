@@ -1264,7 +1264,7 @@ FILE *fopen(const char *filename,const char *s){
 static int sdk_stdin_pushback = -1;
 
 int fgetc (FILE *stream){
-   char ch;
+   unsigned char ch;
    if (stream==stdin) {
       if (sdk_stdin_pushback != -1) {
          int c = sdk_stdin_pushback;
@@ -1273,9 +1273,8 @@ int fgetc (FILE *stream){
       }
       return getchar();
    }
-   if (feof(stream))
-     return -1;
-   fread(&ch,1,1,stream);
+   if (fread(&ch,1,1,stream) != 1)
+      return EOF;
    return ch;
 };
 
@@ -1347,51 +1346,154 @@ char *fgets(char *s, int n, FILE* f){
       s[x+1]= 0;
       return s;
    };
-   return (char*)dexsdk_systemcall(0x40,(long)s,n,(long)f,0,0); 
+   return (char*)dexsdk_systemcall(0x40,(long)s,n,(long)f,0,0);
 };
 
-int fread(const void *buf,int itemsize,int noitems,FILE* fhandle){
+int fread(void *buf,int itemsize,int noitems,FILE* fhandle){
    return dexsdk_systemcall(0x39,(long)buf,itemsize,noitems,(long)fhandle,0);
 };
 
-int fwrite(const void *buf,int itemsize,int noitems,FILE* fhandle){
+/* FILE is an opaque kernel handle, so retain a small user-side write cache
+   keyed by that handle. Compiler output commonly arrives through putc();
+   issuing int 0x30 once per byte makes native compilation prohibitively slow. */
+#define SDK_WRITE_SLOTS 8
+#define SDK_WRITE_BUFSIZE 4096
+struct sdk_write_buffer {
+   FILE *stream;
+   unsigned int used;
+   char data[SDK_WRITE_BUFSIZE];
+};
+static struct sdk_write_buffer sdk_write_buffers[SDK_WRITE_SLOTS];
+
+static int sdk_raw_fwrite(const void *buf, int itemsize, int noitems,
+                          FILE *fhandle){
    return dexsdk_systemcall(0x45,(long)buf,itemsize,noitems,(long)fhandle,0);
+}
+
+static struct sdk_write_buffer *sdk_write_buffer(FILE *stream, int create){
+   int i;
+   struct sdk_write_buffer *free_slot = 0;
+   for (i = 0; i < SDK_WRITE_SLOTS; i++) {
+      if (sdk_write_buffers[i].stream == stream)
+         return &sdk_write_buffers[i];
+      if (!sdk_write_buffers[i].stream && !free_slot)
+         free_slot = &sdk_write_buffers[i];
+   }
+   if (create && free_slot) {
+      free_slot->stream = stream;
+      free_slot->used = 0;
+      return free_slot;
+   }
+   return 0;
+}
+
+static int sdk_flush_write_buffer(FILE *stream, int release){
+   struct sdk_write_buffer *b = sdk_write_buffer(stream, 0);
+   int r = 0;
+   if (b && b->used) {
+      r = sdk_raw_fwrite(b->data, 1, b->used, stream);
+      b->used = 0;
+   }
+   if (b && release)
+      b->stream = 0;
+   return r;
+}
+
+static unsigned int sdk_buffered_write_bytes(FILE *stream){
+   struct sdk_write_buffer *b = sdk_write_buffer(stream, 0);
+   return b ? b->used : 0;
+}
+
+int fwrite(const void *buf,int itemsize,int noitems,FILE* fhandle){
+   const char *p = (const char *)buf;
+   unsigned int total;
+   unsigned int left;
+   struct sdk_write_buffer *b;
+   if (itemsize <= 0 || noitems <= 0)
+      return 0;
+   if (fhandle == stdout || fhandle == stderr)
+      return sdk_raw_fwrite(buf,itemsize,noitems,fhandle);
+   total = (unsigned int)itemsize * (unsigned int)noitems;
+   if (total >= SDK_WRITE_BUFSIZE) {
+      sdk_flush_write_buffer(fhandle, 0);
+      return sdk_raw_fwrite(buf,itemsize,noitems,fhandle);
+   }
+   b = sdk_write_buffer(fhandle, 1);
+   if (!b)
+      return sdk_raw_fwrite(buf,itemsize,noitems,fhandle);
+   left = total;
+   while (left) {
+      unsigned int room = SDK_WRITE_BUFSIZE - b->used;
+      unsigned int chunk = left < room ? left : room;
+      memcpy(b->data + b->used, p, chunk);
+      b->used += chunk;
+      p += chunk;
+      left -= chunk;
+      if (b->used == SDK_WRITE_BUFSIZE)
+         sdk_flush_write_buffer(fhandle, 0);
+   }
+   return noitems;
 };
  
-char fputc(char c,FILE *f){
+int fputc(int c,FILE *f){
+   struct sdk_write_buffer *b;
+   char ch = (char)c;
    if ( f ==  stdout || f == stderr) //stdout
-      charputc(c);
-   else
-      fwrite(&c,1,1,f);
-   return c;
+      charputc(ch);
+   else {
+      b = sdk_write_buffer(f, 1);
+      if (!b)
+         sdk_raw_fwrite(&ch,1,1,f);
+      else {
+         b->data[b->used++] = ch;
+         if (b->used == SDK_WRITE_BUFSIZE)
+            sdk_flush_write_buffer(f, 0);
+      }
+   }
+   return (unsigned char)c;
 };
 
-fputs(const char *s, FILE *stream){
-  const char *p=s;
-  while (*p != '\0'){
-    fputc(*p,stream);
-    *p++;
-  }
+int fputs(const char *s, FILE *stream){
+   int n = strlen(s);
+   if (stream == stdout || stream == stderr) {
+      int i;
+      for (i = 0; i < n; i++)
+         charputc(s[i]);
+      return n;
+   }
+   return fwrite(s, 1, n, stream);
 }
 
  
 int fclose(FILE *stream){
-   if (stream==stdout) //stdout?
+   if (stream==stdout || stream==stderr || stream==stdin)
       return 0;
+   sdk_flush_write_buffer(stream, 1);
    closefile(stream);
    return 0;
 };
 
 int fflush (FILE *stream){
+   int i;
+   if (!stream) {
+      for (i = 0; i < SDK_WRITE_SLOTS; i++)
+         if (sdk_write_buffers[i].stream)
+            sdk_flush_write_buffer(sdk_write_buffers[i].stream, 0);
+      return 0;
+   }
    if (stream == stdout || stream==stderr || stream == stdin) 
-      return 1;
+      return 0;
+   sdk_flush_write_buffer(stream, 0);
    return dexsdk_systemcall(0x59,(long)stream,0,0,0,0);
 };
 
 /* fseek lives in posix.c (POSIX int return) */
 
 long int ftell(FILE *stream){
-   return dexsdk_systemcall(0x47,(long)stream,0,0,0,0);
+   long pos = dexsdk_systemcall(0x47,(long)stream,0,0,0,0);
+   if (pos >= 0)
+      pos += sdk_buffered_write_bytes(stream);
+   return pos;
 };
 
 int closefile(FILE* fhandle){

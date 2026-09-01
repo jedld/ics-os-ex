@@ -1496,10 +1496,34 @@ void ps_switchto(PCB386 *process){
       to its entry point when re-scheduled. */
    ps_switchto_in_progress[me] = 0;
 
-   if (prev && prev != process)
-     context_switch(&prev->ctx, &process->ctx, &prev->on_cpu);
-   else
-     context_load(&process->ctx);
+    /* Diagnostic: valid RIPs are kernel code (0x100000..0x300000) or user
+       code (0x400000+).  A RIP in the 0x300000..0x400000 stack hole, or with
+       a non-zero high half (PE-attribute / stray high word grafted onto a
+       kernel address), means the saved context RIP was corrupted.  Print
+       before we ret into it. */
+    {
+      u64 rr = process->ctx.rip;
+      int ok = (rr >= 0x100000ULL && rr < 0x300000ULL)
+            || (rr >= 0x400000ULL && rr < 0x100000000ULL);
+      if (!ok) {
+        char cb[96];
+        char nm[12];
+        int n = 0;
+        const char *src = process->name ? process->name : "?";
+        while (src[n] && n < 11) { nm[n] = src[n]; n++; }
+        nm[n] = 0;
+        sprintf(cb, "CTXBAD p%d %s rip=0x%llx EIP=0x%lx rsp=0x%llx\n",
+                (int)process->processid, nm, (unsigned long long)rr,
+                (unsigned long)process->regs.EIP,
+                (unsigned long long)process->ctx.rsp);
+        serial_puts(cb);
+      }
+    }
+
+    if (prev && prev != process)
+      context_switch(&prev->ctx, &process->ctx, &prev->on_cpu);
+    else
+      context_load(&process->ctx);
 };
 
 /*Calls the scheduler voluntarily*/

@@ -462,7 +462,7 @@ int posix_spawn(pid_t *pid, const char *path,
                 const posix_spawnattr_t *attrp,
                 char *const argv[], char *const envp[])
 {
-   char cmd[1024];
+   char cmd[4096];
    long r;
 
    (void)file_actions;
@@ -490,7 +490,7 @@ int posix_spawn(pid_t *pid, const char *path,
 
 int execv(const char *path, char *const argv[])
 {
-   char cmd[1024];
+   char cmd[4096];
 
    if (!path) {
       errno = EINVAL;
@@ -917,6 +917,7 @@ sighandler_t signal(int sig, sighandler_t handler)
 
 int fseek(FILE *f, long off, int whence)
 {
+   fflush(f);
    dexsdk_systemcall(0x41, (long)f, (long)off, whence, 0, 0);
    return 0;
 }

@@ -35,7 +35,7 @@ extern unsigned int strlen(const char *s);
 extern int vfs_listdir(vfs_node *current_dir, vfs_node *buffer, int size);
 extern PCB386 *sched_gethead(void);
 
-#define SPAWN_CMDLINE 1024
+#define SPAWN_CMDLINE 4096
 #define WNOHANG    1
 
 #define EPERM   1
@@ -522,6 +522,14 @@ long sys_fstat_fd(int fd, void *statbuf)
    if (fstat(f, &vs) < 0)
       return -EIO;
    memset(st, 0, sizeof(*st));
+   /* Build tools compare (st_dev, st_ino) to remove duplicate include and
+      search directories. Returning zero for every VFS object collapsed
+      GCC's complete include path to its first entry. Filesystem ID plus the
+      stable mounted-node identity gives each live VFS object a real key. */
+   if (f->ptr) {
+      st->st_dev = f->ptr->fsid;
+      st->st_ino = (unsigned int)((uintptr)f->ptr >> 4);
+   }
    st->st_size = vs.st_size;
    /* Report the true file type so S_ISDIR/S_ISREG work. ld's
       find_scripts_dir() checks S_ISDIR to locate its ldscripts/
