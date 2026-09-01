@@ -1,20 +1,26 @@
 CC=gcc
+LD=ld
+OBJCOPY=objcopy
+CP=cp
+TOOLPREFIX=
+DEBUGFLAGS=-g
 CFLAGS=-std=gnu89 -fno-stack-protector -fgnu89-inline -m64 -mcmodel=large -w -nostdlib \
 	-fno-builtin -ffreestanding -fno-pie -fno-pic \
 	-fno-asynchronous-unwind-tables \
 	-mno-red-zone -msse -msse2 \
-	-fno-strict-aliasing -fcommon -c -g -I.
+	-fno-strict-aliasing -fcommon -c $(DEBUGFLAGS) -I.
 ASM=gcc
 ASMFLAGS=$(CFLAGS)
 LDFLAGS=-m elf_x86_64 -T lscript64.ld --build-id=none -z max-page-size=0x1000 -z noexecstack -nostdlib
+MAPFLAGS=-Map mapfile.txt
 
 bzImage: all
-	objcopy --only-keep-debug Kernel64.bin Kernel64.sym
-	objcopy --strip-debug Kernel64.bin
+	$(OBJCOPY) --only-keep-debug Kernel64.bin Kernel64.sym
+	$(OBJCOPY) --strip-debug Kernel64.bin
 	# Prefer uncompressed ELF64 for Multiboot2 (gzip optional)
-	cp Kernel64.bin vmdex
-	cp vmdex ..
-	cp Kernel64.bin Kernel32.bin || true
+	$(CP) Kernel64.bin vmdex
+	$(CP) vmdex ..
+	$(CP) Kernel64.bin Kernel32.bin
 
 all: obj Kernel64.bin
 
@@ -38,66 +44,66 @@ kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
 		process/sync.c console/script.c process/process.c process/process.h dexapi/dex32API.c \
 		hardware/ATA/ide.c vfs/vfs_aux.c vfs/posixfd.h memory/kheap.c memory/dexmalloc.c \
 		vmm/vmm.c kexec.c kexec.h
-	$(CC) $(CFLAGS) -o kernel32.o kernel32.c 
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o kernel32.o kernel32.c 
 	
 scheduler.o: process/scheduler.c process/process.h
-	$(CC) $(CFLAGS) -o scheduler.o process/scheduler.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o scheduler.o process/scheduler.c
 
 fat.o: filesystem/fat12.c filesystem/fat12.h
-	$(CC) $(CFLAGS) -o fat.o filesystem/fat12.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o fat.o filesystem/fat12.c
 	
 iso9660.o: filesystem/iso9660.c filesystem/iso9660.h
-	$(CC) $(CFLAGS) -o iso9660.o filesystem/iso9660.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o iso9660.o filesystem/iso9660.c
 
 ramdisk.o: filesystem/ramdisk.c filesystem/ramdisk.h
-	$(CC) $(CFLAGS) -o ramdisk.o filesystem/ramdisk.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o ramdisk.o filesystem/ramdisk.c
 	
 devfs.o:
-	$(CC) $(CFLAGS) -o devfs.o filesystem/devfs.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o devfs.o filesystem/devfs.c
 	
 iomgr.o: iomgr/iosched.c iomgr/iosched.h iomgr/bio.h stdlib/time.h iomgr/blkcache.h
-	$(CC) $(CFLAGS) -o iomgr.o iomgr/iosched.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o iomgr.o iomgr/iosched.c
 
 blkcache.o: iomgr/blkcache.c iomgr/blkcache.h
-	$(CC) $(CFLAGS) -o blkcache.o iomgr/blkcache.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o blkcache.o iomgr/blkcache.c
 
 posixfd.o: vfs/posixfd.c vfs/posixfd.h process/process.h hardware/virtio/virtio_blk.h
-	$(CC) $(CFLAGS) -o posixfd.o vfs/posixfd.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o posixfd.o vfs/posixfd.c
 	
 devmgr_error.o:
-	$(CC) $(CFLAGS) -o devmgr_error.o devmgr/devmgr_error.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o devmgr_error.o devmgr/devmgr_error.c
 
 startup.o: startup/startup.S
-	$(CC) $(CFLAGS) -o startup.o startup/startup.S
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o startup.o startup/startup.S
 	
 asmlib.o: startup/asmlib.S
-	$(CC) $(CFLAGS) -o asmlib.o startup/asmlib.S
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o asmlib.o startup/asmlib.S
 
 irqwrap.o: irqwrap.S
-	$(CC) $(CFLAGS) -o irqwrap.o irqwrap.S
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o irqwrap.o irqwrap.S
 
 context.o: cpu/context.S
-	$(CC) $(CFLAGS) -o context.o cpu/context.S
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o context.o cpu/context.S
 
 ap_trampoline.o: cpu/ap_trampoline.S
-	$(CC) $(CFLAGS) -o ap_trampoline.o cpu/ap_trampoline.S
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o ap_trampoline.o cpu/ap_trampoline.S
 
 kexec.o: kexec.S
-	$(CC) $(CFLAGS) -o kexec.o kexec.S
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o kexec.o kexec.S
 
 virtio_blk.o: hardware/virtio/virtio_blk.c hardware/virtio/virtio_blk.h hardware/virtio/virtio.h process/process.h
-	$(CC) $(CFLAGS) -o virtio_blk.o hardware/virtio/virtio_blk.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o virtio_blk.o hardware/virtio/virtio_blk.c
 
 lapic.o: cpu/lapic.c cpu/lapic.h
-	$(CC) $(CFLAGS) -o lapic.o cpu/lapic.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o lapic.o cpu/lapic.c
 
 smp.o: cpu/smp.c cpu/smp.h process/process.h
-	$(CC) $(CFLAGS) -o smp.o cpu/smp.c
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o smp.o cpu/smp.c
 	
 Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
 		scheduler.o iomgr.o blkcache.o posixfd.o fat.o iso9660.o ramdisk.o \
 		devfs.o irqwrap.o devmgr_error.o kexec.o virtio_blk.o
-	ld $(LDFLAGS) -Map mapfile.txt
+	$(LD) $(LDFLAGS) $(MAPFLAGS)
 
 clean:
 	rm -f *.o

@@ -257,20 +257,54 @@ void main(){
    }
 
    if (multiboot_magic == MULTIBOOT2_MAGIC) {
-      mb2_info *info = (mb2_info *)(uintptr)multiboothdr;
-      mb2_tag *tag = (mb2_tag *)((char *)info + 8);
-      memset(&mb1_compat, 0, sizeof(mb1_compat));
-      mb1_compat.boot_device = 0xE0000000; /* default CD for Multiboot2/ISO */
-      while (tag->type != 0) {
-         if (tag->type == 5) { /* BIOS boot device */
-            DWORD *p = (DWORD *)((char *)tag + 8);
-            /* Multiboot2: p[0]=biosdev, p[1]=partition, p[2]=sub_partition.
-               Pack like Multiboot1: drive in top byte. */
-            mb1_compat.boot_device = (p[0] << 24)
-                                  | ((p[1] & 0xFF) << 16)
-                                  | ((p[2] & 0xFF) << 8);
-         }
-         if (tag->type == 1) { /* command line */
+       mb2_info *info = (mb2_info *)(uintptr)multiboothdr;
+       mb2_tag *tag = (mb2_tag *)((char *)info + 8);
+       static mmap mb2map[32];
+       int mb2map_n = 0;
+       memset(&mb1_compat, 0, sizeof(mb1_compat));
+       mb1_compat.boot_device = 0xE0000000; /* default CD for Multiboot2/ISO */
+       while (tag->type != 0) {
+          if (tag->type == 5) { /* BIOS boot device */
+             DWORD *p = (DWORD *)((char *)tag + 8);
+             /* Multiboot2: p[0]=biosdev, p[1]=partition, p[2]=sub_partition.
+                Pack like Multiboot1: drive in top byte. */
+             mb1_compat.boot_device = (p[0] << 24)
+                                   | ((p[1] & 0xFF) << 16)
+                                   | ((p[2] & 0xFF) << 8);
+          }
+          if (tag->type == 6) { /* E820 memory map (multiboot2 mmap tag) */
+             const mb2_mmap_tag *mm = (const mb2_mmap_tag *)tag;
+             unsigned int es = mm->entry_size ? mm->entry_size : 24;
+             unsigned int ne = (tag->size >= 16) ? (tag->size - 16) / es : 0;
+             unsigned int j;
+             const unsigned char *ep = (const unsigned char *)tag + 16;
+             for (j = 0; j < ne && j < 32; j++) {
+                const unsigned char *e = ep + j * es;
+                unsigned long long base, len;
+                unsigned int etype;
+                int k;
+                base = 0;
+                for (k = 0; k < 8; k++)
+                   base |= (unsigned long long)(unsigned int)e[k] << (8 * k);
+                len = 0;
+                for (k = 0; k < 8; k++)
+                   len |= (unsigned long long)(unsigned int)e[8 + k] << (8 * k);
+                etype = (unsigned int)e[16] | ((unsigned int)e[17] << 8)
+                      | ((unsigned int)e[18] << 16) | ((unsigned int)e[19] << 24);
+                if (etype != 1)
+                   continue; /* keep RAM only */
+                if (mb2map_n < 32) {
+                   mb2map[mb2map_n].size = sizeof(mmap) - 4;
+                   mb2map[mb2map_n].base_addr_low = (DWORD)(base & 0xFFFFFFFFu);
+                   mb2map[mb2map_n].base_addr_high = (DWORD)(base >> 32);
+                   mb2map[mb2map_n].length_low = (DWORD)(len & 0xFFFFFFFFu);
+                   mb2map[mb2map_n].length_high = (DWORD)(len >> 32);
+                   mb2map[mb2map_n].type = 1;
+                   mb2map_n++;
+                }
+             }
+          }
+          if (tag->type == 1) { /* command line */
             unsigned n = tag->size > 8 ? tag->size - 8 : 0;
             /* A real GRUB/kexec cmdline is short. Huge sizes mean we landed
                on a misaligned tag and would memcpy kernel .rodata (which
@@ -286,13 +320,17 @@ void main(){
                       || strncmp(kernel_cmdline, "kexeced ", 8) == 0))
                kernel_kexeced = 1;
          }
-         /* mmap tag (6) uses a different entry layout — use fallback below */
          tag = (mb2_tag *)(((uintptr)tag + tag->size + 7) & ~7ULL);
-      }
-      mbhdr = &mb1_compat;
-      memory_map = 0;
-      map_length = 0;
-      if (kernel_cmdline[0]) {
+       }
+       mbhdr = &mb1_compat;
+       if (mb2map_n > 0) {
+          memory_map = mb2map;
+          map_length = mb2map_n * sizeof(mmap);
+       } else {
+          memory_map = 0;
+          map_length = 0;
+       }
+       if (kernel_cmdline[0]) {
          serial_puts("ICS-OS: cmdline=");
          serial_puts(kernel_cmdline);
          serial_puts("\n");
@@ -371,6 +409,12 @@ void main(){
     The createstack() function creates the physical pages stack.
     See dexmem.c for details*/
     
+   {
+      char msg[96];
+      sprintf(msg, "ICS-OS: mem detect begin map=%p len=%d\n",
+              memory_map, map_length);
+      serial_puts(msg);
+   }
    memamount = mem_detectmemory(memory_map, map_length);
    current_process = &sPCB;
    {
@@ -515,7 +559,13 @@ void dex32_startup(){
       storeflags(&flags);
       stopints();
       printf("Starting application processors...");
-      smp_start_aps();
+      /* A stage-1 self-host kernel must leave APs in reset while BSP kexec
+         replaces the shared kernel image. The generated kernel receives the
+         normal "kexeced" command line and performs full SMP bring-up. */
+      if (strcmp(kernel_cmdline, "selfhost-stage1") == 0)
+         printf("deferred for self-host kexec");
+      else
+         smp_start_aps();
       printf("[OK]\n");
       restoreflags(flags);
    }
@@ -789,8 +839,12 @@ void dex_init(){
    printf("Running foreground manager thread\n");
     
    //create the foreground manager
-   fg_pid = createkthread((void*)fg_updateinfo,"fg_mgr",20000);
-   ps_set_affinity(fg_pid, 0); /* console DDL / VGA — BSP only */
+   if (strcmp(kernel_cmdline, "selfhost-stage1") != 0) {
+      fg_pid = createkthread((void*)fg_updateinfo,"fg_mgr",20000);
+      ps_set_affinity(fg_pid, 0); /* console DDL / VGA — BSP only */
+   } else {
+      printf("foreground manager deferred for self-host\n");
+   }
     
    if (baremode) 
       console_first++;
@@ -819,7 +873,7 @@ void dex_init(){
 
    //set the console for this process
    Dex32SetProcessDDL(consoleDDL, getprocessid());
-    
+
    /* Run the process dispatcher.
       The process dispatcher is responsible for running new modules/process.
       It is the only one that could disable paging without crashing the system since

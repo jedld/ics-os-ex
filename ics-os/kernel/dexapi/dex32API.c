@@ -24,6 +24,11 @@ although a user procedure call is in the works
 
 #include "dex32API.h"
 
+/* Diagnostic: monotonic count of api_syscall() entries.  The selfhost
+   spin watchdog (stdlib/time.c) samples this to tell a busy syscall loop
+   (sbrk/read/write churn) from a pure-C spin (flat count). */
+volatile unsigned long diag_sc_count = 0;
+
 int dex32_getversion(){
    return DEX32_OSVER;
 };
@@ -198,6 +203,8 @@ void api_init(){
    api_addsystemcall(0xB3,sys_execve,0,API_REQUIRE_INTS);
    api_addsystemcall(0xB4,sys_getdents,0,API_REQUIRE_INTS);
     api_addsystemcall(0xB5,console_puts,0,0);
+   api_addsystemcall(0xB6,dex32_mmap,0,0);
+   api_addsystemcall(0xB7,dex32_munmap,0,0);
 };
 
 
@@ -206,8 +213,9 @@ api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,
    char temp[255];
    api_arg_t retval = 0; //the return value of a systemcall is placed here
    api_arg_t (*syscall_function)(api_arg_t p1, api_arg_t p2, api_arg_t p3,
-                                 api_arg_t p4, api_arg_t p5);
-   //cursyscall[] is used for debugging purposes, it stores the last two different
+                                  api_arg_t p4, api_arg_t p5);
+    diag_sc_count++;
+    //cursyscall[] is used for debugging purposes, it stores the last two different
    //system calls that was called and sets op_success if the system
    //call finished without crashing or causing a fault, false oherwise
    if (fxn!=current_process->cursyscall[1]){

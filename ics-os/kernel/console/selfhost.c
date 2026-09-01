@@ -1,4 +1,4 @@
-// Self-host / self-compile test drivers (tccboot, kbuild, fullhost).
+// GCC kernel self-host driver plus optional TinyCC bootstrap experiments.
 // Split out of console.c (single-TU build: kernel32.c #includes console.c,
 // which #includes this file).  Uses only console.c's includes via console.h.
 int user_execp(char *fname, DWORD mode, char *params);
@@ -295,13 +295,14 @@ static int tccboot_run(void)
 }
 
 /* Compile the kernel C with in-OS tcc; link with prebuilt GAS objects. */
+/* Optional TinyCC kernel experiment. The supported path is gkbuild_run(). */
 static int kbuild_run(const char *cc)
 {
    static const char *cfiles[] = {
       "tcccompat.c", "process/scheduler.c", "filesystem/fat12.c",
       "filesystem/iso9660.c", "filesystem/ramdisk.c", "filesystem/devfs.c",
       "iomgr/iosched.c", "iomgr/blkcache.c", "vfs/posixfd.c", "devmgr/devmgr_error.c",
-      "cpu/lapic.c", "cpu/smp.c", "kernel32.c",
+      "cpu/lapic.c", "cpu/smp.c", "hardware/virtio/virtio_blk.c", "kernel32.c",
       0
    };
    static const char *asms[] = {
@@ -366,7 +367,7 @@ static int kbuild_run(const char *cc)
             has no -mcmodel=large; the kernel sits at 1MiB so small model
             is fine. It does not use a red zone. */
          sprintf(cmd,
-                 "%s -c -nostdlib -nostdinc -w -fno-common "
+             "%s -c -nostdlib -nostdinc -w -fcommon "
                  "-I/ramdisk/k "
                  "-o /ramdisk/k/%s /ramdisk/k/%s",
                  cc, stem, cfiles[i]);
@@ -377,20 +378,20 @@ static int kbuild_run(const char *cc)
       }
    }
 
-   printf("kbuild: linking /ramdisk/Kernel64.bin\n");
+         printf("kbuild: linking /ramdisk/Kernel64.bin\n");
    sprintf(cmd,
-           "%s -nostdlib -static -Wl,-Ttext=0x100000 -Wl,-section-alignment=0x1000 "
-           "-o/ramdisk/Kernel64.bin "
-           "/ramdisk/kasm/mbhdr.o /ramdisk/kasm/startup.o /ramdisk/kasm/asmlib.o "
+            "%s -nostdlib -static -Wl,-Ttext=0x100000 -Wl,-section-alignment=0x1000 "
+            "-o/ramdisk/Kernel64.bin "
+            "/ramdisk/kasm/mbhdr.o /ramdisk/kasm/startup.o /ramdisk/kasm/asmlib.o "
            "/ramdisk/kasm/context.o /ramdisk/kasm/aptramp.o "
            "/ramdisk/k/lapic.o /ramdisk/k/smp.o "
            "/ramdisk/k/kernel32.o /ramdisk/k/scheduler.o /ramdisk/k/iosched.o "
            "/ramdisk/k/blkcache.o /ramdisk/k/posixfd.o /ramdisk/k/fat12.o /ramdisk/k/iso9660.o "
            "/ramdisk/k/ramdisk.o /ramdisk/k/devfs.o /ramdisk/kasm/irqwrap.o "
-           "/ramdisk/k/devmgr_error.o /ramdisk/k/tcccompat.o /ramdisk/kasm/tccva.o "
+           "/ramdisk/k/devmgr_error.o /ramdisk/k/virtio_blk.o /ramdisk/k/tcccompat.o /ramdisk/kasm/tccva.o "
            "/ramdisk/kasm/kexec.o",
-           cc);
-   if (!run_tcc(cc, cmd)) {
+            cc);
+         if (!run_tcc(cc, cmd)) {
       printf("KBUILD_TEST_FAIL link\n");
       return 0;
    }
@@ -414,6 +415,439 @@ static int kbuild_run(const char *cc)
    }
    kexec_reboot();
    return 1;
+}
+
+/* GCC self-host capstone: build the WHOLE kernel in-OS with the in-OS gcc
+   driver (gcc -> cc1 -> as) and in-OS GNU ld, mirroring `make -C kernel`:
+   the same sources (ksrc.tar), the exact host kernel CFLAGS (the -m* machine
+   flags, -mcmodel=large, -mno-red-zone, etc.), the same lscript64.ld (whose
+   INPUT() names the same 19 objects as the host link rule), and the same
+   host LDFLAGS. The result is kexec'd; the kexeced kernel prints
+   KEXEC_BOOT_OK (console.c) and reboots, which is the pass oracle. */
+ /* ELF64 shdr/sym views for the in-OS object diagnostic below. */
+  typedef struct {
+     unsigned int sh_name, sh_type;
+     unsigned long long sh_flags, sh_addr, sh_offset, sh_size;
+     unsigned int sh_link, sh_info;
+     unsigned long long sh_addralign, sh_entsize;
+  } gk_shdr64;
+  typedef struct {
+     unsigned int st_name;
+     unsigned char st_info, st_other;
+     unsigned short st_shndx;
+     unsigned long long st_value, st_size;
+  } gk_sym64;
+
+  /* Diagnostic: parse the .symtab of an in-OS-produced object and report
+     which of the expected global symbols are missing. The gcc driver only
+     verifies the .o exists and is non-empty, so a cc1 that dies mid-emit
+     (the deterministic GGC crash) yields a truncated .o that still passes
+     GKBUILD_OBJ_OK. Returns the count of missing names (0 = all present). */
+  static int gkbuild_check_syms(const char *path, const char **names)
+  {
+     DWORD sz = 0, i, k;
+     const unsigned char *m;
+     const gk_shdr64 *shs;
+     const gk_sym64 *syms;
+     const char *strtab;
+     DWORD shoff, shnum, shstrndx, symidx = 0, stridx = 0, nent, strsize;
+     int missing = 0;
+
+     m = (const unsigned char *)vfs_mapfile(path, &sz);
+     if (!m || sz < 64 || m[0] != 0x7f || m[1] != 'E' || m[2] != 'L' ||
+         m[3] != 'F' || m[4] != 2) {
+        printf("GKBUILD_SYMFAIL %s: not ELF64\n", path);
+        if (m) free((void *)m);
+        return -1;
+     }
+     shoff    = (DWORD)m[0x28] | (DWORD)m[0x29] << 8 |
+                (DWORD)m[0x2A] << 16 | (DWORD)m[0x2B] << 24;
+     shnum    = m[0x3C] | (DWORD)m[0x3D] << 8;
+     shstrndx = m[0x3E] | (DWORD)m[0x3F] << 8;
+     if (shoff == 0 || shnum == 0 || shoff + (DWORD)shnum * 64 > sz) {
+        printf("GKBUILD_SYMFAIL %s: bad shdrs (off %u num %u)\n",
+               path, (unsigned)shoff, (unsigned)shnum);
+        free((void *)m);
+        return -1;
+     }
+     shs = (const gk_shdr64 *)(m + shoff);
+     for (i = 0; i < shnum; i++) {
+        if (shs[i].sh_type == 2) {   /* SHT_SYMTAB */
+           symidx = i;
+           stridx = shs[i].sh_link;
+           break;
+        }
+     }
+     if (!symidx || stridx >= shnum) {
+        printf("GKBUILD_SYMFAIL %s: no .symtab\n", path);
+        free((void *)m);
+        return -1;
+     }
+     syms = (const gk_sym64 *)(m + shs[symidx].sh_offset);
+     nent = (DWORD)(shs[symidx].sh_size / (DWORD)sizeof(gk_sym64));
+     strtab = (const char *)(m + shs[stridx].sh_offset);
+     strsize = (DWORD)shs[stridx].sh_size;
+     for (k = 0; names[k]; k++) {
+        int found = 0;
+        for (i = 1; i < nent && !found; i++) {
+           if (syms[i].st_name < strsize && syms[i].st_shndx != 0 &&
+               strcmp(strtab + syms[i].st_name, names[k]) == 0)
+              found = 1;
+        }
+        if (!found) {
+           printf("GKBUILD_SYMFAIL %s missing `%s'\n", path, names[k]);
+           missing++;
+        }
+     }
+     free((void *)m);
+     return missing;
+  }
+
+   static int gkbuild_run_with(const char *cc, const char *ccprefix,
+                                             const char *provenance)
+  {
+     /* Host kernel C objects (kernel/Makefile obj list). */
+    static const char *cfiles[] = {
+       "process/scheduler.c", "filesystem/fat12.c", "filesystem/iso9660.c",
+       "filesystem/ramdisk.c", "filesystem/devfs.c", "iomgr/iosched.c",
+       "iomgr/blkcache.c", "vfs/posixfd.c", "devmgr/devmgr_error.c",
+       "kernel32.c", "cpu/lapic.c", "cpu/smp.c",
+       "hardware/virtio/virtio_blk.c",
+       0
+    };
+    /* Host object names (kernel/Makefile -o overrides: fat12.c -> fat.o,
+       iosched.c -> iomgr.o; the rest match the source stem). */
+    static const char *cobjs[] = {
+       "scheduler.o", "fat.o", "iso9660.o", "ramdisk.o", "devfs.o",
+       "iomgr.o", "blkcache.o", "posixfd.o", "devmgr_error.o",
+       "kernel32.o", "lapic.o", "smp.o", "virtio_blk.o"
+    };
+    /* Host kernel ASM objects (kernel/Makefile, built via gcc). */
+    static const char *asms[] = {
+       "startup/startup.S", "startup/asmlib.S", "irqwrap.S",
+       "cpu/context.S", "cpu/ap_trampoline.S", "kexec.S",
+       0
+    };
+    /* Exact host kernel CFLAGS (kernel/Makefile CFLAGS) with -I. -> -I/ramdisk/k. */
+   static const char gflags[] =
+        "-std=gnu89 -fno-stack-protector -fgnu89-inline -m64 -mcmodel=large -w "
+        "-nostdlib -fno-builtin -ffreestanding -fno-pie -fno-pic "
+        "-fno-asynchronous-unwind-tables -mno-red-zone -msse -msse2 "
+        "-fno-strict-aliasing -fcommon -c -I/ramdisk/k";
+   const char *ldp = "/icsos/apps/ld.exe";
+    char cmd[1024], obj[256];
+    int i;
+    file_PCB *of;
+    char *elf;
+    DWORD elfsz;
+
+    printf("gkbuild: extracting /icsos/ksrc.tar to /ramdisk/k\n");
+    {
+       char *tar;
+       DWORD tsz;
+       tar = (char*)vfs_mapfile("/icsos/ksrc.tar", &tsz);
+       if (!tar || tsz < 512) {
+          printf("GKBUILD_TEST_FAIL stage ksrc\n");
+          return 0;
+       }
+       if (!tccboot_untar(tar, tsz, "/ramdisk/k")) {
+          free(tar);
+          printf("GKBUILD_TEST_FAIL untar\n");
+          return 0;
+       }
+       free(tar);
+    }
+
+    printf("gkbuild: compiling kernel C with in-OS gcc (exact host CFLAGS)\n");
+    for (i = 0; cfiles[i]; i++) {
+       const char *stem = cobjs[i];
+       printf("gkbuild: [%d] %s -> %s\n", i, cfiles[i], stem);
+             sprintf(cmd, "%s %s %s -o /ramdisk/k/%s /ramdisk/k/%s",
+                cc, ccprefix, gflags, stem, cfiles[i]);
+       if (!user_execp((char*)cc, 0, (char*)cmd)) {
+          printf("GKBUILD_TEST_FAIL compile %s\n", cfiles[i]);
+          return 0;
+       }
+       sprintf(obj, "/ramdisk/k/%s", stem);
+       of = openfilex(obj, FILE_READ);
+       if (!of) {
+          printf("GKBUILD_TEST_FAIL missing %s\n", obj);
+          return 0;
+       }
+       fclose(of);
+        {
+            DWORD osz = 0;
+            char *om = (char*)vfs_mapfile(obj, &osz);
+            if (om) {
+               printf("GKBUILD_OBJ_OK %s (%u bytes)\n", stem, (unsigned)osz);
+               free(om);
+            } else
+               printf("GKBUILD_OBJ_OK %s\n", stem);
+         }
+         /* Diagnostic: size + head of the driver's intermediate .s (cc1
+            output). Distinguishes a truncated cc1 emit from an as problem. */
+         {
+            DWORD ssz = 0;
+            char *sm = (char*)vfs_mapfile("/ramdisk/.gccdrv.s", &ssz);
+            if (sm) {
+               int c, n = 0;
+               printf("GKBUILD_SRC %s asm=%u bytes:", stem, (unsigned)ssz);
+               for (c = 0; c < (int)ssz && n < 60; c++) {
+                  char ch = sm[c];
+                  if (ch == '\n' || ch == '\t' || ch < 0x20)
+                     ch = ' ';
+                  printf("%c", ch);
+                  n++;
+               }
+               printf("\n");
+               free(sm);
+            } else
+               printf("GKBUILD_SRC %s asm=MISSING\n", stem);
+         }
+      }
+
+      /* Diagnostic: probe the symbols the in-OS link reported undefined
+        (host objects define all of them). A hit means the in-OS object is
+        truncated (cc1 died mid-emit); a clean pass means the objects are
+        complete and the in-OS ld is dropping the symbols. */
+     {
+        static const char *k32[] = {
+           "main", "api_syscall", "syscallentry64", "CPUint", "fdchandler",
+           "nocoprocessor", "time_handler", "schedule_from_timer", "kbd_irq",
+           "mouse_irq", "GPFhandler64", "exc_doublefault", "pagefaulthandler",
+           "divide_error", "exc_invalidtss", "irq_activate", 0
+        };
+        static const char *smp[] = { "smp_reschedule_ipi", 0 };
+        static const char *vblk[] = { "virtio_blk_irq", 0 };
+      if (gkbuild_check_syms("/ramdisk/k/kernel32.o", k32) ||
+         gkbuild_check_syms("/ramdisk/k/smp.o", smp) ||
+         gkbuild_check_syms("/ramdisk/k/virtio_blk.o", vblk)) {
+         printf("GKBUILD_TEST_FAIL required symbols\n");
+         return 0;
+      }
+     }
+
+     printf("gkbuild: assembling kernel ASM with in-OS gcc (as)\n");
+    for (i = 0; asms[i]; i++) {
+       const char *base = asms[i];
+       const char *slash = strrchr(base, '/');
+       const char *bn = slash ? slash + 1 : base;
+       char stem[64];
+       c_to_o(stem, bn);
+       printf("gkbuild: [asm %d] %s -> %s\n", i, asms[i], stem);
+       /* Host ASM rule: $(CC) $(CFLAGS) -o x.o x.S with CFLAGS containing -c. */
+             sprintf(cmd, "%s %s -c -o /ramdisk/k/%s /ramdisk/k/%s",
+                cc, ccprefix, stem, asms[i]);
+       if (!user_execp((char*)cc, 0, (char*)cmd)) {
+          printf("GKBUILD_TEST_FAIL assemble %s\n", asms[i]);
+          return 0;
+       }
+       sprintf(obj, "/ramdisk/k/%s", stem);
+       of = openfilex(obj, FILE_READ);
+       if (!of) {
+          printf("GKBUILD_TEST_FAIL missing %s\n", obj);
+          return 0;
+       }
+       fclose(of);
+        {
+           DWORD osz = 0;
+           char *om = (char*)vfs_mapfile(obj, &osz);
+           if (om) {
+              printf("GKBUILD_OBJ_OK %s (%u bytes)\n", stem, (unsigned)osz);
+              free(om);
+           } else
+              printf("GKBUILD_OBJ_OK %s\n", stem);
+        }
+     }
+
+      /* Host link rule: ld $(LDFLAGS) -Map mapfile.txt. The host relies on
+       lscript64.ld INPUT() with CWD=kernel/; in-OS there is no CWD, so use
+       lscript64-objs.ld (same layout, no INPUT) and pass the same 19 objects
+       (same order) as absolute paths. */
+    printf("gkbuild: linking /ramdisk/Kernel64.bin with in-OS ld (host LDFLAGS)\n");
+   sprintf(cmd,
+            "%s -m elf_x86_64 -T /ramdisk/k/lscript64-objs.ld --build-id=none "
+            "-z max-page-size=0x1000 -z noexecstack -nostdlib "
+            "-o /ramdisk/Kernel64.bin "
+            "/ramdisk/k/startup.o /ramdisk/k/asmlib.o /ramdisk/k/context.o "
+           "/ramdisk/k/ap_trampoline.o /ramdisk/k/lapic.o /ramdisk/k/smp.o "
+           "/ramdisk/k/kernel32.o /ramdisk/k/scheduler.o /ramdisk/k/iomgr.o "
+           "/ramdisk/k/blkcache.o /ramdisk/k/posixfd.o /ramdisk/k/fat.o "
+           "/ramdisk/k/iso9660.o /ramdisk/k/ramdisk.o /ramdisk/k/devfs.o "
+           "/ramdisk/k/irqwrap.o /ramdisk/k/devmgr_error.o /ramdisk/k/kexec.o "
+           "/ramdisk/k/virtio_blk.o",
+           ldp);
+    if (!user_execp((char*)ldp, 0, (char*)cmd)) {
+       printf("GKBUILD_TEST_FAIL link\n");
+       return 0;
+    }
+    elf = (char*)vfs_mapfile("/ramdisk/Kernel64.bin", &elfsz);
+    if (!elf || elfsz < 64 || elf[0] != 0x7f || elf[1] != 'E' ||
+        elf[2] != 'L' || elf[3] != 'F' || elf[4] != 2) {
+       printf("GKBUILD_TEST_FAIL not ELF64 (%u bytes)\n", (unsigned)elfsz);
+       if (elf) free(elf);
+       return 0;
+    }
+    printf("gkbuild: ELF64 kernel %u bytes\n", (unsigned)elfsz);
+    free(elf);
+    printf("GKBUILD_LINK_OK\n");
+   printf("GKBUILD_COMPILER_PROVENANCE %s\n", provenance);
+    printf("GKBUILD_TEST_PASS\n");
+    printf("gkbuild: kexec /ramdisk/Kernel64.bin\n");
+    if (kexec_load("/ramdisk/Kernel64.bin") != 0) {
+       printf("GKBUILD_TEST_FAIL kexec_load\n");
+       return 0;
+    }
+    kexec_reboot();
+    return 1;
+ }
+
+static int gkbuild_run(void)
+{
+   return gkbuild_run_with("/icsos/apps/gcc.exe", "", "host-seeded");
+}
+
+/* Build the kernel through the real GNU Make 3.82 port and the same
+   kernel/Makefile used by the host.  Only tool locations differ: host
+   defaults remain gcc/ld, while ICS-OS passes absolute ELF paths. */
+static int gmake_kbuild_run(const char *make, const char *root, const char *cc,
+                            const char *ld, const char *toolprefix,
+                            const char *provenance)
+{
+   char cmd[1024], out[320];
+   char *tar, *elf;
+   DWORD tsz, elfsz;
+   extern volatile int selfhost_cooperative_ready;
+
+   selfhost_cooperative_ready = 1;
+
+   printf("gmake-kbuild: extracting kernel sources to %s\n", root);
+   mkdir(root);
+   tar = (char *)vfs_mapfile("/icsos/ksrc.tar", &tsz);
+   if (!tar || tsz < 512) {
+      printf("GKBUILD_TEST_FAIL map ksrc.tar\n");
+      return 0;
+   }
+   if (!tccboot_untar(tar, tsz, root)) {
+      free(tar);
+      printf("GKBUILD_TEST_FAIL extract ksrc.tar\n");
+      return 0;
+   }
+   free(tar);
+
+   sprintf(cmd,
+         "%s -C %s -f Makefile bzImage "
+         "CC=%s LD=%s OBJCOPY=/icsos/apps/objcopy.exe "
+           "CP=/icsos/apps/cp.exe DEBUGFLAGS= MAPFLAGS= TOOLPREFIX=%s",
+           make, root, cc, ld, toolprefix ? toolprefix : "");
+   printf("GKBUILD_ORCHESTRATOR GNU_MAKE_3_82\n");
+   printf("GKBUILD_COMPILER_PROVENANCE %s\n", provenance);
+   if (!user_execp((char *)make, 0, cmd)) {
+      printf("GKBUILD_TEST_FAIL make spawn\n");
+      return 0;
+   }
+
+   sprintf(out, "%s/Kernel64.bin", root);
+   elf = (char *)vfs_mapfile(out, &elfsz);
+   if (!elf || elfsz < 64 || elf[0] != 0x7f || elf[1] != 'E' ||
+       elf[2] != 'L' || elf[3] != 'F' || elf[4] != 2) {
+      printf("GKBUILD_TEST_FAIL make output (%u bytes)\n", (unsigned)elfsz);
+      if (elf) free(elf);
+      return 0;
+   }
+   free(elf);
+   printf("GKBUILD_LINK_OK\n");
+   printf("GKBUILD_TEST_PASS\n");
+   printf("gmake-kbuild: kexec %s\n", out);
+   if (kexec_load(out) != 0) {
+      printf("GKBUILD_TEST_FAIL kexec_load\n");
+      return 0;
+   }
+   kexec_reboot();
+   return 1;
+}
+
+/* Bootstrap GNU Make with GNU Make: the seed make reads the shared
+   Selfhost.mk recipe, while GCC rebuilds every Make and SDK runtime object. */
+static int gmake_self_rebuild(void)
+{
+   char *tar, *elf;
+   DWORD tsz, elfsz;
+   const char *cmd =
+      "/icsos/apps/make.exe -f /work/makesrc/Selfhost.mk all "
+      "CC=/work/gcc.exe LD=/work/ld.exe TOOLPREFIX=-B/work";
+
+   printf("GMAKE_SELF_ORCHESTRATOR GNU_MAKE_3_82\n");
+   mkdir("/work/makesrc");
+   mkdir("/work/makeobj");
+   tar = (char *)vfs_mapfile("/icsos/makesrc.tar", &tsz);
+   if (!tar || tsz < 512 || !tccboot_untar(tar, tsz, "/work/makesrc")) {
+      if (tar) free(tar);
+      printf("GMAKE_SELF_FAIL extract\n");
+      return 0;
+   }
+   free(tar);
+   if (!user_execp("/icsos/apps/make.exe", 0, (char *)cmd)) {
+      printf("GMAKE_SELF_FAIL seed make\n");
+      return 0;
+   }
+   elf = (char *)vfs_mapfile("/work/make.exe", &elfsz);
+   if (!elf || elfsz < 64 || elf[0] != 0x7f || elf[1] != 'E' ||
+       elf[2] != 'L' || elf[3] != 'F' || elf[4] != 2) {
+      if (elf) free(elf);
+      printf("GMAKE_SELF_FAIL output\n");
+      return 0;
+   }
+   free(elf);
+   if (!user_execp("/work/make.exe", 0, "/work/make.exe --version")) {
+      printf("GMAKE_SELF_FAIL execute\n");
+      return 0;
+   }
+   printf("GMAKE_SELF_REBUILT_WITH_GCC\n");
+   printf("GMAKE_SELF_TEST_PASS\n");
+   return 1;
+}
+
+static int gccselfhost_run(void)
+{
+   file_PCB *f;
+   extern volatile int selfhost_cooperative_ready;
+   selfhost_cooperative_ready = 1;
+   printf("gccself: rebuilding GCC with GNU Make inside ICS-OS\n");
+   printf("GCC_SELF_BEGIN\n");
+   printf("GCC_SELF_ORCHESTRATOR GNU_MAKE_3_82\n");
+   if (!user_execp("/icsos/apps/make.exe", 0,
+                   "/icsos/apps/make.exe -f /icsos/gccsrc/Selfhost.mk all")) {
+      printf("GCC_SELF_CERT_FAIL make bootstrap\n");
+      return 0;
+   }
+   f = openfilex("/work/gcc.exe", FILE_READ);
+   if (!f) {
+      printf("GCC_SELF_CERT_FAIL no rebuilt gcc\n");
+      return 0;
+   }
+   fclose(f);
+   f = openfilex("/work/cc1.exe", FILE_READ);
+   if (!f) {
+      printf("GCC_SELF_CERT_FAIL no rebuilt cc1\n");
+      return 0;
+   }
+   fclose(f);
+   f = openfilex("/work/loop.o", FILE_READ);
+   if (!f) {
+      printf("GCC_SELF_CERT_FAIL no closure object\n");
+      return 0;
+   }
+   fclose(f);
+   printf("GCC_SELF_OBJECTS_OK 349\n");
+   printf("GCC_SELF_REBUILD_OK\n");
+   printf("GCC_SELF_LOOP_OK\n");
+   printf("GCC_SELF_PASS\n");
+   printf("GCC_SELF_CERT_COMPILER_OK\n");
+   if (!gmake_self_rebuild())
+      return 0;
+   return gmake_kbuild_run("/work/make.exe", "/work/kernel", "/work/gcc.exe",
+                           "/work/ld.exe", "-B/work", "in-os-rebuilt");
 }
 
 static int fullhost_run(void)

@@ -123,6 +123,75 @@ copwrapper:
 timerwrapper:
     cli
     PUSH_ALL
+    /* Selfhost spin watchdog diagnostics: save the pre-PUSH_ALL RSP (RSP_entry,
+       pointing at the CPU-pushed RIP) so the C watchdog can walk the kernel C
+       stack; r10/rax are already saved by PUSH_ALL and restored by POP_ALL, so
+       clobbering them here is safe. */
+    leaq 120(%rsp), %r10
+    mov %r10, wd_krsp(%rip)
+    /* Dump a wide interrupt-frame window ([rsp+0..240]) to locate the live RIP. */
+    movq 0(%rsp), %rax
+    movq %rax, wd_frame+0(%rip)
+    movq 8(%rsp), %rax
+    movq %rax, wd_frame+8(%rip)
+    movq 16(%rsp), %rax
+    movq %rax, wd_frame+16(%rip)
+    movq 24(%rsp), %rax
+    movq %rax, wd_frame+24(%rip)
+    movq 32(%rsp), %rax
+    movq %rax, wd_frame+32(%rip)
+    movq 40(%rsp), %rax
+    movq %rax, wd_frame+40(%rip)
+    movq 48(%rsp), %rax
+    movq %rax, wd_frame+48(%rip)
+    movq 56(%rsp), %rax
+    movq %rax, wd_frame+56(%rip)
+    movq 64(%rsp), %rax
+    movq %rax, wd_frame+64(%rip)
+    movq 72(%rsp), %rax
+    movq %rax, wd_frame+72(%rip)
+    movq 80(%rsp), %rax
+    movq %rax, wd_frame+80(%rip)
+    movq 88(%rsp), %rax
+    movq %rax, wd_frame+88(%rip)
+    movq 96(%rsp), %rax
+    movq %rax, wd_frame+96(%rip)
+    movq 104(%rsp), %rax
+    movq %rax, wd_frame+104(%rip)
+    movq 112(%rsp), %rax
+    movq %rax, wd_frame+112(%rip)
+    movq 120(%rsp), %rax
+    movq %rax, wd_frame+120(%rip)
+    movq 128(%rsp), %rax
+    movq %rax, wd_frame+128(%rip)
+    movq 136(%rsp), %rax
+    movq %rax, wd_frame+136(%rip)
+    movq 144(%rsp), %rax
+    movq %rax, wd_frame+144(%rip)
+    movq 152(%rsp), %rax
+    movq %rax, wd_frame+152(%rip)
+    movq 160(%rsp), %rax
+    movq %rax, wd_frame+160(%rip)
+    movq 168(%rsp), %rax
+    movq %rax, wd_frame+168(%rip)
+    movq 176(%rsp), %rax
+    movq %rax, wd_frame+176(%rip)
+    movq 184(%rsp), %rax
+    movq %rax, wd_frame+184(%rip)
+    movq 192(%rsp), %rax
+    movq %rax, wd_frame+192(%rip)
+    movq 200(%rsp), %rax
+    movq %rax, wd_frame+200(%rip)
+    movq 208(%rsp), %rax
+    movq %rax, wd_frame+208(%rip)
+    movq 216(%rsp), %rax
+    movq %rax, wd_frame+216(%rip)
+    movq 224(%rsp), %rax
+    movq %rax, wd_frame+224(%rip)
+    movq 232(%rsp), %rax
+    movq %rax, wd_frame+232(%rip)
+    movq 240(%rsp), %rax
+    movq %rax, wd_frame+240(%rip)
     call time_handler
     call schedule_from_timer
     POP_ALL
@@ -207,6 +276,7 @@ pfwrapper:
     movq %cr2, %rdi             /* location */
     movq 120(%rsp), %rsi        /* error code */
     movq 128(%rsp), %rdx        /* faulting RIP */
+    movq %rsp, %rcx             /* saved register frame */
     call pagefaulthandler
     POP_ALL
     addq $8, %rsp

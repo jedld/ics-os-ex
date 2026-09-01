@@ -80,4 +80,5 @@ void hardware_printinfo(hardware_cpuinfo *cpuinfo);
 void hardware_getcpuinfo(hardware_cpuinfo *cpuinfo);
 void getcpubrand(char *s);
 void getcpumodel(char *s);
+void machine_reboot(void);
 

@@ -149,9 +149,121 @@ void time_incrementtime()
       };
 };
    
-//the timer handler used by the task switcher
-void time_handler()
-  {
+/* Diagnostic spin watchdog for selfhost-stage1.  In cooperative mode the
+    timer no longer preempts (schedule_from_timer returns early), so a user
+    process that never calls taskswitch() holds the CPU forever.  time_handler()
+    still runs on every tick, so track the current process and report any that
+    keeps the CPU for more than a few seconds without a voluntary switch, along
+    with the running syscall total (delta between reports = syscall rate) and the
+    last two syscalls it issued.  Diagnostic-only: never changes scheduling. */
+ /* Wide interrupt-frame window captured by irqwrap.S timerwrapper at
+     [rsp+0..240] (31 qwords) plus the pre-PUSH_ALL RSP (wd_krsp).  The watchdog
+     filters for code-range values so the live user RIP (user ELF range) or the
+     kernel return addresses (kernel text range) stand out for symbolization. */
+  volatile unsigned long wd_frame[31];
+  volatile unsigned long wd_krsp = 0;
+
+  /* 0 = not a code pointer, 1 = kernel text, 2 = user ELF (non-PIE) code. */
+  static int wd_kind(unsigned long v)
+    {
+     if (v >= 0x100000 && v < 0x300000)
+        return 1;
+     if (v >= 0x400000 && v < 0x1800000)
+        return 2;
+     return 0;
+    };
+
+  static void selfhost_spin_watchdog(void)
+    {
+     extern volatile int selfhost_cooperative_ready;
+     extern volatile unsigned long diag_sc_count;
+     extern int smp_cpu_id(void);
+     static PCB386 *wd_last;
+     static unsigned long wd_ticks;
+     unsigned i;
+
+     if (!selfhost_cooperative_ready)
+        return;
+     if (smp_cpu_id() != 0)
+        return;
+
+     if (current_process != wd_last)
+        {
+         wd_last = current_process;
+         wd_ticks = 0;
+        };
+     wd_ticks++;
+     if (wd_ticks < 500)
+        return;
+     if ((wd_ticks - 500) % 2000 != 0)
+        return;
+
+     static int wd_raw_done;
+
+      if (current_process)
+         printf("WATCHDOG: pid=%d '%s' no-yield=%lu sc_total=%lu last_sc=%02x/%02x krsp=0x%lx rip=0x%lx\n",
+                current_process->processid, current_process->name,
+                wd_ticks,
+                diag_sc_count,
+                (unsigned)current_process->cursyscall[0],
+                (unsigned)current_process->cursyscall[1],
+                wd_krsp, wd_frame[15]);
+      else
+         printf("WATCHDOG: idle no-yield=%lu sc_total=%lu krsp=0x%lx rip=0x%lx\n",
+                wd_ticks, diag_sc_count, wd_krsp, wd_frame[15]);
+
+      /* One-shot raw dump of the full frame window + kernel C stack so the live
+          RIP and the exact stack layout can be read without range filtering. */
+       if (!wd_raw_done && current_process)
+         {
+          wd_raw_done = 1;
+          for (i = 0; i < 31; i++)
+             printf("  RAW f[%lu]=0x%lx\n", (unsigned long)(i*8), wd_frame[i]);
+          if (wd_krsp >= 0x100000 && wd_krsp < 0x1000000)
+             for (i = 0; i < 32; i++)
+                printf("  RAW k[%lu]=0x%lx\n", (unsigned long)(24 + i*8),
+                       *(volatile unsigned long *)(wd_krsp + 24 + i*8));
+         }
+
+       /* One-shot per-process PCB/context dump: does the SAVED ctx.rip match the
+          wild live RIP, and what does the legacy regs.EIP hold? */
+      static PCB386 *wd_dumped;
+       if (current_process && current_process != wd_dumped)
+         {
+          PCB386 *p = current_process;
+          wd_dumped = p;
+          printf("PCBDUMP pid=%d '%s':\n", p->processid, p->name);
+          printf("  ctx.rip=0x%lx ctx.rsp=0x%lx ctx.rflags=0x%lx ctx.cs=0x%lx ctx.ss=0x%lx ctx.cr3=0x%lx\n",
+                 p->ctx.rip, p->ctx.rsp, p->ctx.rflags, p->ctx.cs, p->ctx.ss, p->ctx.cr3);
+          printf("  regs.EIP=0x%lx regs.ESP=0x%lx regs.CS=0x%lx status=0x%lx pagedir=0x%lx\n",
+                 (unsigned long)p->regs.EIP, (unsigned long)p->regs.ESP,
+                 (unsigned long)p->regs.CS, p->status, (unsigned long)p->pagedirloc);
+          if (p->ctx.rsp >= 0x100000 && p->ctx.rsp < 0x1000000)
+             printf("  [rsp+120]=0x%lx [rsp+112]=0x%lx [rsp+136]=0x%lx\n",
+                    *(volatile unsigned long *)(p->ctx.rsp + 120),
+                    *(volatile unsigned long *)(p->ctx.rsp + 112),
+                    *(volatile unsigned long *)(p->ctx.rsp + 136));
+         }
+
+      for (i = 0; i < 31; i++)
+         if (wd_kind(wd_frame[i]))
+            printf("  FR f[%lu]=0x%lx %s\n", (unsigned long)(i*8),
+                   wd_frame[i], wd_kind(wd_frame[i])==1 ? "K" : "U");
+      if (wd_krsp >= 0x100000 && wd_krsp < 0x1000000)
+         {
+         for (i = 0; i < 32; i++)
+            {
+             unsigned long v = *(volatile unsigned long *)(wd_krsp + 24 + i*8);
+             if (wd_kind(v))
+                printf("  KS k[%lu]=0x%lx %s\n", (unsigned long)(24 + i*8),
+                       v, wd_kind(v)==1 ? "K" : "U");
+            }
+        }
+    };
+
+ //the timer handler used by the task switcher
+ void time_handler()
+   {
     //update the real-time clock
    //DEX32 is programmed to switch process every
    // 1/200 of a second so we use a counter that counts
@@ -173,9 +285,10 @@ void time_handler()
          };
 
    ticks++;
-   time_incrementtime();
-   
-   /* Floppy motor timeout and PIC EOI are BSP-only. APs use the LAPIC. */
+    time_incrementtime();
+    selfhost_spin_watchdog();
+    
+    /* Floppy motor timeout and PIC EOI are BSP-only. APs use the LAPIC. */
    {
       extern int smp_cpu_id(void);
       if (smp_cpu_id() == 0) {

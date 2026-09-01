@@ -27,6 +27,18 @@
 
 #include "console.h"
 
+static int cc1_window_contains(const char *hay, int hlen, const char *needle)
+{
+   int nlen = (int)strlen(needle);
+   int i;
+   if (hlen < nlen)
+      return 0;
+   for (i = 0; i + nlen <= hlen; i++) {
+      if (hay[i] == needle[0] && memcmp(hay + i, needle, (size_t)nlen) == 0)
+         return 1;
+   }
+   return 0;
+}
 
 void runner(){
    int i=0;
@@ -95,6 +107,18 @@ void getstring(char *buf, DEX32_DDL_INFO *dev){
 /*Show information about memory usage. This function is also useful
   for detecting memory leaks*/
 void meminfo(){
+#ifdef __x86_64__
+   u64 total = frame_total_count();
+   u64 free  = frame_free_count();
+   u64 used  = total - free;
+   printf("=================Memory Information===============\n");
+   printf("Pages available     : %10llu pages\n", (unsigned long long)free);
+   printf("Total Pages         : %10llu pages\n", (unsigned long long)total);
+   printf("Total Memory        : %10llu KB\n", (unsigned long long)(total * 4));
+   printf("Free Memory         : %10llu KB\n", (unsigned long long)(free * 4));
+   printf("Used pages          : %10llu pages (%10llu KB)\n",
+          (unsigned long long)used, (unsigned long long)(used * 4));
+#else
    DWORD totalbytes = totalpages * 0x1000;
    DWORD freebytes = totalbytes - (totalpages - stackbase[0])* 0x1000;
    printf("=================Memory Information===============\n");
@@ -104,6 +128,7 @@ void meminfo(){
    printf("Free Memory         : %10u bytes (%10d KB)\n",freebytes, freebytes / 1024);
    printf("Used pages          : %10d pages (%10d KB)\n",totalpages-stackbase[0],
    (totalpages-stackbase[0])*0x1000);
+#endif
 };
 
 
@@ -163,7 +188,7 @@ int user_fork(){
 };
 
 
-#include "selfhost.c"  /* tccboot / kbuild / fullhost self-host drivers */
+#include "selfhost.c"  /* GCC kbuild + optional TinyCC bootstrap drivers */
 
 /**
  * Function that reads an executable and creates a new process for it.
@@ -1074,9 +1099,20 @@ int console_execute(const char *str){
    if (strcmp(u,"reboot") == 0){  //-- Reboot the machine (keyboard + QEMU ports).
       machine_reboot();
    }else
-   if (strcmp(u,"kbuild") == 0){  //-- Rebuild the kernel with in-OS tcc.
-      kbuild_run(0);
-   }else
+   if (strcmp(u,"kbuild") == 0){  //-- Supported path: GNU make + GCC + binutils.
+         gmake_kbuild_run("/icsos/apps/make.exe", "/work/kernel",
+                     "/icsos/apps/gcc.exe",
+                        "/icsos/apps/ld.exe", "", "host-seeded");
+    }else
+    if (strcmp(u,"gkbuild") == 0){  //-- Diagnostic direct GCC build (without make).
+       gkbuild_run();
+    }else
+    if (strcmp(u,"gccselfhost") == 0){  //-- Rebuild GCC, then kernel, entirely in-OS.
+       gccselfhost_run();
+    }else
+    if (strcmp(u,"tcckbuild") == 0){  //-- Optional TinyCC kernel-build experiment.
+       kbuild_run(0);
+    }else
    if (strcmp(u,"kexec") == 0){  //-- Boot a kernel ELF from ramdisk/path.
       u=strtok(0," ");
       if (!u)
@@ -1084,7 +1120,20 @@ int console_execute(const char *str){
       if (kexec_load(u) == 0)
          kexec_reboot();
    }else
-   if (strcmp(u,"fullhost") == 0){  //-- tccboot then kbuild with tccnew.
+   if (strcmp(u,"kexeccert") == 0){  //-- Final generated-kernel capability marker.
+      if (!kernel_kexeced) {
+         printf("KEXEC_CAPABILITY_FAIL not-kexeced\n");
+      } else if (cpu_count < 2) {
+         printf("KEXEC_CAPABILITY_FAIL smp cpus=%d\n", cpu_count);
+      } else {
+         printf("KEXEC_SMP_OK cpus=%d\n", cpu_count);
+         printf("KEXEC_CAPABILITY_PASS\n");
+      }
+   }else
+   if (strcmp(u,"fullhost") == 0){  //-- Generic self-host alias uses GCC.
+      gkbuild_run();
+   }else
+   if (strcmp(u,"tccfullhost") == 0){  //-- Optional TinyCC bootstrap.
       fullhost_run();
    }else
    if (strcmp(u,"exectest") == 0){  //-- Run the host-built hello.exe (ELF loader smoke test).
@@ -1120,22 +1169,54 @@ int console_execute(const char *str){
           }
        }
        if (ok) {
-          f = openfilex("/ramdisk/cc1probe.s", FILE_READ);
-          if (f) {
-             vfs_stat info;
-             fstat(f, &info);
-             fclose(f);
-             if (info.st_size < 32) {
-                printf("CC1_TEST_FAIL output size %lu\n", (unsigned long)info.st_size);
-                ok = 0;
-             } else {
-                printf("cc1test: /ramdisk/cc1probe.s is %lu bytes\n", (unsigned long)info.st_size);
-             }
-          } else {
-             printf("CC1_TEST_FAIL no output file\n");
-             ok = 0;
-          }
-       }
+           f = openfilex("/ramdisk/cc1probe.s", FILE_READ);
+           if (f) {
+              vfs_stat info;
+              static char cc1win[4104];
+              char cc1prev[8];
+              int cc1prevlen = 0;
+              int has_text = 0, has_func = 0;
+              int nr;
+              fstat(f, &info);
+              memset(cc1prev, 0, sizeof(cc1prev));
+              if (info.st_size < 4096) {
+                 printf("CC1_TEST_FAIL output size %lu\n", (unsigned long)info.st_size);
+                 ok = 0;
+              } else {
+                 while (!(has_text && has_func)) {
+                    int wlen;
+                    nr = (int)fread(cc1win + cc1prevlen, 1, 4096, f);
+                    if (nr <= 0)
+                       break;
+                    wlen = cc1prevlen + nr;
+                    if (cc1_window_contains(cc1win, wlen, ".text"))
+                       has_text = 1;
+                    if (cc1_window_contains(cc1win, wlen, "main:") ||
+                        cc1_window_contains(cc1win, wlen, "fn_"))
+                       has_func = 1;
+                    if (wlen >= 7) {
+                       memcpy(cc1prev, cc1win + wlen - 7, 7);
+                       cc1prevlen = 7;
+                    } else {
+                       memcpy(cc1prev, cc1win, (unsigned int)wlen);
+                       cc1prevlen = wlen;
+                    }
+                 }
+                 if (!has_text || !has_func) {
+                    printf("CC1_TEST_FAIL missing markers text=%d func=%d size=%lu\n",
+                           has_text, has_func, (unsigned long)info.st_size);
+                    ok = 0;
+                 } else {
+                    printf("cc1test: /ramdisk/cc1probe.s is %lu bytes\n",
+                           (unsigned long)info.st_size);
+                 }
+              }
+              fclose(f);
+           } else {
+              printf("CC1_TEST_FAIL no output file\n");
+              ok = 0;
+           }
+        }
        if (ok)
            printf("CC1_TEST_PASS\n");
      }else
@@ -1179,7 +1260,7 @@ int console_execute(const char *str){
        /* 3. ld (GNU ld) links the object + SDK runtime into a runnable ELF64. */
        if (ok) {
           printf("gctest: ld /ramdisk/gccprobe.o <sdk runtime> -o /ramdisk/gccprobe.exe\n");
-          sprintf(cmd, "/icsos/apps/ld.exe /ramdisk/gccprobe.o /ramdisk/crt1.o /ramdisk/tccsdk.o /ramdisk/libtcc1.o /ramdisk/posix.o /ramdisk/setjmp.o -o /ramdisk/gccprobe.exe");
+          sprintf(cmd, "/icsos/apps/ld.exe -T /icsos/apps/ldscripts/elf_x86_64.xc /ramdisk/gccprobe.o /ramdisk/crt1.o /ramdisk/tccsdk.o /ramdisk/libtcc1.o /ramdisk/posix.o /ramdisk/setjmp.o -o /ramdisk/gccprobe.exe");
           if (!user_execp("/icsos/apps/ld.exe", 0, cmd)) {
              printf("GCC_E2E_FAIL link\n");
              ok = 0;
@@ -1213,6 +1294,43 @@ int console_execute(const char *str){
            if (ok)
               printf("GCC_E2E_RUN_OK\n");
         }
+     }else
+     if (strcmp(u,"gccclosed") == 0){  //-- Verify the rebuilt GCC after kexec.
+        char cmd[512];
+        int ok = 1;
+        file_PCB *f;
+        printf("gccclosed: staging source and SDK runtime\n");
+        if (fcopy("/icsos/apps/gccprobe.c", "/ramdisk/gccprobe.c") == -1 ||
+            fcopy("/icsos/apps/crt1.o", "/ramdisk/crt1.o") == -1 ||
+            fcopy("/icsos/apps/tccsdk.o", "/ramdisk/tccsdk.o") == -1 ||
+            fcopy("/icsos/apps/libtcc1.o", "/ramdisk/libtcc1.o") == -1 ||
+            fcopy("/icsos/apps/posix.o", "/ramdisk/posix.o") == -1 ||
+            fcopy("/icsos/apps/setjmp.o", "/ramdisk/setjmp.o") == -1) {
+           printf("GCC_CLOSED_TOOLCHAIN_FAIL stage\n");
+           ok = 0;
+        }
+        if (ok) {
+           sprintf(cmd, "/work/gcc.exe -B/work /ramdisk/gccprobe.c -o /ramdisk/gccclosed.exe");
+           if (!user_execp("/work/gcc.exe", 0, cmd)) {
+              printf("GCC_CLOSED_TOOLCHAIN_FAIL driver\n");
+              ok = 0;
+           }
+        }
+        if (ok) {
+           f = openfilex("/ramdisk/gccclosed.exe", FILE_READ);
+           if (!f) {
+              printf("GCC_CLOSED_TOOLCHAIN_FAIL output\n");
+              ok = 0;
+           } else
+              fclose(f);
+        }
+        if (ok && !user_execp("/ramdisk/gccclosed.exe", 0,
+                              "/ramdisk/gccclosed.exe")) {
+           printf("GCC_CLOSED_TOOLCHAIN_FAIL exec\n");
+           ok = 0;
+        }
+        if (ok)
+           printf("GCC_CLOSED_TOOLCHAIN_RUN_OK\n");
      }else
      if (strcmp(u,"gccdrv") == 0){  //-- Run the standalone in-OS gcc driver (gcc.exe):
                                      //-- it spawns cc1/as/ld itself via posix_spawn, then exec.
@@ -1408,7 +1526,8 @@ void console_main(){
       if (kernel_kexeced && strcmp(kernel_cmdline, "kexeced") == 0) {
          printf("KEXEC_BOOT_OK\n");
          serial_puts("KEXEC_BOOT_OK\n");
-         machine_reboot();
+         if (script_load("/icsos/postkexec.bat") == -1)
+            machine_reboot();
       } else
          script_load("/icsos/autoexec.bat");
    }

@@ -58,6 +58,8 @@ extern void exit(int status);
 #define FXN_SPAWN    0xB2
 #define FXN_EXECVE   0xB3
 #define FXN_GETDENTS 0xB4
+#define FXN_MMAP     0xB6
+#define FXN_MUNMAP   0xB7
 
 static long ics_sys(int n, long a, long b, long c, long d, long e)
 {
@@ -233,34 +235,134 @@ int rename(const char *oldpath, const char *newpath)
    return r ? 0 : -1;
 }
 
+struct sdk_mm_map {
+   struct sdk_mm_map *next;
+   char *orig;
+   char *base;
+   size_t length;
+   size_t page_count;
+   unsigned long *free_pages;
+};
+
+static struct sdk_mm_map *sdk_mm_maps;
+
+static int
+sdk_mm_all_free(const struct sdk_mm_map *m)
+{
+   size_t i;
+   for (i = 0; i < m->page_count; i++)
+      if (!(m->free_pages[i >> 6] & (1UL << (i & 63))))
+         return 0;
+   return 1;
+}
+
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, long offset)
 {
-   void *p;
+   size_t page = 4096;
+   size_t pages;
+   size_t rlen;
+   size_t bitmap_words;
+   char *orig;
+   char *base;
+   struct sdk_mm_map *m;
    ssize_t n;
    (void)addr;
    (void)prot;
 
-   if ((flags & MAP_ANONYMOUS) || fd < 0)
-      return malloc(length);
-
-   p = malloc(length);
-   if (!p)
+   if (length == 0)
       return MAP_FAILED;
-   n = pread(fd, p, length, offset);
-   if (n < 0) {
-      free(p);
+
+   /* Anonymous maps go through the kernel so they live in a VA window
+      disjoint from the sbrk malloc arena (required by GCC's zone GC). */
+   if ((flags & MAP_ANONYMOUS) || fd < 0) {
+      void *p = (void *)dexsdk_systemcall(FXN_MMAP, (long)length, (long)flags, 0, 0, 0);
+      if (!p || p == (void *)(long)-1)
+         return MAP_FAILED;
+      return p;
+   }
+
+   pages = (length + page - 1) / page;
+   rlen = pages * page;
+   orig = (char *)malloc(rlen + page);
+   if (!orig)
+      return MAP_FAILED;
+   base = (char *)((((size_t)orig + page - 1) & ~(size_t)(page - 1)));
+
+   if ((flags & MAP_ANONYMOUS) || fd < 0)
+      memset(base, 0, rlen);
+   else {
+      n = pread(fd, base, rlen, offset);
+      if (n < 0) {
+         free(orig);
+         return MAP_FAILED;
+      }
+      if ((size_t)n < rlen)
+         memset(base + n, 0, rlen - (size_t)n);
+   }
+
+   bitmap_words = (pages + 63) / 64;
+   m = (struct sdk_mm_map *)malloc(sizeof(*m));
+   if (!m) {
+      free(orig);
       return MAP_FAILED;
    }
-   if ((size_t)n < length)
-      memset((char *)p + n, 0, length - n);
-   return p;
+   m->free_pages = (unsigned long *)malloc(bitmap_words * sizeof(unsigned long));
+   if (!m->free_pages) {
+      free(m);
+      free(orig);
+      return MAP_FAILED;
+   }
+   memset(m->free_pages, 0, bitmap_words * sizeof(unsigned long));
+   m->next = sdk_mm_maps;
+   m->orig = orig;
+   m->base = base;
+   m->length = rlen;
+   m->page_count = pages;
+   sdk_mm_maps = m;
+   return base;
 }
 
 int munmap(void *addr, size_t length)
 {
-   (void)length;
-   free(addr);
-   return 0;
+   char *a = (char *)addr;
+   char *end;
+   struct sdk_mm_map *m;
+   struct sdk_mm_map *prev;
+   size_t first;
+   size_t last;
+   size_t i;
+
+   if (length == 0)
+      return 0;
+
+   if (dexsdk_systemcall(FXN_MUNMAP, (long)addr, (long)length, 0, 0, 0) == 0)
+      return 0;
+
+   end = a + length;
+
+   m = sdk_mm_maps;
+   prev = 0;
+   while (m) {
+      if (a >= m->base && end <= m->base + m->length) {
+         first = (size_t)(a - m->base) / 4096;
+         last = (size_t)(end - 1 - m->base) / 4096;
+         for (i = first; i <= last; i++)
+            m->free_pages[i >> 6] |= (1UL << (i & 63));
+         if (sdk_mm_all_free(m)) {
+            if (prev)
+               prev->next = m->next;
+            else
+               sdk_mm_maps = m->next;
+            free(m->free_pages);
+            free(m->orig);
+            free(m);
+         }
+         return 0;
+      }
+      prev = m;
+      m = m->next;
+   }
+   return -1;
 }
 
 int mprotect(void *addr, size_t len, int prot)
@@ -556,8 +658,12 @@ void abort(void)
 
 void *calloc(size_t nmemb, size_t size)
 {
-   size_t n = nmemb * size;
-   void *p = malloc(n);
+   size_t n;
+   void *p;
+   if (size != 0 && nmemb > ((size_t)-1) / size)
+      return 0;
+   n = nmemb * size;
+   p = malloc(n);
    if (p) memset(p, 0, n);
    return p;
 }
@@ -1419,12 +1525,16 @@ char *mktemp(char *template)
 
  /* ---- GCC front-end (cc1) support ---------------------------------- */
  /* Unlocked stdio variants: this libc has no per-stream locks, so the
-    "unlocked" forms behave identically to the plain forms. */
+    "unlocked" forms behave identically to the plain forms.  Keep these
+    compatibility fallbacks weak because GCC's bundled libiberty and other
+    GNU applications may provide their own implementations. */
+ __attribute__((weak))
  FILE *fdopen_unlocked(int fd, const char *mode)
  {
     return fdopen(fd, mode);
  }
 
+ __attribute__((weak))
  FILE *fopen_unlocked(const char *path, const char *mode)
  {
     return fopen(path, mode);
@@ -1435,6 +1545,7 @@ char *mktemp(char *template)
     return setvbuf(f, buf, buf ? _IOFBF : _IONBF, buf ? (size_t)BUFSIZ : (size_t)1);
  }
 
+ __attribute__((weak))
  void unlock_std_streams(void)
  {
     /* No per-stream locks; nothing to release. */
@@ -1446,6 +1557,7 @@ char *mktemp(char *template)
     return c;
  }
 
+ __attribute__((weak))
  int strcasecmp(const char *a, const char *b)
  {
     while (*a && *b) {
@@ -1457,6 +1569,7 @@ char *mktemp(char *template)
     return ics_tolower_i((unsigned char)*a) - ics_tolower_i((unsigned char)*b);
  }
 
+ __attribute__((weak))
  int strncasecmp(const char *a, const char *b, size_t n)
  {
     while (n && *a && *b) {
@@ -1469,6 +1582,7 @@ char *mktemp(char *template)
     return 0;
  }
 
+ __attribute__((weak))
  const char *strsignal(int sig)
  {
     static char buf[64];
@@ -1501,6 +1615,7 @@ char *mktemp(char *template)
     return buf;
  }
 
+ __attribute__((weak))
  void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
                int (*compar)(const void *, const void *))
  {

@@ -1781,6 +1781,7 @@ vfs_node *vfs_searchname(const char *name)
         char *parts[40];
         int nparts = 0, i;
         char *tok;
+        vfs_node *cur_dir = vfs_root;
 
         tok = strtok(path, "/");
         while (tok && nparts < 40) {
@@ -1790,12 +1791,35 @@ vfs_node *vfs_searchname(const char *name)
         if (nparts == 0)
             return vfs_root;
 
-        node_ptr = vfs_root->files;
+        node_ptr = cur_dir->files;
         for (i = 0; i < nparts; i++) {
             vfs_node *p;
             vfs_node *found = 0;
             vfs_node *found_dir = 0;
             int last = (i == nparts - 1);
+
+            if (strcmp(parts[i], ".") == 0) {
+                if (last)
+                    return cur_dir;
+                continue;
+            }
+            if (strcmp(parts[i], "..") == 0) {
+                if (cur_dir->path == 0) {
+                    if (last)
+                        return vfs_root;
+                    continue;
+                }
+                cur_dir = cur_dir->path;
+                if (last)
+                    return cur_dir;
+                node_ptr = cur_dir->files;
+                if (node_ptr == VFS_NOT_MOUNTED) {
+                    if (vfs_mountdirectory(cur_dir) == 0)
+                        return 0;
+                    node_ptr = cur_dir->files;
+                }
+                continue;
+            }
 
             for (p = node_ptr; p != 0; p = p->next) {
                 if (!vfs_nameeq(parts[i], p->name))
@@ -1818,6 +1842,7 @@ vfs_node *vfs_searchname(const char *name)
                     if (vfs_mountdirectory(found_dir) == 0)
                         return 0;
                 }
+                cur_dir = found_dir;
                 node_ptr = found_dir->files;
                 continue;
             }

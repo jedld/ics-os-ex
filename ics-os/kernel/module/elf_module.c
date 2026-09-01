@@ -435,7 +435,11 @@ int elf_loadmodule(char *module_name,char *elf_image,
                                  ELF_STACK_COMMIT,
                                  (unsigned long)(PG_WR | PG_USER));
                if (!mapok) printf("elf64: map fail stack\n");
-               if (!mapok) {
+                printf("elf64: %s mapped ok=%d free=%llu/%llu\n",
+                        module_name, mapok,
+                        (unsigned long long)frame_free_count(),
+                        (unsigned long long)frame_total_count());
+                if (!mapok) {
                   printf("elf64: userpd map failed for %s; shared map\n", module_name);
                   userpd_free(upml4);
                   pagedir = pagedir1;
@@ -480,9 +484,9 @@ int elf_loadmodule(char *module_name,char *elf_image,
                         unsigned long long len = 0x1000 - dstoff;
                         unsigned long long avail = (v + fsz) - x;
                         if (len > avail) len = avail;
-                        memcpy((char *)fr + dstoff,
-                               (char *)elf_image + ph64[phi].p_offset + (x - v),
-                               len);
+                        memcpy((char *)KDIRECT((u64)(uintptr)fr) + dstoff,
+                                (char *)elf_image + ph64[phi].p_offset + (x - v),
+                                len);
                      }
                   }
                } else {

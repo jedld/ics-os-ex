@@ -177,6 +177,7 @@ DWORD createthread(void *ptr, void *stack, DWORD stacksize){
    temp->stdout      = current_process->stdout;
    temp->outdev      = current_process->outdev;
    temp->knext       = current_process->knext; 
+   temp->mmap_brk    = current_process->mmap_brk;
    temp->pagedirloc  = current_process->pagedirloc;
     
    /*Set up initial contents of the CPU registers*/
@@ -246,6 +247,7 @@ DWORD createuthread(void *ptr, void *stack, DWORD stacksize){
    temp->stdout      = current_process->stdout;
    temp->outdev      = current_process->outdev;
    temp->knext       = current_process->knext; 
+   temp->mmap_brk    = current_process->mmap_brk;
    temp->pagedirloc  = current_process->pagedirloc;
     
    /*Set up initial contents of the CPU registers*/
@@ -433,6 +435,7 @@ DWORD createprocess(
    parent->nlive++;
 
    temp->knext       = userheap; //set up the programs' initial break
+   temp->mmap_brk    = (char *)(uintptr)MEM_USER_HEAP_LIMIT;
    temp->pagedirloc  = pagedir;  //set the memory page dir
     
    /*Set up the CPU registers*/
@@ -1430,6 +1433,8 @@ void ps_set_affinity(int pid, int cpu){
    and clobber the in-flight task's saved ctx (live RIP/RSP overwrites
    the seeded entry point).  The guard is per-CPU so SMP is safe. */
 static volatile int ps_switchto_in_progress[4];
+static volatile int voluntary_switch;
+volatile int selfhost_cooperative_ready;
 
 
 void ps_switchto(PCB386 *process){
@@ -1500,6 +1505,7 @@ void ps_switchto(PCB386 *process){
 /*Calls the scheduler voluntarily*/
 inline void taskswitch(){
    ps_notimeincrement = 1;
+   voluntary_switch = 1;
    schedule_from_timer();
 };
 
@@ -1509,6 +1515,19 @@ void schedule_from_timer(void){
    PCB386 *readyprocess;
    devmgr_scheduler_extension *cursched;
    static PCB386 *zombie_free;
+   int voluntary = voluntary_switch;
+   voluntary_switch = 0;
+
+   /* Long GCC cc1 runs expose a legacy timer-context race.  Stage-1
+      certification is intentionally uniprocessor and cooperatively
+      scheduled: spawned tools run to exit, then taskswitch() resumes make
+      or the console.  The generated kernel uses normal preemptive SMP. */
+   {
+      extern char kernel_cmdline[];
+        if (!voluntary && selfhost_cooperative_ready &&
+           strcmp(kernel_cmdline, "selfhost-stage1") == 0)
+         return;
+   }
 
    /* If context_load is in progress, the new task's context has been
       fully loaded (RSP, GPRs, RFLAGS all restored) but the flag was

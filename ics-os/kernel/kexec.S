@@ -4,8 +4,10 @@
      rsi = byte count
      rdx = new kernel entry (32-bit startup)
      rcx = Multiboot2 info physical address
-   Copies the image to 0x100000, stashes MB2 magic/info/entry at 0x9000,
-   drops to 32-bit protected mode, and jumps to startup. */
+   Stashes MB2 magic/info/entry at 0x9000, drops to 32-bit protected mode
+   with paging off, then copies the image to 0x100000 and jumps to startup.
+   The copy is done with paging off so it cannot clobber the page tables
+   that live in the destination kernel image. */
 .text
 .globl kexec_tramp
 .globl kexec_tramp_end
@@ -16,13 +18,12 @@ kexec_tramp:
     movq  %rcx, %r9                 /* mb2 info */
     movq  %rsi, %rcx                /* count */
     movq  %rdi, %rsi                /* src */
-    movq  $0x100000, %rdi           /* dst = loaded kernel */
-    cld
-    rep   movsb
 
     movl  $0x36D76289, 0x9000       /* Multiboot2 magic */
     movl  %r9d, 0x9004              /* info */
     movl  %r8d, 0x9008              /* entry */
+    movl  %esi, 0x9010              /* src */
+    movl  %ecx, 0x9014              /* count */
 
     leaq  tramp_gdt(%rip), %rax
     movq  %rax, tramp_gdtr+2(%rip)
@@ -67,6 +68,14 @@ tramp32:
     movl  %cr4, %eax
     andl  $0xFFFFFF5F, %eax         /* PAE | PGE off */
     movl  %eax, %cr4
+
+    /* Paging is off: copy by physical address.  The trampoline itself is
+       at 0x80000, so it is not overwritten by the 0x100000 destination. */
+    movl  $0x100000, %edi
+    movl  0x9010, %esi
+    movl  0x9014, %ecx
+    cld
+    rep   movsb
 
     movl  0x9000, %eax              /* Multiboot2 magic */
     movl  0x9004, %ebx              /* info */

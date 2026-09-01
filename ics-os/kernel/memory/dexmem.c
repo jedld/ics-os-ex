@@ -5,10 +5,9 @@
   Date: 02/03/04 18:06
   Description: This module handles everything that has to do
   with memory, except the high-level memory functions like malloc....
-*/
+ */
 
-
-
+#include "../cpu/spinlock.h"
 
 /* Stop Interrupts */
 inline void stopints(){
@@ -54,9 +53,10 @@ void mem_interpretmemory(mmap *map,int size){
 #define MEM_MIN_FRAME   0x00300000
 #define MEM_MAX_PHYS    0x10000000
 
-#define UPD_POOL_BASE   MEM_USERPD_BASE
-#define UPD_POOL_TOP    MEM_USERPD_END
-#define USERPD_MAXFRAMES ((UPD_POOL_TOP - UPD_POOL_BASE) >> 12)
+/* The fixed 32MiB userpd pool is gone.  Every 4KiB physical frame now comes
+   from the global, scalable frame allocator below (seeded from the Multiboot2
+   E820 map), so user processes can use all available RAM.  The MEM_USERPD_*
+   constants in memlayout.h are kept only for documentation. */
 
 #ifdef __x86_64__
 typedef struct {
@@ -72,8 +72,7 @@ static const mem_range mem_reserved[] = {
    { MEM_USER_ELF_BASE,    MEM_USER_ELF_END,    "user-elf" },
    { MEM_KEXEC_STAGE,      MEM_KEXEC_STAGE_END, "kexec-stage" },
    { MEM_KHEAP_BASE,       MEM_KHEAP_END,       "kheap" },
-    { MEM_USERPD_BASE,      MEM_USERPD_END,      "userpd-pool" },
-   { MEM_USER_WIN_BASE,    MEM_USER_WIN_END,    "user-windows" },
+    { MEM_USER_WIN_BASE,    MEM_USER_WIN_END,    "user-windows" },
 };
 
 int mem_is_reserved(unsigned long phys)
@@ -89,6 +88,142 @@ int mem_is_reserved(unsigned long phys)
 extern void serial_puts(const char *s);
 extern int printf(const char *fmt, ...);
 
+/* ---------------------------------------------------------------------------
+ * Global physical frame allocator (x86-64).
+ *
+ * Replaces the fixed 32MiB userpd pool and the bssEnd "frame stack".  It is an
+ * in-place LIFO free list: each free 4KiB frame stores the physical address of
+ * the next free frame in its first 8 bytes (reachable through the identity
+ * map).  It is seeded once from the Multiboot2 E820 map (frame_init) and then
+ * scales to the full amount of installed RAM.
+ *
+ * Phase 1 (this change) only seeds frames below 4GiB, which the identity map
+ * always covers.  Phase 2 will extend the direct map so frames above 4GiB can
+ * also be seeded for terabyte-scale machines.
+ * ------------------------------------------------------------------------- */
+static u64 frame_head;          /* phys addr of next free frame, 0 = empty  */
+static u64 frame_total;         /* total frames seeded from E820            */
+static u64 frame_free;          /* frames currently in the free list        */
+static int frame_ready;
+static spinlock_t frame_lock;
+
+/* Allocation tracker for double-free / double-alloc diagnostics.
+   Bit N is set iff frame N (physical addr N<<12) is currently allocated.
+   Phase 1 frames are < 4GiB, so this is 4GiB/4KiB/8 = 128KiB of BSS. */
+static u8 frame_allocmap[0x100000000ull / 0x1000 / 8];
+static int frame_dbg;           /* enable alloc/free anomaly reporting      */
+
+static void frame_report(const char *tag, u64 phys)
+{
+   char buf[64];
+   sprintf(buf, "FRAME %s phys=0x%llx free=%llu total=%llu\n",
+           tag, (unsigned long long)phys,
+           (unsigned long long)frame_free,
+           (unsigned long long)frame_total);
+   serial_puts(buf);
+}
+
+/* Pop one free frame.  Returns the physical address, or 0 if exhausted. */
+u64 frame_alloc(void)
+{
+   u64 head;
+   DWORD flags;
+   if (!frame_ready)
+      return 0;
+   storeflags(&flags);
+   stopints();
+   spin_lock(&frame_lock);
+   head = frame_head;
+    if (head) {
+       u64 next = *(volatile u64 *)KDIRECT(head);
+       u64 idx = head >> 12;
+      frame_head = next;
+      frame_free--;
+      if (frame_allocmap[idx >> 3] & (1u << (idx & 7))) {
+         if (!frame_dbg) { frame_dbg = 1; }
+         frame_report("DBL-ALLOC", head);
+      }
+      frame_allocmap[idx >> 3] |= (1u << (idx & 7));
+   }
+   spin_unlock(&frame_lock);
+   startints();
+   restoreflags(flags);
+   return head;
+}
+
+/* Return one frame to the pool.  No-op for 0 / reserved / not-ready. */
+void frame_release(u64 phys)
+{
+   DWORD flags;
+   if (!frame_ready || phys == 0)
+      return;
+   if (mem_is_reserved((unsigned long)phys))
+      return;
+   storeflags(&flags);
+   stopints();
+   spin_lock(&frame_lock);
+   {
+      u64 idx = phys >> 12;
+      if (!(frame_allocmap[idx >> 3] & (1u << (idx & 7)))) {
+         if (!frame_dbg) { frame_dbg = 1; }
+         frame_report("DBL-FREE", phys);
+      }
+  frame_allocmap[idx >> 3] &= ~(1u << (idx & 7));
+    }
+    *(volatile u64 *)KDIRECT(phys) = frame_head;
+    frame_head = phys;
+   frame_free++;
+   spin_unlock(&frame_lock);
+   startints();
+   restoreflags(flags);
+}
+
+u64 frame_free_count(void) { return frame_free; }
+u64 frame_total_count(void) { return frame_total; }
+
+/* Seed the free list from the E820 map (type 1 = RAM). */
+static void frame_init(mmap *map, int size)
+{
+   unsigned char *cursor, *end;
+   frame_head = 0;
+   frame_total = 0;
+   frame_free = 0;
+   frame_dbg = 0;
+   spin_init(&frame_lock);
+  frame_ready = 0;
+   if (map == 0 || size <= 0)
+        return;
+    cursor = (unsigned char *)map;
+   end = cursor + size;
+   while (cursor + sizeof(mmap) <= end) {
+      mmap *entry = (mmap *)cursor;
+      u64 raw_base, raw_len, base, base_end, page;
+      u64 cap = 0x100000000ull;   /* Phase 1: identity map covers low 4GiB */
+      if (entry->size == 0)
+         break;
+      if (entry->type == 1) {
+         raw_base = (u64)entry->base_addr_low | ((u64)entry->base_addr_high << 32);
+         raw_len  = (u64)entry->length_low    | ((u64)entry->length_high    << 32);
+         base     = (raw_base + 0xFFF) & ~0xFFFull;   /* first full page  */
+         base_end = (raw_base + raw_len) & ~0xFFFull; /* last full page   */
+         if (base_end > cap)
+            base_end = cap;
+         for (page = base; page + 0x1000 <= base_end && page < base_end;
+              page += 0x1000) {
+           if (mem_is_reserved((unsigned long)page))
+                continue;
+             /* push frame to the head (highest addresses allocated first) */
+             *(volatile u64 *)KDIRECT(page) = frame_head;
+             frame_head = page;
+            frame_total++;
+            frame_free++;
+         }
+      }
+      cursor += entry->size + 4;
+   }
+   frame_ready = 1;
+}
+
 void mem_layout_dump(void)
 {
    unsigned i;
@@ -96,9 +231,11 @@ void mem_layout_dump(void)
    printf("MEM layout (identity, phys==virt):\n");
    printf("  kernel  %p .. bssEnd=%p  limit=%p\n",
           (void *)MEM_KERNEL_LOAD, (void *)&bssEnd, (void *)MEM_KERNEL_LIMIT);
-   printf("  framestk %p  heap %p-%p  userpd %p-%p\n",
-          (void *)stackbase, (void *)MEM_KHEAP_BASE, (void *)MEM_KHEAP_END,
-          (void *)MEM_USERPD_BASE, (void *)MEM_USERPD_END);
+   printf("  kheap   %p-%p  userwin %p-%p\n",
+          (void *)MEM_KHEAP_BASE, (void *)MEM_KHEAP_END,
+          (void *)MEM_USER_WIN_BASE, (void *)MEM_USER_WIN_END);
+   printf("  frame pool: %llu free / %llu total\n",
+          (unsigned long long)frame_free, (unsigned long long)frame_total);
    for (i = 0; i < sizeof(mem_reserved) / sizeof(mem_reserved[0]); i++)
       printf("  reserve %s  %p-%p\n", mem_reserved[i].name,
              (void *)mem_reserved[i].base, (void *)mem_reserved[i].end);
@@ -112,53 +249,26 @@ DWORD mem_detectmemory(mmap *grub_meminfo , int size ){
    DWORD mem_size = 0;
    unsigned char *cursor;
    unsigned char *end;
-#ifdef __x86_64__
-   extern char bssEnd[];
-   volatile DWORD *fps;
-   uintptr stack_phys = ((uintptr)&bssEnd + 0xFFF) & ~((uintptr)0xFFF);
-
-   if (stack_phys + MEM_FRAME_STACK_SIZE > MEM_KERNEL_LIMIT) {
-      serial_puts("MEM: kernel+frame stack overlaps user ELF window\n");
-      for (;;)
-         __asm__ volatile ("hlt");
-   }
-   fps = (volatile DWORD *)stack_phys;
-#else
-   volatile DWORD *fps = (volatile DWORD *)0x200000UL;
-   stackbase = (DWORD *)0x200000UL;
-#endif
-
-   fps[0]=0;
-
-#ifdef __x86_64__
+  #ifdef __x86_64__
    {
-      DWORD page;
-      DWORD count = 0;
-      (void)grub_meminfo;
-      (void)size;
-      /* Seed mempop from the first page after the kernel slot up to the
-         default 128MiB machine, skipping every reserved range. */
-      for (page = (DWORD)MEM_KERNEL_LIMIT; page < (DWORD)MEM_FREE_SCAN_END;
-           page += 0x1000) {
-         if (mem_is_reserved(page))
-            continue;
-         count++;
-         fps[count] = page;
-         mem_size += 0x1000;
-      }
-      fps[0] = count;
-      stackbase = (DWORD *)(uintptr)fps;
-      totalpages = count;
-      return mem_size;
+      /* Seed the global frame allocator from the real E820 map.  The
+         identity-mapped low 4GiB is always available; Phase 2 extends the
+         direct map so frames above 4GiB can also be used for TB-scale. */
+      frame_init(grub_meminfo, size);
+      totalpages = (DWORD)frame_total;
+      return (DWORD)(frame_total * 0x1000ull);
    }
-#else
-   stackbase[0]=0;
-   if (grub_meminfo == 0 || size <= 0)
-      return 0;
-
-   cursor = (unsigned char*)grub_meminfo;
-   end = cursor + size;
-#endif
+   #else
+   {
+      volatile DWORD *fps = (volatile DWORD *)0x200000UL;
+      stackbase = (DWORD *)0x200000UL;
+      fps[0] = 0;
+      if (grub_meminfo == 0 || size <= 0)
+         return 0;
+      cursor = (unsigned char*)grub_meminfo;
+      end = cursor + size;
+   }
+   #endif
 
    while (cursor + sizeof(mmap) <= end){
       mmap *entry = (mmap*)cursor;
@@ -199,25 +309,37 @@ DWORD mem_detectmemory(mmap *grub_meminfo , int size ){
 
 
 DWORD *mempop(){
+#ifdef __x86_64__
+   /* Global frame allocator: returns a physical 4KiB frame (< 4GiB in Phase 1). */
+   u64 phys = frame_alloc();
+   return (DWORD *)(uintptr)phys;
+#else
    DWORD *ret;
-   if (stackbase[0]==0) 
+   if (stackbase[0]==0)
       return 0; //no more free pages available!
    ret=(DWORD*)stackbase[stackbase[0]];
    stackbase[0]--;
    return ret;
+#endif
 };
 
 void mempush(DWORD mem){
+#ifdef __x86_64__
+   /* Return the frame to the global pool.  (Phase 1 frames are < 4GiB, so a
+      DWORD physical address is sufficient; Phase 2 will widen this to u64.) */
+   frame_release((u64)(unsigned)mem);
+#else
    //make sure that the physcial memory location pushed is within
    //the range of the computer's physical memory
    if (stackbase+0x100000>=mem<memamount-0x1000){
       stackbase[0]++;
       stackbase[stackbase[0]]=mem;
-   }else{ 
-      char temp[255]; 
+   }else{
+      char temp[255];
       printf("memory manager: An invalid value (%s) was tried to be added to the\n");
-      printf("memory manager: free physical pages list.\n");    
+      printf("memory manager: free physical pages list.\n");
    };
+#endif
 };
 
 void clearpagetable(DWORD *pagetable){
@@ -534,19 +656,20 @@ void freelinearloc(void *linearmemory,DWORD *pagedir){  //ATOMIC function
    /* pagetbl=(DWORD*)(pagedir[dirindex]&0xFFFFF000);
    address=pagetbl[pageindex];*/
 #ifdef __x86_64__
-   /* Private userpd frames live in a dedicated pool. mempush() would
-      put them on the kernel free-page stack and double-allocate them
-      against upop(). Process exit reclaims them via userpd_free(). */
-   (void)dirindex;
-   (void)pageindex;
-   (void)pagetbl;
-   (void)temp;
-   if ((address & 1) && !userpd_is_private((void *)(uintptr)(address & 0xFFFFF000)))
-      mempush(address&0xFFFFF000);
-#else
-   if (address&1)
-      mempush(address&0xFFFFF000);
-#endif
+    /* No-op: with the global frame allocator, user frames (PML4/PDPT/PD/PTE
+       tables and heap pages) are reclaimed by userpd_free()'s PML4 walk at
+       process exit.  Freeing them here as well would double-free and corrupt
+       the free list.  The 32-bit path below still returns frames to the
+       fixed frame stack. */
+    (void)dirindex;
+    (void)pageindex;
+    (void)pagetbl;
+    (void)temp;
+    (void)address;
+ #else
+    if (address&1)
+       mempush(address&0xFFFFF000);
+ #endif
    //pagetbl[pageindex]=0;
    // enablepaging();
    dex32_restoreints(flags);
@@ -870,12 +993,55 @@ void *dex32_sbrk(unsigned int amt)
         dex32_restoreints(flags);
         return ((void*)current_process->knext);
         };
-     if (amt%4096==0) pages=amt/4096;
+  if (amt%4096==0) pages=amt/4096;
 
-     /* Commit pages into the process page directory so malloc/sbrk
-        used by the in-OS compiler can grow beyond the initial heap. */
-     dex32_commit((DWORD)ret, pages,
-                  (DWORD*)current_process->pagedirloc, PG_USER | PG_WR);
+   /* Phase 1: user private VA space is limited to the private PD0 (0-1GiB).
+       Growing the heap beyond MEM_USER_VA_END would require splitting the
+       shared boot_pd1..3 2MiB identity pages, which would corrupt the kernel
+       map.  Stop below the stack guard so sbrk can never walk into the
+       process stack (commit + reserve). */
+    {
+       unsigned long long mmap_lim = current_process->mmap_brk
+          ? (unsigned long long)(uintptr)current_process->mmap_brk
+          : (unsigned long long)MEM_USER_HEAP_LIMIT;
+       if ((unsigned long long)ret + (unsigned long long)pages * 4096ULL > mmap_lim)
+       {
+       printf("sbrk DENIED %s: ret=0x%llx pages=%u limit=0x%llx\n",
+              current_process->name, (unsigned long long)ret, pages,
+              mmap_lim);
+       dex32_restoreints(flags);
+       return (void*)-1;
+       };
+    }
+
+   /* Commit pages into the process page directory so malloc/sbrk
+       used by the in-OS compiler can grow beyond the initial heap. */
+    if (!dex32_commit((DWORD)ret, pages,
+                        (DWORD*)current_process->pagedirloc, PG_USER | PG_WR))
+         {
+         unsigned long heapbytes =
+            (unsigned long)(uintptr)current_process->knext -
+            (unsigned long)(uintptr)userheap;
+         printf("sbrk FAIL %s: want %u pages heap=%luKiB free=%llu/%llu\n",
+                 current_process->name, pages, heapbytes>>10,
+                 (unsigned long long)frame_free_count(),
+                 (unsigned long long)frame_total_count());
+         dex32_restoreints(flags);
+         return (void*)-1;
+         };
+
+      /* Log pool pressure as a user heap grows (power-of-two KiB marks). */
+      {
+         unsigned long hb =
+            (unsigned long)(uintptr)current_process->knext -
+            (unsigned long)(uintptr)userheap;
+         if (hb >= (1UL<<20) && (hb & (hb-1)) == 0)
+            printf("sbrk: %s heap=%luKiB free=%llu/%llu\n",
+                    current_process->name, hb>>10,
+                    (unsigned long long)frame_free_count(),
+                    (unsigned long long)frame_total_count());
+      }
+
 
 #ifdef __x86_64__
      /* userpd_map_page() already zeros each private frame. Do NOT
@@ -900,6 +1066,99 @@ void *dex32_sbrk(unsigned int amt)
      return (void*)ret;
    };
 
+/* Anonymous mmap: grow down from mmap_brk so GGC pages are not in the
+   sbrk/malloc arena.  File-backed maps stay in the SDK. */
+void *dex32_mmap(unsigned long length, unsigned long flags,
+                 unsigned long a3, unsigned long a4, unsigned long a5)
+{
+#ifdef __x86_64__
+     DWORD irq;
+     unsigned long pages, i, va, start, heap;
+     (void)flags;
+     (void)a3;
+     (void)a4;
+     (void)a5;
+
+     if (length == 0)
+        return (void *)(uintptr)-1;
+     pages = (length + 4095UL) / 4096UL;
+     length = pages * 4096UL;
+
+     dex32_stopints(&irq);
+     if (!current_process->mmap_brk)
+        current_process->mmap_brk = (char *)(uintptr)MEM_USER_HEAP_LIMIT;
+     start = (unsigned long)(uintptr)current_process->mmap_brk;
+     heap = (unsigned long)(uintptr)current_process->knext;
+     if (start < length + 0x100000UL || start - length < heap + 0x100000UL) {
+        dex32_restoreints(irq);
+        return (void *)(uintptr)-1;
+     }
+     va = (start - length) & ~0xFFFUL;
+     for (i = 0; i < pages; i++) {
+        if (!userpd_map_page((u64 *)(uintptr)current_process->pagedirloc,
+                             (unsigned long long)va + (unsigned long long)i * 0x1000ULL,
+                             PG_USER | PG_WR)) {
+           unsigned long j;
+           for (j = 0; j < i; j++)
+              userpd_unmap_page((u64 *)(uintptr)current_process->pagedirloc,
+                                (unsigned long long)va + (unsigned long long)j * 0x1000ULL);
+           dex32_restoreints(irq);
+           return (void *)(uintptr)-1;
+        }
+        {
+           unsigned long pva = va + i * 0x1000UL;
+           __asm__ __volatile__("invlpg (%0)" :: "r"(pva) : "memory");
+        }
+     }
+     current_process->mmap_brk = (char *)(uintptr)va;
+     dex32_restoreints(irq);
+     return (void *)(uintptr)va;
+#else
+     (void)length; (void)flags; (void)a3; (void)a4; (void)a5;
+     return (void *)(uintptr)-1;
+#endif
+}
+
+int dex32_munmap(unsigned long addr, unsigned long length,
+                 unsigned long a3, unsigned long a4, unsigned long a5)
+{
+#ifdef __x86_64__
+     DWORD irq;
+     unsigned long pages, i, heap, mmap_lim;
+     (void)a3;
+     (void)a4;
+     (void)a5;
+
+     if (length == 0)
+        return 0;
+     if (addr & 0xFFFUL)
+        return -1;
+     pages = (length + 4095UL) / 4096UL;
+     heap = (unsigned long)(uintptr)current_process->knext;
+     mmap_lim = current_process->mmap_brk
+        ? (unsigned long)(uintptr)current_process->mmap_brk
+        : (unsigned long)MEM_USER_HEAP_LIMIT;
+     /* Only unmap pages in the anonymous mmap window. */
+     if (addr < mmap_lim || addr + pages * 4096UL > MEM_USER_HEAP_LIMIT)
+        return -1;
+     if (addr < heap)
+        return -1;
+
+     dex32_stopints(&irq);
+     for (i = 0; i < pages; i++) {
+        if (!userpd_unmap_page((u64 *)(uintptr)current_process->pagedirloc,
+                               (unsigned long long)addr + (unsigned long long)i * 0x1000ULL)) {
+           dex32_restoreints(irq);
+           return -1;
+        }
+     }
+     dex32_restoreints(irq);
+     return 0;
+#else
+     (void)addr; (void)length; (void)a3; (void)a4; (void)a5;
+     return -1;
+#endif
+}
 
 void dex32_copy_on_write(DWORD *directory)
 {
@@ -1069,19 +1328,19 @@ void *dex32_commit(DWORD virtualaddr,DWORD pages,DWORD *pagedir,DWORD pattb)
         (heap/sbrk growth) to fresh private frames. Kernel identity map or
         already-mapped regions are left alone. */
      if (pagedir && pagedir != (DWORD *)(uintptr)pagedir1) {
-        int pi;
-        for (pi = 0; pi < pages; pi++)
-           if (!userpd_map_page((u64 *)(uintptr)pagedir,
-                                (unsigned long long)(virtualaddr + (unsigned long long)pi * 0x1000),
-                                (unsigned long)pattb))
-              break;
-     }
-     (void)i;
-     (void)temp;
-     (void)temp2;
-     (void)pg;
-     (void)flags;
-     return ret;
+         int pi;
+         for (pi = 0; pi < pages; pi++)
+            if (!userpd_map_page((u64 *)(uintptr)pagedir,
+                                 (unsigned long long)(virtualaddr + (unsigned long long)pi * 0x1000),
+                                 (unsigned long)pattb))
+               return 0; /* pool exhausted: not all pages committed */
+      }
+      (void)i;
+      (void)temp;
+      (void)temp2;
+      (void)pg;
+      (void)flags;
+      return ret;
  #else
      storeflags(&flags);
      stopints();
@@ -1253,7 +1512,7 @@ void dex32_restore_identity_map(void)
 
 /* Physical range reserved for per-process user page tables + PTE frames.
    It sits BELOW the identity-mapped user window [0x08000000,0x10000000)
-   (syscallstack 0x09000000 / userheap 0x0A000000 / userstackloc 0x0E000000)
+    (syscallstack 0x09000000 / userheap 0x0A000000 / userstackloc 0x40000000)
    and is carved out of the shared mempop() freelist (seeded
    [0x00400000,0x08000000)), with mem_detectmemory() told to skip it so the
    kernel allocator never double-allocates a pool frame.
@@ -1270,103 +1529,42 @@ void dex32_restore_identity_map(void)
     page tables, twice over. The heap commit is kept small (see
     ELF_HEAP_COMMIT in elf_module.c) and grows via sbrk so two processes fit. */
 
-/* Dedicated pool allocator.
+/* Frame sourcing for the user page-table allocator.
  *
- * The free state is a BITMAP in .bss (1024 bytes for 8192 frames), NOT
- * metadata stored inside the frames. The previous design kept a next-free
- * pointer in each frame's first 8 bytes; because the same frames also hold
- * the live PML4/PDPT/PD page-table pages and the process's code/stack/heap
- * pages, any stray kernel write into the pool range (identity-mapped) could
- * clobber the allocator's own bookkeeping and silently hand out a wrong or
- * already-used frame -> wild-RIP GPF. A bitmap keeps the allocator state
- * disjoint from the allocated memory, the standard approach for physical
- * frame allocation. upop() always memsets/memcpy's a frame before use, so
- * stale frame contents are irrelevant. */
-static u8 up_bitmap[USERPD_MAXFRAMES / 8] = {0};
-/* Owner table lives in the first 16 pool frames (64KiB), not in .bss:
-   a large .bss array overlapped mempop()'s stack (boot hang in
-   device manager). Physical 0x06000000 is identity-mapped and carved
-   out of mempop. The free-page stack follows kernel bssEnd. */
-#define UP_META_FRAMES  16
-#define UP_OWNER_BASE   UPD_POOL_BASE
-static int up_inited = 0;
-
-static u64 *up_owner_tbl(void)
-{
-   return (u64 *)(uintptr)UP_OWNER_BASE;
-}
-
-static int up_valid_frame(unsigned long long p)
-{
-   return (p >= UPD_POOL_BASE && p < UPD_POOL_TOP);
-}
+ * upop()/upush() are thin wrappers over the global physical frame allocator
+ * (frame_alloc()/frame_release()), so private user frames (PML4/PDPT/PD/PTE
+ * tables and sbrk heap pages) now come from the full E820-seeded pool instead
+ * of a fixed 32MiB carve-out.  There is no per-frame owner table: a process's
+ * frames are reclaimed by userpd_free() walking its PML4, and
+ * userpd_is_private() simply distinguishes a private PML4 from the shared
+ * kernel one (pagedir1).  The in-place free list keeps its next-free pointer
+ * in a frame's first 8 bytes; that is safe because the kernel only ever writes
+ * a frame after it has been allocated (removed from the free list), never
+ * while the frame is still free. */
 
 int userpd_is_private(const void *pml4)
 {
-   unsigned long long p = (unsigned long long)(uintptr)pml4;
-   /* Meta frames are the owner table, not a process PML4. */
-   if (p < UPD_POOL_BASE + ((unsigned long long)UP_META_FRAMES << 12))
-      return 0;
-   return up_valid_frame(p);
+   return (pml4 != 0) && (pml4 != (const void *)(uintptr)pagedir1);
 }
 
 int userpd_used(void)
 {
-   int i, n = 0;
-   if (!up_inited) return 0;
-   for (i = UP_META_FRAMES; i < USERPD_MAXFRAMES; i++)
-      if (up_bitmap[i >> 3] & (1u << (i & 7)))
-         n++;
-   return n;
+   /* Frames currently handed out (allocated) from the global pool. */
+   return (int)(frame_total - frame_free);
 }
 
-static void userpd_init_frames(void)
-{
-   int i;
-   if (up_inited) return;
-   memset(up_bitmap, 0, sizeof(up_bitmap));
-   memset((void *)(uintptr)UP_OWNER_BASE, 0, USERPD_MAXFRAMES * sizeof(u64));
-   for (i = 0; i < UP_META_FRAMES; i++)
-      up_bitmap[i >> 3] |= (1u << (i & 7));
-   up_inited = 1;
-}
-
-static void up_set_owner(DWORD *fr, u64 owner)
-{
-   unsigned long long p = (unsigned long long)(uintptr)fr;
-   unsigned long long idx;
-   if (!up_valid_frame(p)) return;
-   idx = (p - UPD_POOL_BASE) >> 12;
-   if (idx < UP_META_FRAMES) return;
-   up_owner_tbl()[idx] = owner;
-}
-
-/* Pop a physical frame from the dedicated pool. Returns 0 when empty.
-   Scans highest-first to match the previous ordering (deterministic CR3s). */
+/* Pop a physical frame from the global pool. Returns 0 when empty. */
 static DWORD *upop(void)
 {
-   int i;
-   userpd_init_frames();
-   for (i = USERPD_MAXFRAMES - 1; i >= UP_META_FRAMES; i--) {
-      int byte = i >> 3, bit = i & 7;
-      if (!(up_bitmap[byte] & (1u << bit))) {
-         up_bitmap[byte] |= (1u << bit);
-         return (DWORD *)(uintptr)(UPD_POOL_BASE + (unsigned long long)i * 0x1000ULL);
-      }
-   }
-   return 0;   /* pool empty */
+   u64 phys = frame_alloc();
+   return (DWORD *)(uintptr)phys;
 }
 
-/* Return a physical frame to the dedicated pool (only if it is ours). */
+/* Return a physical frame to the global pool. */
 static void upush(DWORD *fr)
 {
-   unsigned long long p = (unsigned long long)(uintptr)fr;
-   unsigned long long idx;
-   if (!up_valid_frame(p)) return;
-   idx = (p - UPD_POOL_BASE) >> 12;
-   if (idx < UP_META_FRAMES) return;
-   up_bitmap[idx >> 3] &= ~(1u << (idx & 7));
-   up_owner_tbl()[idx] = 0;
+   if (fr)
+      frame_release((u64)(uintptr)fr);
 }
 
 /* Map one 4KiB page (vaddr) in a user PML4 to a fresh, zeroed private
@@ -1380,59 +1578,120 @@ static void upush(DWORD *fr)
    page inside a 2MiB block we replace that block's 2MiB page entry (PS)
    with a private 4KiB PTE table on first touch, then map the page. */
 u64 *userpd_map_page(u64 *pml4, unsigned long long vaddr, unsigned long attb)
-{
-   int pmi = (int)((vaddr >> 39) & 0x1FF);   /* PML4 index   (GiB)  */
-   int pi  = (int)((vaddr >> 30) & 0x1FF);   /* PDPT index   (1GiB) */
-   int bi  = (int)((vaddr >> 21) & 0x1FF);   /* 2MiB block   within PD */
-   int gi  = (int)((vaddr >> 12) & 0x1FF);   /* 4KiB page    within block */
-   u64 pe, de;
-   u64 *pdpt, *pd, *pte, *fr;
+ {
+    int pmi = (int)((vaddr >> 39) & 0x1FF);   /* PML4 index   (GiB)  */
+    int pi  = (int)((vaddr >> 30) & 0x1FF);   /* PDPT index   (1GiB) */
+    int bi  = (int)((vaddr >> 21) & 0x1FF);   /* 2MiB block   within PD */
+    int gi  = (int)((vaddr >> 12) & 0x1FF);   /* 4KiB page    within block */
+    u64 pe, de;
+    u64 *pdpt, *pd, *pte, *fr;
+    u64 *pml4v = (u64 *)KDIRECT((u64)(uintptr)pml4 & 0x000FFFFFFFFF000ULL);
 
-   pe = pml4[pmi];
-   if (!(pe & 1) || (pe & 0x80)) return 0;   /* PML4[pmi] bad */
-   pdpt = (u64 *)(pe & 0x000FFFFFFFFF000ULL);
+    /* Phase 1: only the private PD0 (0-1GiB) may be split.  Mapping a VA in
+       1-4GiB would replace a shared 2MiB identity PTE in boot_pd1..3 with a
+       private 4KiB PTE table, corrupting the kernel identity map.  Refuse
+       anything beyond the private PD0. */
+    if (vaddr >= 0x40000000ULL || pmi != 0 || pi != 0)
+       return 0;
 
-   de = pdpt[pi];
-   if (!(de & 1) || (de & 0x80)) return 0;   /* PDPT[pi] bad */
-   pd = (u64 *)(de & 0x000FFFFFFFFF000ULL);
+    pe = pml4v[pmi];
+    if (!(pe & 1) || (pe & 0x80)) return 0;   /* PML4[pmi] bad */
+    pdpt = (u64 *)KDIRECT(pe & 0x000FFFFFFFFF000ULL);
 
-   /* Resolve the 2MiB block: an absent entry or a 2MiB identity page (PS)
-      becomes a fresh private 4KiB PTE table; an existing 4KiB PTE table is
-      reused. (upop() returns a frame pointer or NULL, never a PTE.) */
-   {
-      u64 be = pd[bi];
-      if (be & 1 && !(be & 0x80)) {
-         /* already a private 4KiB PTE table: reuse */
-      } else {
-         u64 *t = upop();
-         if (!t) return 0;   /* pool empty (PTE table) */
-         memset(t, 0, 0x1000);
-         up_set_owner((DWORD *)t, (u64)(uintptr)pml4);
-         pd[bi] = (u64)(uintptr)t | 0x03ULL;
-         /* Drop any leftover 2MiB identity TLB for this block. INVLPG
-            of one address in the large page invalidates that entry. */
-         {
-            unsigned long long block = vaddr & ~0x1FFFFFULL;
-            __asm__ __volatile__("invlpg (%0)" :: "r"((unsigned long)block) : "memory");
+    de = pdpt[pi];
+    if (!(de & 1) || (de & 0x80)) return 0;   /* PDPT[pi] bad */
+    pd = (u64 *)KDIRECT(de & 0x000FFFFFFFFF000ULL);
+
+    /* Resolve the 2MiB block: an absent entry or a 2MiB identity page (PS)
+       becomes a fresh private 4KiB PTE table; an existing 4KiB PTE table is
+       reused. (upop() returns a frame pointer or NULL, never a PTE.) */
+    {
+       u64 be = pd[bi];
+       if (be & 1 && !(be & 0x80)) {
+          /* already a private 4KiB PTE table: reuse */
+       } else {
+       u64 *t = upop();
+            if (!t) {
+               static int up_empty_log = 0;
+               if (up_empty_log < 8) {
+                  up_empty_log++;
+                  printf("userpd: POOL EMPTY (PTE table) va=0x%llx free=%llu/%llu\n",
+                         vaddr,
+                         (unsigned long long)frame_free_count(),
+                         (unsigned long long)frame_total_count());
+               }
+               return 0;   /* pool empty (PTE table) */
+            }
+            memset(KDIRECT((u64)(uintptr)t), 0, 0x1000);
+           pd[bi] = (u64)(uintptr)t | 0x03ULL;
+          /* Drop any leftover 2MiB identity TLB for this block. INVLPG
+             of one address in the large page invalidates that entry. */
+          {
+             unsigned long long block = vaddr & ~0x1FFFFFULL;
+             __asm__ __volatile__("invlpg (%0)" :: "r"((unsigned long)block) : "memory");
+          }
+       }
+    }
+    pte = (u64 *)KDIRECT(pd[bi] & 0x000FFFFFFFFF000ULL);
+
+    {
+       u64 e = pte[gi];
+       if (e & 1) return (u64 *)(e & 0x000FFFFFFFFF000ULL); /* already mapped */
+        fr = upop();
+         if (!fr) {
+            static int up_page_empty_log = 0;
+            if (up_page_empty_log < 8) {
+               up_page_empty_log++;
+               printf("userpd: POOL EMPTY (4KiB page) va=0x%llx free=%llu/%llu\n",
+                      vaddr,
+                      (unsigned long long)frame_free_count(),
+                      (unsigned long long)frame_total_count());
+            }
+            return 0;   /* pool empty (4KiB page) */
          }
-      }
-   }
-   pte = (u64 *)(pd[bi] & 0x000FFFFFFFFF000ULL);
+         memset(KDIRECT((u64)(uintptr)fr), 0, 0x1000);
+        /* A mapped leaf page MUST be present: force PG_PRESENT. Callers pass
+          only the additional attributes (PG_WR|PG_USER|...), so OR in the
+          Present bit here or the page would be invisible to the CPU. */
+       pte[gi] = (u64)(uintptr)fr | (attb | PG_PRESENT);
+       return fr;
+    }
+ }
 
-   {
-      u64 e = pte[gi];
-      if (e & 1) return (u64 *)(e & 0x000FFFFFFFFF000ULL); /* already mapped */
-      fr = upop();
-      if (!fr) return 0;   /* pool empty (4KiB page) */
-      memset(fr, 0, 0x1000);
-      up_set_owner((DWORD *)fr, (u64)(uintptr)pml4);
-      /* A mapped leaf page MUST be present: force PG_PRESENT. Callers pass
-         only the additional attributes (PG_WR|PG_USER|...), so OR in the
-         Present bit here or the page would be invisible to the CPU. */
-      pte[gi] = (u64)(uintptr)fr | (attb | PG_PRESENT);
-      return fr;
-   }
-}
+/* Unmap one private 4KiB leaf.  Returns 1 if the PTE was absent or released,
+   0 if the walk failed (shared 2MiB page, bad PML4, VA out of PD0). */
+int userpd_unmap_page(u64 *pml4, unsigned long long vaddr)
+ {
+    int pmi = (int)((vaddr >> 39) & 0x1FF);
+    int pi  = (int)((vaddr >> 30) & 0x1FF);
+    int bi  = (int)((vaddr >> 21) & 0x1FF);
+    int gi  = (int)((vaddr >> 12) & 0x1FF);
+    u64 pe, de, e;
+    u64 *pdpt, *pd, *pte;
+    u64 *pml4v;
+
+    if (vaddr >= 0x40000000ULL || pmi != 0 || pi != 0 || !pml4)
+       return 0;
+
+    pml4v = (u64 *)KDIRECT((u64)(uintptr)pml4 & 0x000FFFFFFFFF000ULL);
+    pe = pml4v[pmi];
+    if (!(pe & 1) || (pe & 0x80)) return 0;
+    pdpt = (u64 *)KDIRECT(pe & 0x000FFFFFFFFF000ULL);
+    de = pdpt[pi];
+    if (!(de & 1) || (de & 0x80)) return 0;
+    pd = (u64 *)KDIRECT(de & 0x000FFFFFFFFF000ULL);
+    de = pd[bi];
+    if (!(de & 1) || (de & 0x80))
+       return 0; /* shared 2MiB identity: do not split/unmap from munmap */
+    pte = (u64 *)KDIRECT(de & 0x000FFFFFFFFF000ULL);
+    e = pte[gi];
+    if (e & 1) {
+       frame_release(e & 0x000FFFFFFFFF000ULL);
+       pte[gi] = 0;
+       __asm__ __volatile__("invlpg (%0)" :: "r"((unsigned long)vaddr) : "memory");
+    }
+    return 1;
+ }
 
 /* Allocate a private PML4 mirroring the kernel's hierarchy (startup.S):
    PML4[0]->PDPT ; PDPT[0]->PD0 (private copy) ; PDPT[1..3]->boot_pd1..3.
@@ -1440,28 +1699,52 @@ u64 *userpd_map_page(u64 *pml4, unsigned long long vaddr, unsigned long attb)
    kernel image/heap/BSS stay reachable; user-window 2MiB blocks are later
    replaced by 4KiB PTE tables by userpd_map_page(). */
 u64 *userpd_create(void)
-{
-   extern u64 boot_pd0[], boot_pd1[], boot_pd2[], boot_pd3[];
-   u64 *pml4, *pdpt, *pd0;
-   pml4 = upop();
-   if (!pml4) return 0;
-   memset(pml4, 0, 0x1000);
-   up_set_owner((DWORD *)pml4, (u64)(uintptr)pml4);
-   pdpt = upop();
-   if (!pdpt) { upush((DWORD *)pml4); return 0; }
-   memset(pdpt, 0, 0x1000);
-   up_set_owner((DWORD *)pdpt, (u64)(uintptr)pml4);
-   pd0 = upop();
-   if (!pd0) { upush((DWORD *)pdpt); upush((DWORD *)pml4); return 0; }
-   memcpy(pd0, boot_pd0, 0x1000);       /* copy 512 x 2MiB identity entries */
-   up_set_owner((DWORD *)pd0, (u64)(uintptr)pml4);
-   pdpt[0] = (u64)(uintptr)pd0  | 0x03ULL;
-   pdpt[1] = (u64)(uintptr)boot_pd1 | 0x03ULL;
-   pdpt[2] = (u64)(uintptr)boot_pd2 | 0x03ULL;
-   pdpt[3] = (u64)(uintptr)boot_pd3 | 0x03ULL;
-   pml4[0] = (u64)(uintptr)pdpt | 0x03ULL;
-   return pml4;
-}
+ {
+    extern u64 boot_pd0[], boot_pd1[], boot_pd2[], boot_pd3[], boot_pdpt_high[];
+    u64 *pml4, *pdpt, *pd0;
+    u64 *pml4v, *pdptv, *pd0v;
+     pml4 = upop();
+     if (!pml4) return 0;
+     pml4v = (u64 *)KDIRECT((u64)(uintptr)pml4);
+     memset(pml4v, 0, 0x1000);
+     pdpt = upop();
+     if (!pdpt) { upush((DWORD *)pml4); return 0; }
+     pdptv = (u64 *)KDIRECT((u64)(uintptr)pdpt);
+     memset(pdptv, 0, 0x1000);
+     pd0 = upop();
+     if (!pd0) { upush((DWORD *)pdpt); upush((DWORD *)pml4); return 0; }
+     pd0v = (u64 *)KDIRECT((u64)(uintptr)pd0);
+      memcpy(pd0v, KDIRECT((u64)(uintptr)boot_pd0), 0x1000);
+      /* Keep only the 2MiB identity mappings the kernel itself needs while
+         running under this private PML4 (syscall/interrupt entry): kernel
+         image 0-4MiB and the kernel-managed identity range 32-128MiB
+         (kheap, legacy mempop frames, userpd pool).  Every other block in
+         the private PD0 is user-private VA (ELF segments, heap, stack,
+         syscall stack) and must be mapped as fresh 4KiB pages.  Leaving 2MiB
+         identity pages there forces userpd_map_page() to split large pages,
+         and stale user-TLB entries for the old 2MiB identity translation can
+         then route accesses to the wrong physical frame. */
+      {
+         int bi;
+         for (bi = 0; bi < 512; bi++) {
+            int keep = 0;
+            if (bi >= 0 && bi <= 1) keep = 1;
+            if (bi >= 16 && bi <= 63) keep = 1;
+            if (!keep)
+               pd0v[bi] = 0;
+         }
+      }
+      pdptv[0] = (u64)(uintptr)pd0  | 0x03ULL;
+    pdptv[1] = (u64)(uintptr)boot_pd1 | 0x03ULL;
+    pdptv[2] = (u64)(uintptr)boot_pd2 | 0x03ULL;
+    pdptv[3] = (u64)(uintptr)boot_pd3 | 0x03ULL;
+ /* Share the kernel high direct map so kernel frame/page-table management
+       stays reachable through KDIRECT() while this PML4 is installed.
+       KDIRECT_BASE 0xFFFF800000000000 is PML4 index 256. */
+     pml4v[0]  = (u64)(uintptr)pdpt | 0x03ULL;
+     pml4v[256] = (u64)(uintptr)boot_pdpt_high | 0x03ULL;
+    return pml4;
+ }
 
 /* Map the whole user window [base, base+size) with private frames.
    Returns 1 on success, 0 if the pool ran dry (some pages may be mapped). */
@@ -1475,38 +1758,164 @@ int userpd_map_region(u64 *pml4, unsigned long long base, unsigned long long siz
    return 1;
 }
 
-/* Free a private PML4. The page-table walk below is best-effort; the
-   owner bitmap is authoritative — every frame billed to this PML4
-   returns to the pool, including the PML4 itself. */
-void userpd_free(u64 *pml4)
+#ifdef __x86_64__
+static u64 gpf_probe_va, gpf_probe_cr3, gpf_probe_rip;
+static int gpf_probe_ready;
+
+void gpf_probe_store(unsigned long va, unsigned long cr3, unsigned long rip)
 {
-   unsigned long long owner;
-   int i, n = 0;
-   if (!pml4 || !up_valid_frame((unsigned long long)(uintptr)pml4))
-      return;
-   owner = (unsigned long long)(uintptr)pml4;
-
-   /* Never free tables that are still installed as CR3. */
-   {
-      unsigned long long cr3;
-      __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
-      if ((cr3 & ~0xFFFULL) == (owner & ~0xFFFULL) && pagedir1) {
-         unsigned long kcr3 = (unsigned long)(uintptr)pagedir1;
-         __asm__ __volatile__("movq %0, %%cr3" :: "r"(kcr3) : "memory");
-      }
-   }
-
-   userpd_init_frames();
-   for (i = UP_META_FRAMES; i < USERPD_MAXFRAMES; i++) {
-      if (up_owner_tbl()[i] == owner) {
-         up_bitmap[i >> 3] &= ~(1u << (i & 7));
-         up_owner_tbl()[i] = 0;
-         n++;
-      }
-   }
-   printf("userpd: freed %d frames, used %d/%d\n",
-          n, userpd_used(), USERPD_MAXFRAMES);
+   gpf_probe_va  = (u64)va;
+   gpf_probe_cr3 = (u64)cr3;
+   gpf_probe_rip = (u64)rip;
+   gpf_probe_ready = 1;
 }
+#endif
+
+/* Free a private PML4 by walking its page tables and returning every
+    frame that was allocated for it to the global pool via frame_release().
+   Only the private tables are freed: pml4, the private PDPT (pml4[0]),
+   the private PD0 (pdpt[0]), any 4KiB PTE tables userpd_map_page() created
+   in PD0, and the 4KiB leaf frames those PTE tables map.  The shared
+   boot_pd1..3 (pdpt[1..3]) and the 2MiB PS identity pages in PD0 are NOT
+   freed — they are the kernel's own mappings. */
+void userpd_free(u64 *pml4)
+ {
+    u64 *pdpt, *pd0, *pte;
+    u64 *pml4v, *pdptv, *pd0v, *ptev;
+    unsigned long long cr3;
+    int i, j, freed = 0;
+
+    if (!pml4)
+       return;
+
+    pml4v = (u64 *)KDIRECT((u64)(uintptr)pml4 & 0x000FFFFFFFFF000ULL);
+
+    /* Never free tables that are still installed as CR3. */
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
+    if ((cr3 & ~0xFFFULL) == ((unsigned long long)(uintptr)pml4 & ~0xFFFULL)) {
+       if (!pagedir1)
+          return;   /* cannot switch away; abort to protect live tables */
+       __asm__ __volatile__("movq %0, %%cr3" :: "r"((unsigned long)(uintptr)pagedir1) : "memory");
+    }
+
+#ifdef __x86_64__
+    if (gpf_probe_ready && gpf_probe_cr3 == (u64)(uintptr)pml4) {
+        unsigned long long va = (unsigned long long)gpf_probe_va;
+        unsigned long long pmi = (va >> 39) & 511;
+        unsigned long long pi  = (va >> 30) & 511;
+        unsigned long long bi  = (va >> 21) & 511;
+        unsigned long long p4  = (va >> 12) & 511;
+        unsigned long long pml4e, pdpte, pde, pte;
+        unsigned long long pdptaddr, pdaddr, ptaddr;
+        u64 *pdptp, *pdp, *ptep;
+        int walked = 0;
+
+        printf("GPFPROBE: ready va=0x%llx rip=0x%llx pml4=0x%llx\n",
+               va, (unsigned long long)gpf_probe_rip,
+               (unsigned long long)(uintptr)pml4);
+        pml4e = pml4v[pmi];
+        printf("GPFPROBE: PML4[%llu]=0x%llx\n", pmi, pml4e);
+        if (!(pml4e & 1)) {
+           printf("GPFPROBE: PML4 absent\n");
+           walked = 1;
+        } else {
+           pdptaddr = pml4e & 0x000FFFFFFFFF000ULL;
+           if (pdptaddr == 0 || pdptaddr >= 0x100000000ULL) {
+              printf("GPFPROBE: PML4 phys bad=0x%llx\n", pdptaddr);
+              walked = 1;
+           } else {
+              pdptp = (u64 *)KDIRECT(pdptaddr);
+              pdpte = pdptp[pi];
+              printf("GPFPROBE: PDPT[%llu]=0x%llx\n", pi, pdpte);
+              if (!(pdpte & 1)) {
+                 printf("GPFPROBE: PDPT absent\n");
+                 walked = 1;
+              } else if (pdpte & 0x80) {
+                 printf("GPFPROBE: PDPT 1GiB page\n");
+                 walked = 1;
+              } else {
+                 pdaddr = pdpte & 0x000FFFFFFFFF000ULL;
+                 if (pdaddr == 0 || pdaddr >= 0x100000000ULL) {
+                    printf("GPFPROBE: PDPT phys bad=0x%llx\n", pdaddr);
+                    walked = 1;
+                 } else {
+                    pdp = (u64 *)KDIRECT(pdaddr);
+                    pde = pdp[bi];
+                    printf("GPFPROBE: PD[%llu]=0x%llx\n", bi, pde);
+                    if (!(pde & 1)) {
+                       printf("GPFPROBE: PD absent\n");
+                       walked = 1;
+                    } else if (pde & 0x80) {
+                       printf("GPFPROBE: PD 2MiB page\n");
+                       walked = 1;
+                    } else {
+                       ptaddr = pde & 0x000FFFFFFFFF000ULL;
+                       if (ptaddr == 0 || ptaddr >= 0x100000000ULL) {
+                          printf("GPFPROBE: PD phys bad=0x%llx\n", ptaddr);
+                          walked = 1;
+                       } else {
+                          ptep = (u64 *)KDIRECT(ptaddr);
+                          pte = ptep[p4];
+                          printf("GPFPROBE: PT[%llu]=0x%llx\n", p4, pte);
+                          walked = 1;
+                       }
+                    }
+                 }
+              }
+           }
+        }
+        if (walked)
+           gpf_probe_ready = 0;
+     }
+ #endif
+
+     /* pml4[0] is the only entry userpd_create() sets. */
+     if (!(pml4v[0] & 1)) {
+       frame_release((u64)(uintptr)pml4);
+       return;
+    }
+    pdpt = (u64 *)(pml4v[0] & 0x000FFFFFFFFF000ULL);
+    pdptv = (u64 *)KDIRECT((u64)(uintptr)pdpt);
+
+    /* pdpt[0] is the private PD0; pdpt[1..3] are the shared boot_pd1..3. */
+    pd0 = 0;
+    if ((pdptv[0] & 1) && !(pdptv[0] & 0x80)) {
+       pd0 = (u64 *)(pdptv[0] & 0x000FFFFFFFFF000ULL);
+       pd0v = (u64 *)KDIRECT((u64)(uintptr)pd0);
+    }
+
+    /* Walk the private PD0. A present, non-PS entry is a 4KiB PTE table we
+       allocated; free its leaf frames (present, non-PS) then the table.  A
+       present PS entry is a shared 2MiB identity page — leave it alone. */
+    if (pd0) {
+       for (i = 0; i < 512; i++) {
+          u64 de = pd0v[i];
+          if ((de & 1) && !(de & 0x80)) {
+             pte = (u64 *)(de & 0x000FFFFFFFFF000ULL);
+             ptev = (u64 *)KDIRECT((u64)(uintptr)pte);
+             for (j = 0; j < 512; j++) {
+                u64 le = ptev[j];
+                if ((le & 1) && !(le & 0x80)) {
+                   frame_release(le & 0x000FFFFFFFFF000ULL);
+                   freed++;
+                }
+             }
+             frame_release((u64)(uintptr)pte);
+             freed++;
+          }
+       }
+       frame_release((u64)(uintptr)pd0);
+       freed++;
+    }
+    frame_release((u64)(uintptr)pdpt);
+    frame_release((u64)(uintptr)pml4);
+    freed += 2;
+
+    printf("userpd: freed %d frames, free %llu/%llu\n",
+           freed,
+           (unsigned long long)frame_free_count(),
+           (unsigned long long)frame_total_count());
+ }
 
 void mem_init()
 {

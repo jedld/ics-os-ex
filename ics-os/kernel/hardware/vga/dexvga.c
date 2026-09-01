@@ -1160,6 +1160,9 @@ static void set_plane(unsigned p)
 	outportb(VGA_SEQ_DATA, pmask);
 }
 
+void write_text(char *str, int x, int y, int color, int size);
+void write_char(unsigned char ch, int x, int y, int color, int size);
+
 /*****************************************************************************
 *****************************************************************************/
 static void draw_x(void)
@@ -1176,7 +1179,7 @@ static void draw_x(void)
 		g_write_pixel((g_wd - g_ht) / 2 + y, y, 1);
 		g_write_pixel((g_ht + g_wd) / 2 - y, y, 2);
 	}
-        write_text("Welcome to ICS OS!",10,10,30);
+		write_text("Welcome to ICS OS!",10,10,30,0);
 	getch();
 }
 

@@ -60,14 +60,16 @@ void GPFhandler64(struct gpf_info *fi, unsigned long saved_rax, unsigned long sa
        what = (err & 1) ? "base/limit" : "segment-index";
 
     {
-       char line[160];
-       sprintf(line,
-               "GPF64: err=0x%x(%s) rip=0x%llx cr2=0x%llx proc=%s\n",
-               (unsigned)err, what, fi->rip, fi->cr2,
-               current_process ? current_process->name : "?");
-       serial_puts(line);
-    }
-    serial_puts("GPF64 rax=");
+       char line[220];
+        sprintf(line,
+                "GPF64: err=0x%x(%s) rip=0x%llx cr2=0x%llx cs=0x%x ss=0x%x cr3=0x%llx proc=%s\n",
+                (unsigned)err, what, fi->rip, fi->cr2,
+                (unsigned)fi->cs, (unsigned)fi->ss,
+                (unsigned long long)fi->cr3,
+                current_process ? current_process->name : "?");
+         serial_puts(line);
+     }
+     serial_puts("GPF64 rax=");
     {
        int i;
        for (i = 60; i >= 0; i -= 4) {
@@ -92,13 +94,15 @@ void GPFhandler64(struct gpf_info *fi, unsigned long saved_rax, unsigned long sa
           serial_putc((char)(x < 10 ? '0' + x : 'a' + x - 10));
        }
     }
-    if (current_process && current_process->processid != 0) {
-       /* User-process fault: recover like the page-fault path. exc_recover()
-          sets dex32_child_faulted and calls exit(1), which kills the faulted
-          child and context-switches to its parent, abandoning this wrapper's
-          stack frame (the gpfwrapper iretq is never reached). The parent's
-          waitpid then sees the crash instead of the child spinning. */
-       serial_puts("\nGPF64: user fault -> killing process, resuming parent\n");
+   if (current_process && current_process->processid != 0) {
+        extern void gpf_probe_store(unsigned long va, unsigned long cr3, unsigned long rip);
+        gpf_probe_store((unsigned long)saved_rax, (unsigned long)fi->cr3, (unsigned long)fi->rip);
+        /* User-process fault: recover like the page-fault path. exc_recover()
+           sets dex32_child_faulted and calls exit(1), which kills the faulted
+           child and context-switches to its parent, abandoning this wrapper's
+           stack frame (the gpfwrapper iretq is never reached). The parent's
+           waitpid then sees the crash instead of the child spinning. */
+        serial_puts("\nGPF64: user fault -> killing process, resuming parent\n");
        gpf_busy = 0;   /* allow a later fault (e.g. the fallback run) to dump */
        exc_recover();
        /* not reached: exc_recover() -> exit(1) switched away */
@@ -174,6 +178,9 @@ void exc_dumpflags(DEX32_DDL_INFO *output, DWORD flags)
 };
 
 
+
+volatile unsigned long pf64_rip;
+volatile unsigned long pf64_cr2;
 
 //show the contents of the CPU registers and other information
 void exc_showdump(DWORD location,int type,DWORD pf_info)
@@ -258,11 +265,11 @@ void exc_showdump(DWORD location,int type,DWORD pf_info)
    /* Always copy a compact dump to COM1 so headless qemu tests can see
       faults. Do not wait for a key — kb_pause() hangs -display none. */
    {
-      char line[160];
-      sprintf(line, "%s process=%s eip=0x%x loc=0x%x\n",
-              fault_type, current_process->name,
-              current_process->regs.EIP, location);
-      serial_puts(line);
+      char line[192];
+        sprintf(line, "%s process=%s eip=0x%x rip=0x%lx cr2=0x%lx\n",
+                fault_type, current_process->name,
+                current_process->regs.EIP, pf64_rip, pf64_cr2);
+       serial_puts(line);
    }
 
    Dex32SetActiveDDL(beforeout);
@@ -283,12 +290,43 @@ void exc_showdump(DWORD location,int type,DWORD pf_info)
 
 // the core function that handles page faults, it is also
 // dirctly linked to the virtual memory manager of the operating system
-DWORD pagefaulthandler(DWORD location, DWORD fault_info, unsigned long rip)
+DWORD pagefaulthandler(unsigned long location, DWORD fault_info,
+                        unsigned long rip, unsigned long *saved_regs)
   {
-   DWORD ret,mm,i;
-   static volatile int pf_busy = 0;
-   stopints();
-   pfoccured=1;//set the pfoccured register of the task scheduler
+    DWORD ret,mm,i;
+    static volatile int pf_busy = 0;
+    stopints();
+    pfoccured=1;//set the pfoccured register of the task scheduler
+    pf64_rip = rip;
+    pf64_cr2 = location;
+   {
+       char line[256];
+       unsigned long cr3 = 0, cr4 = 0;
+       __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
+       __asm__ __volatile__("movq %%cr4, %0" : "=r"(cr4));
+       sprintf(line, "PF64 cr2=0x%lx rip=0x%lx err=0x%x cr3=0x%lx cr4=0x%lx\n",
+               location, rip, (unsigned)fault_info, cr3, cr4);
+       serial_puts(line);
+    }
+    if (saved_regs) {
+        char line[256];
+        unsigned long *usrsp = (unsigned long *)saved_regs[19];
+        sprintf(line,
+                "PF64 regs rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx "
+                "rsi=0x%lx rdi=0x%lx rbp=0x%lx ursp=0x%lx\n",
+                saved_regs[14], saved_regs[13], saved_regs[12],
+                saved_regs[11], saved_regs[10], saved_regs[9],
+                saved_regs[8], saved_regs[19]);
+        serial_puts(line);
+        if (usrsp) {
+           sprintf(line,
+                   "PF64 stack [rsp]=0x%lx [rsp+8]=0x%lx [rsp+16]=0x%lx "
+                   "[rsp+24]=0x%lx [rsp+32]=0x%lx [rsp+40]=0x%lx\n",
+                   usrsp[0], usrsp[1], usrsp[2], usrsp[3],
+                   usrsp[4], usrsp[5]);
+           serial_puts(line);
+        }
+    }
 
 #ifdef __x86_64__
    if (pf_busy) {

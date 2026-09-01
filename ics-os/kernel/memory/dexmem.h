@@ -189,6 +189,17 @@ extern void setpagedir(DWORD *dir);
 inline void startints();
 inline void stopints();
 
+/* Global physical frame allocator (x86-64). Every 4KiB frame — kernel and
+   user — is handed out by frame_alloc() and returned by frame_release().
+   See the implementation and Phase-1/Phase-2 notes in memory/dexmem.c. */
+extern u64 frame_alloc(void);
+extern void frame_release(u64 phys);
+extern u64 frame_free_count(void);
+extern u64 frame_total_count(void);
+#ifdef __x86_64__
+extern void gpf_probe_store(unsigned long va, unsigned long cr3, unsigned long rip);
+#endif
+
 /*=================================Prototype definitions here==============================*/
 
 WORD addgdt(DWORD base,DWORD limit,BYTE attb1,BYTE attb2);
@@ -210,6 +221,10 @@ void *dex32_reserveblock(DWORD virtualaddr,int amt,
     DWORD *pagecount,DWORD *pagedir,DWORD attb);
 void *dex32_reserve(DWORD virtualaddr,DWORD pages,DWORD *pagedir,DWORD attb);
 void *dex32_sbrk(unsigned int amt);
+void *dex32_mmap(unsigned long length, unsigned long flags,
+                 unsigned long a3, unsigned long a4, unsigned long a5);
+int dex32_munmap(unsigned long addr, unsigned long length,
+                 unsigned long a3, unsigned long a4, unsigned long a5);
 void freelinearloc(void *linearmemory,DWORD *pagedir);
 void freemultiple(void *linearmemory,DWORD *pagedir,DWORD pages);
 void freeuserheap(DWORD *pagedir);
@@ -235,6 +250,7 @@ extern u64 *userpd_create(void);
 int userpd_map_region(u64 *pml4, unsigned long long base,
                       unsigned long long size, unsigned long attb);
 u64 *userpd_map_page(u64 *pml4, unsigned long long vaddr, unsigned long attb);
+int userpd_unmap_page(u64 *pml4, unsigned long long vaddr);
 void userpd_free(u64 *pml4);
 int userpd_is_private(const void *pml4);
 int userpd_used(void);

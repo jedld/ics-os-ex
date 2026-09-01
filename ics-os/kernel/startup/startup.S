@@ -39,6 +39,9 @@ boot_pd2:
 .globl boot_pd3
 boot_pd3:
     .skip 4096
+.globl boot_pdpt_high
+boot_pdpt_high:
+    .skip 4096
 .align 16
 boot_stack:
     .skip 65536
@@ -141,6 +144,34 @@ multiboot_entry:
     popl %ecx
     loop 1b
 
+   /* High canonical direct map: 0xFFFF800000000000 + phys for low 4GiB.
+       The kernel uses this alias to touch physical frames/page tables while
+       CR3 may point at a user PML4 whose low identity mappings have been
+       privatized.  The 64-bit base 0xFFFF800000000000 is the sign-extension
+       of 48-bit 0x800000000000, whose PML4 index is 256, not 511. */
+    xorl %eax, %eax
+    movl $boot_pdpt_high, %edi
+    movl $512, %ecx
+3:
+    movl %eax, (%edi)
+    addl $8, %edi
+    loop 3b
+    movl $boot_pd0, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt_high
+    movl $boot_pd1, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt_high + 8
+    movl $boot_pd2, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt_high + 16
+    movl $boot_pd3, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pdpt_high + 24
+    movl $boot_pdpt_high, %eax
+    orl  $0x03, %eax
+    movl %eax, boot_pml4 + 8 * 256
+
     movb $'2', 0xb8002
     movb $0x0F, 0xb8003
 
@@ -184,6 +215,20 @@ long_mode_start:
     movw %ax, %gs
 
     lgdt gdtr64
+
+    /* Force 4-level paging. Hosts that expose LA57 may boot the guest with
+       CR4.LA57=1; the current kernel page tables are 4-level.  Clear LA57
+       before reloading CR3 so the PML4 high direct map (PML4[256]) is used.
+       Phase 2 will rebuild these tables as true 5-level for TB-scale RAM. */
+    movq %cr4, %rax
+    andq $(~(1 << 16)), %rax
+    movq %rax, %cr4
+
+    /* Reload CR3 now that LME is active: the same physical PML4 was loaded
+       while the CPU was in 32-bit PAE mode.  Reloading makes the CPU treat
+       it as a 4-level PML4 and flushes stale 3-level TLB state. */
+    movabs $boot_pml4, %rax
+    mov %rax, %cr3
 
     /* SYSCALL MSRs are programmed after the kernel stack is live (see
        below, after zero_bss) so a #GP from WRMSR is diagnosable. */

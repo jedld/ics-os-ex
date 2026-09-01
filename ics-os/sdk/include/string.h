@@ -20,6 +20,8 @@ char *strpbrk(const char *s1, const char *s2);
 char *strtok(char *s, const char *delim);
 char *strdup(const char *s);
 char *strerror(int errnum);
+char *stpcpy(char *d, const char *s);
+char *stpncpy(char *d, const char *s, size_t n);
 void *memcpy(void *d, const void *s, size_t n);
 void *memmove(void *d, const void *s, size_t n);
 void *memset(void *d, int c, size_t n);

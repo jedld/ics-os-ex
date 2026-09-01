@@ -1,13 +1,9 @@
 /* Helpers so in-OS TinyCC can compile/link the kernel (missing GCC builtins). */
-void stopints(void)
-{
-   __asm__ volatile ("cli");
-}
 
-void startints(void)
-{
-   __asm__ volatile ("sti");
-}
+/* TinyCC's internal linker does not consume the kernel GNU linker script.
+   This object is linked after the kernel C objects, making this marker the
+   upper bound used by startup.S when clearing the combined C BSS. */
+char bssEnd[1];
 
 int __sync_fetch_and_add(int *p, int v)
 {

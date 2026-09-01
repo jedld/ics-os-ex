@@ -28,6 +28,7 @@
 
 #include "../dextypes.h"
 #include "../types.h"
+#include "../memory/memlayout.h"
 #include "../vfs/vfs_core.h"
 #include "../console/dex_DDL.h"
 #include "../cpu/context.h"
@@ -237,6 +238,11 @@ typedef struct _PCB386 {
    char *imagesource;  //records the full path of the source file
 
    char *knext;        //holds the location of the programs' break (Or the end of the heap)
+
+   /* Anonymous mmap bump pointer.  Grows down from MEM_USER_HEAP_LIMIT so
+      GGC/mmap pages stay out of the sbrk malloc arena.  NULL means "use
+      MEM_USER_HEAP_LIMIT" until the first mmap. */
+   char *mmap_brk;
 
    char *environment;  //holds the location of the environment variables
     

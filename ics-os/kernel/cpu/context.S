@@ -82,30 +82,20 @@ context_load:
     movq CTX_RBX(%rdi), %rbx
     movq CTX_RFLAGS(%rdi), %rax
     testq %rax, %rax
-    jz 2f
-    /* Force IF=1 on resume as well (belt-and-suspenders for any context
-       saved with IF=0 before the save-side fix, and for the first switch of
-       a freshly-created task). */
+     jz 2f
+     /* Force IF=1 on resume as well (belt-and-suspenders for any context
+         saved with IF=0 before the save-side fix, and for the first switch of
+         a freshly-created task). */
     orl $0x200, %eax
-    pushq %rax
-    popfq
-    2:
-    /* The new task's context is fully loaded.  We must clear
-       ctx_load_in_progress so that the NEXT timer tick can
-       schedule.  But we cannot clear it here and then ret: a timer
-       IRQ in the window between the clear and the ret would run
-       schedule_from_timer, see ctx_load_in_progress==0, and call
-       ps_switchto — which would save the new task's live RIP
-       (inside context_load) over its seeded entry point.
-
-       Instead, clear the flag from the new task's first timer tick:
-       schedule_from_timer checks and clears ctx_load_in_progress
-       before proceeding.  This is safe because the new task is
-       already running (RIP is about to be set to the entry point). */
-   movl $0, ctx_load_in_progress
-   movq CTX_RIP(%rdi), %rax
-   pushq %rax
-   ret
+     pushq %rax
+     popfq
+     2:
+     /* Clear before ret; self-host stage 1 suppresses timer preemption, and
+         regular scheduling retains the existing narrow-window guard. */
+    movl $0, ctx_load_in_progress
+     movq CTX_RIP(%rdi), %rax
+     pushq %rax
+     ret
 
 fpu_save:
     /* rdi may be unaligned inside PCB — copy via aligned scratch */

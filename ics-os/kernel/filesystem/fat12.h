@@ -36,7 +36,7 @@
 
 typedef unsigned char	uint8_t;	/* or #include <stdint.h> */
 typedef unsigned short	uint16_t;	/* Note: multi-byte values are little-endian */
-typedef unsigned long	uint32_t;
+typedef unsigned int	uint32_t;	/* MUST be 32-bit: on-disk dirent layout */
 
 #define FAT12_EOC 0x0FFF
 #define FAT16_EOC 0xFFFF
@@ -173,6 +173,11 @@ typedef struct __attribute__((packed)) _fat_dirent               	/* Warning: th
 		uint16_t st_clust;           	/* starting cluster */
         uint32_t file_size;          	/* in bytes */
 } fatdirentry;                         /* 32 bytes total */
+
+/* Compile-time guard: fatdirentry must match the 32-byte on-disk layout
+   (a wider uint32_t, e.g. 'unsigned long' on x86-64, silently breaks
+   directory scanning and entry alignment). */
+typedef char fatdirentry_size_check[(sizeof(fatdirentry) == 32) ? 1 : -1];
 
 
 typedef struct __attribute__((packed)) _attrib                   /* Warning: this struct must be packed */

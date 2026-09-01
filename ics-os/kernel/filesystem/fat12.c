@@ -1338,15 +1338,15 @@ DWORD fat_createfile(vfs_node *f,BPB *bpbblock,int id)
          
          
          foundslot=1; //successfully found a slot in the directory
-         break;
+          break;
       };
       
    ;};
    
    if (!foundslot) //no slot was found??
-   {
-      if (fat_addsectors(parentdir,bpbblock,1,id) != 1)
-      {
+    {
+       if (fat_addsectors(parentdir,bpbblock,1,id) != 1)
+       {
 #ifdef WRITE_DEBUG
          printf("not enough space to add sectors to directory!!\n");
 #endif

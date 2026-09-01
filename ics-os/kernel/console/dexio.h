@@ -59,9 +59,9 @@ typedef int (*fnptr_t)(unsigned c, void **helper);
 #define		PR_LZ	0x40	/* pad left with '0' instead of ' ' */
 #define		PR_FP	0x80	/* pointers are far */
 
-/* largest number handled is 2^32-1, lowest radix handled is 8.
-2^32-1 in base 8 has 11 digits (add 5 for trailing NUL and for slop) */
-#define		PR_BUFLEN	16
+/* largest number handled is 2^64-1, lowest radix handled is 8.
+2^64-1 in base 8 has 22 digits (add trailing NUL and slop) */
+#define		PR_BUFLEN	32
 
 //defined in video.asm
 //extern void clrscr(void);

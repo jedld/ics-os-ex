@@ -410,7 +410,7 @@ while (ptr!=0)
            //obtain the pointer to the export directory
            export_directory = ptr->exporttable;
            printf("Base of library at %s\n",itoa(ptr->baseaddress,temp,16));
-           if (export_directory->AddressOfNames == 0 ) return 1;
+           if (export_directory->AddressOfNames == 0 ) return;
            printf("Function listing of %s\n",modulename);      
            fxn_names=(DWORD*)((DWORD)export_directory->AddressOfNames+ptr->baseaddress);
            fxn_addr=(DWORD*)((DWORD)export_directory->AddressOfFunctions+ptr->baseaddress);
@@ -426,7 +426,7 @@ while (ptr!=0)
          };
      ptr=ptr->next;
   };
- return 0; //failed to find the module
+   return; //failed to find the module
 };
 
 //this function is used if the image cannot be placed in the prefered

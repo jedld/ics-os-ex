@@ -246,10 +246,11 @@ int vprintf(const char *fmt, va_list args){
 #define		PR_WS	0x20	/* PR_SG set and num was < 0 */
 #define		PR_LZ	0x40	/* pad left with '0' instead of ' ' */
 #define		PR_FP	0x80	/* pointers are far */
+#define		PR_PTR	0x100	/* pointer conversion (%p) */
 
-/* largest number handled is 2^32-1, lowest radix handled is 8.
-2^32-1 in base 8 has 11 digits (add 5 for trailing NUL and for slop) */
-#define		PR_BUFLEN	16
+/* largest number handled is 2^64-1, lowest radix handled is 8.
+2^64-1 in base 8 has 22 digits (add trailing NUL and slop) */
+#define		PR_BUFLEN	32
 
 int do_printf(const char *fmt, va_list args, fnptr_t fn,FILE *f, void *ptr){
    unsigned state, flags, radix, actual_wd, count, given_wd;
@@ -342,8 +343,11 @@ int do_printf(const char *fmt, va_list args, fnptr_t fn,FILE *f, void *ptr){
 				/* FALL THROUGH */
 /* xxx - far pointers (%Fp, %Fn) not yet supported */
 			case 'x':
-			case 'p':
 			case 'n':
+				radix = 16;
+				goto DO_NUM;
+			case 'p':
+				flags |= PR_PTR;
 				radix = 16;
 				goto DO_NUM;
 			case 'd':
@@ -356,7 +360,9 @@ int do_printf(const char *fmt, va_list args, fnptr_t fn,FILE *f, void *ptr){
 			case 'o':
 				radix = 8;
 /* load the value to be printed. l=long=32 bits: */
-DO_NUM:				if(flags & PR_32)
+DO_NUM:				if(flags & PR_PTR)
+					num = (unsigned long)va_arg(args, void *);
+				else if(flags & PR_32)
 					num = va_arg(args, unsigned long);
 /* h=short=16 bits (signed or unsigned) */
 				else if(flags & PR_16)
@@ -594,8 +600,11 @@ int do_sprintf(const char *fmt, va_list args, sfnptr_t fn, void **ptr){
 				/* FALL THROUGH */
 /* xxx - far pointers (%Fp, %Fn) not yet supported */
 			case 'x':
-			case 'p':
 			case 'n':
+				radix = 16;
+				goto DO_NUM;
+			case 'p':
+				flags |= PR_PTR;
 				radix = 16;
 				goto DO_NUM;
 			case 'd':
@@ -608,7 +617,9 @@ int do_sprintf(const char *fmt, va_list args, sfnptr_t fn, void **ptr){
 			case 'o':
 				radix = 8;
 /* load the value to be printed. l=long=32 bits: */
-DO_NUM:				if(flags & PR_32)
+DO_NUM:				if(flags & PR_PTR)
+					num = (unsigned long)va_arg(args, void *);
+				else if(flags & PR_32)
 					num = va_arg(args, unsigned long);
 /* h=short=16 bits (signed or unsigned) */
 				else if(flags & PR_16)
@@ -827,83 +838,123 @@ void *sbrk(int amt){
 };
 
 char *buckets[32] = {0};
-int bucket2size[32] = {0};
+size_t bucket2size[32] = {0};
 
-static int size2bucket(int size){
-   int rv = 0x1f;
-   int bit = ~0x10;
-   int i;
+static int size2bucket(size_t size){
+    int b;
 
-   if (size < 4) 
-      size = 4;
-   size = (size+3)&~3;
-   
-   for (i=0; i<5; i++){
-      if (bucket2size[rv&bit] >= size)
-         rv &= bit;
-      bit>>=1;
-   }
-   return rv;
+    if (size < 16)
+       size = 16;
+    for (b=0; b<32; b++){
+       if (bucket2size[b] >= size)
+          return b;
+    }
+    return -1;
 }
 
 static void init_buckets(void){
-   unsigned b;
-   for (b=0; b<32; b++)
-      bucket2size[b] = (1<<b);
+    unsigned b;
+    bucket2size[0] = 16;
+    for (b=1; b<32; b++)
+       bucket2size[b] = bucket2size[b-1] * 2;
 }
 
-
-/* 16-byte header before user payload keeps SysV malloc alignment. */
-#define MALLOC_HDR 16
+/* 32-byte header before the user payload.  The free-list pointer lives in
+   the header, not in the payload, so freeing a chunk can never leave a stale
+   allocator pointer inside memory that has already been handed to the caller.
+   The header size is a multiple of 16 so sbrk-aligned chunks keep the payload
+   at a 16-byte boundary. */
+#define MALLOC_HDR 32
+#define MALLOC_MAGIC 0xA11CC8EDu
+struct malloc_hdr {
+   int bucket;
+   unsigned int magic;
+   int pad[2];
+   size_t size;
+   void *next;
+};
 
 void free(void *ptr){
-   int b;
-   if (ptr == 0)
-      return;
-   b = *(int *)((char *)ptr - MALLOC_HDR);
-   *(char **)ptr = buckets[b];
-   buckets[b] =(char*) ptr;
+    struct malloc_hdr *h;
+    int b;
+    if (ptr == 0)
+       return;
+    h = (struct malloc_hdr *)((char *)ptr - MALLOC_HDR);
+    b = h->bucket;
+    if (b < 0 || b >= 32 || h->magic != MALLOC_MAGIC)
+       return;
+    h->magic = 0;
+    h->next = buckets[b];
+    buckets[b] = (char *)h;
 }
 
 void *realloc(void *ptr, size_t size) {
-   char *newptr;
-   int oldsize;
-   if (ptr == 0)
-      return malloc(size);
-   oldsize = bucket2size[*(int *)((char *)ptr - MALLOC_HDR)];
-   if (size <= (size_t)oldsize)
-      return ptr;
-   newptr = (char *)malloc(size);
-   memcpy(newptr, ptr, (unsigned int)oldsize);
-   free(ptr);
-   return newptr;
+    char *newptr;
+    struct malloc_hdr *h;
+    size_t oldsize;
+    if (ptr == 0)
+       return malloc(size);
+    h = (struct malloc_hdr *)((char *)ptr - MALLOC_HDR);
+    if (h->bucket < 0 || h->bucket >= 32 || h->magic != MALLOC_MAGIC)
+       return 0;
+    oldsize = h->size;
+    if (size == 0){
+       free(ptr);
+       return 0;
+    }
+    if (size <= oldsize)
+       return ptr;
+    newptr = (char *)malloc(size);
+    if (newptr == 0)
+       return 0;
+    memcpy(newptr, ptr, oldsize);
+    free(ptr);
+    return newptr;
 }
 
 void *malloc(size_t size){
-   char *rv;
-   int b;
+    char *rv;
+    struct malloc_hdr *h;
+    int b;
 
-   if (bucket2size[0] == 0)
-      init_buckets();
+    if (bucket2size[0] == 0)
+       init_buckets();
 
-   b = size2bucket((int)size);
-   if (buckets[b]){
-      rv = buckets[b];
-      buckets[b] = *(char **)rv;
-      return rv;
-   }
+    b = size2bucket(size);
+    if (b < 0)
+       return 0;
+    if (buckets[b]){
+       h = (struct malloc_hdr *)buckets[b];
+       buckets[b] = (char *)h->next;
+       if (h->bucket != b) {
+          buckets[b] = (char *)h;
+          return 0;
+       }
+       h->magic = MALLOC_MAGIC;
+       h->next = 0;
+       return (char *)h + MALLOC_HDR;
+    }
 
-   size = (size_t)bucket2size[b] + MALLOC_HDR;
-   rv = (char *)sbrk((int)size);
+    size = bucket2size[b] + MALLOC_HDR;
+    if (size > 0x7fffffff)
+       return 0;
+    rv = (char *)sbrk((int)size);
+    if (rv == 0 || rv == (char *)-1)
+       return 0;
 
-   *(int *)rv = b;
-   rv += MALLOC_HDR;
-   return rv;
+    h = (struct malloc_hdr *)rv;
+    h->bucket = b;
+    h->magic = MALLOC_MAGIC;
+    h->pad[0] = h->pad[1] = 0;
+    h->size = bucket2size[b];
+    h->next = 0;
+    rv += MALLOC_HDR;
+    return rv;
 }
 
 
 /************String management***********/
-void *memmove (void *dst, const void *src,unsigned int count){
+void *memmove (void *dst, const void *src, size_t count){
    void *ret = dst;
 
    if (dst <= src || (char*)dst >= ((char*)src + count)) {
@@ -929,7 +980,7 @@ void *memmove (void *dst, const void *src,unsigned int count){
    return(ret);
 };
 
-void *memset (void *dst,int val,unsigned int count){
+void *memset (void *dst,int val, size_t count){
    unsigned char *p = dst;
    /* Word-fill large blocks — TinyCC ONE_SOURCE does huge zeroing. */
    if (count >= 16 && ((unsigned long)p & 7) == 0 && (val & 0xff) == 0) {
@@ -958,7 +1009,7 @@ void *memchr(const void *s, int c, size_t n){
    return 0;
 }
 
-void *memcpy (void * dst, const void * src,unsigned int count){
+void *memcpy (void * dst, const void * src, size_t count){
    unsigned char *d = dst;
    const unsigned char *s = src;
    if (count >= 16 &&

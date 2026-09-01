@@ -43,7 +43,8 @@ struct gpf_info {
 };
 void GPFhandler(DWORD address);
 void GPFhandler64(struct gpf_info *fi, unsigned long rax, unsigned long rcx);
-DWORD pagefaulthandler(DWORD location, DWORD fault_info, unsigned long rip);
+DWORD pagefaulthandler(unsigned long location, DWORD fault_info,
+                       unsigned long rip, unsigned long *saved_regs);
 void exc_doublefault(unsigned long rip, unsigned long cs,
                      unsigned long rflags, unsigned long cr2);
 void exc_showdump(DWORD location,int type,DWORD pf_info);

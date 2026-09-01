@@ -33,8 +33,10 @@
  *  | sharedmem        |
  *  | syscall stack    | 0x09000000
  *  | user heap        | 0x0A000000  grows up
- *  | user stack       | 0x0E000000  grows down
- *  +------------------+ 0x10000000  MEM_LMODE_BASE
+ *  +------------------+ 0x10000000  MEM_LMODE_BASE (identity map only)
+ *  ...
+ *  | user stack       | 0x3FF00000-0x40000000 grows down (private PD0 VA)
+ *  +------------------+ 0x40000000  MEM_USER_VA_END
  *  | lmode / modules  |
  *  +------------------+ 0xFE000000  PCI MMIO (PCD|PWT)
  *
@@ -51,6 +53,12 @@
 
 #define MEM_PAGE_SHIFT         12
 #define MEM_PAGE_SIZE          0x1000UL
+
+/* High canonical direct map of the low 4GiB (see startup.S).  Kernel code
+   may dereference physical frames/page tables through this alias even when
+   CR3 points at a user PML4 whose low identity mappings are privatized. */
+#define KDIRECT_BASE           0xFFFF800000000000ULL
+#define KDIRECT(phys)          ((void *)(KDIRECT_BASE | ((phys) & 0xFFFFFFFFULL)))
 
 #define MEM_LOW_END            0x00100000UL
 #define MEM_GDT                0x00001000UL
@@ -89,7 +97,17 @@
 #define MEM_LINUX_USER_BASE    0x08000000UL
 #define MEM_SYSCALL_STACK      0x09000000UL
 #define MEM_USER_HEAP          0x0A000000UL
-#define MEM_USER_STACK         0x0E000000UL
+/* User VA space for sbrk/mmap is the private PD0 (0-1GiB).  The stack sits
+   at the top of that range so the heap can grow from 0x0A000000 up to nearly
+   1GiB instead of colliding with a stack at 0x0E000000.  MEM_USER_WIN_END
+   remains the identity-mapped physical window reserved from the frame pool;
+   MEM_USER_VA_END is the private user VA limit. */
+#define MEM_USER_VA_END        0x40000000UL
+#define MEM_USER_STACK         0x40000000UL
+#define MEM_USER_STACK_GUARD   (MEM_USER_STACK - 0x300000UL) /* 1MiB commit + 2MiB reserve */
+#define MEM_USER_HEAP_LIMIT    MEM_USER_STACK_GUARD
+/* sbrk grows up from MEM_USER_HEAP; anonymous mmap grows down from
+   MEM_USER_HEAP_LIMIT.  They fail rather than meet. */
 #define MEM_USER_WIN_BASE      0x08000000UL
 #define MEM_USER_WIN_END       0x10000000UL
 

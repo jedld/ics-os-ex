@@ -67,6 +67,8 @@
 #define FXN_URING_ENTER 0xAE
 #define FXN_FSTATFD  0xAF
 #define FXN_FDFILE   0xB0
+#define FXN_MMAP     0xB6
+#define FXN_MUNMAP   0xB7
 
 /*============DEX constants for files===========*/
 #define FILE_READ 0
@@ -271,10 +273,10 @@ int printf(const char *fmt, ...);
 unsigned long dexsdk_systemcall(int function_number,long p1,long p2,
                   long p3,long p4,long p5);
 void *malloc(size_t size);
-void *memmove (void *dst, const void *src,unsigned int count);
-void *memset (void *dst,int val,unsigned int count);
+void *memmove (void *dst, const void *src, size_t count);
+void *memset (void *dst,int val, size_t count);
 void *memchr(const void *s, int c, size_t n);
-void *memcpy (void * dst, const void * src,unsigned int count);
+void *memcpy (void * dst, const void * src, size_t count);
 int memcmp(const void *s1, const void *s2, size_t n);
 void *realloc(void *ptr, size_t size);
 char *strcpy(char *to, const char *from);
