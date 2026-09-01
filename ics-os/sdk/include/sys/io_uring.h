@@ -73,6 +73,7 @@ struct io_uring {
    uint32_t *cq_tail;
    uint32_t *cq_mask;
    struct io_uring_cqe *cqes;
+   unsigned sqe_tail;
 };
 
 int io_uring_setup(unsigned entries, struct io_uring_params *p);

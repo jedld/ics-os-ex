@@ -34,6 +34,7 @@ int vfs_nextfileid = 1;
 vfs_node *vfs_root=0,*homedir; //lists the pointer to the root and the current working
                        //directory for the current user
 sync_sharedvar vfs_busy; //used for the busy waiting loops inside the vfs
+static sync_sharedvar vfs_mount_busy;
 
 
 //Prototype of some functions
@@ -64,6 +65,7 @@ void vfs_init()
     homedir = vfs_root;
     file_globalopen=0;
     memset(&vfs_busy,0,sizeof(vfs_busy));
+    memset(&vfs_mount_busy,0,sizeof(vfs_mount_busy));
 };
 
 
@@ -480,13 +482,35 @@ int vfs_freedirectory(vfs_node *ptr)
     return 1;
 };
 
+static int vfs_unmount_locked(vfs_node *node);
+
 int vfs_unmount_device(const char *location)
 {
-     vfs_node *node=vfs_searchname(location);
-     vfs_unmount(node);
+    int retval;
+    vfs_node *node;
+
+    sync_entercrit(&vfs_mount_busy);
+    sync_entercrit(&vfs_busy);
+    node=vfs_searchname(location);
+    retval=vfs_unmount_locked(node);
+    sync_leavecrit(&vfs_busy);
+    sync_leavecrit(&vfs_mount_busy);
+    return retval;
 };
 
 int vfs_unmount(vfs_node *node)
+{
+    int retval;
+
+    sync_entercrit(&vfs_mount_busy);
+    sync_entercrit(&vfs_busy);
+    retval=vfs_unmount_locked(node);
+    sync_leavecrit(&vfs_busy);
+    sync_leavecrit(&vfs_mount_busy);
+    return retval;
+};
+
+static int vfs_unmount_locked(vfs_node *node)
 {
     //get the vfs_node of the location
     if (node!=0)
@@ -496,6 +520,10 @@ int vfs_unmount(vfs_node *node)
         {
             devmgr_fs_desc *fs;
             devmgr_block_desc *myblock;
+            int temp_fs_ref,temp_block_ref;
+
+            if (node->unmounting)
+                return -1;
                                 
             printf("checking open files ..\n");                
             //make sure that there are no open files
@@ -516,8 +544,28 @@ int vfs_unmount(vfs_node *node)
             //that it will be unmounted
             printf("obtaining interface\n");
             
-            fs = devmgr_getdevice(node->fsid); //obtain the device itnerface            
-            myblock = devmgr_getdevice(node->memid);
+            temp_fs_ref=node->fs_device_ref ? 0 : 1;
+            temp_block_ref=node->block_device_ref ? 0 : 1;
+            fs = node->fs_device_ref ?
+                  (devmgr_fs_desc*)node->fs_device_ref :
+                  (devmgr_fs_desc*)devmgr_getdevice_ref(node->fsid);
+              myblock = node->block_device_ref ?
+                      (devmgr_block_desc*)node->block_device_ref :
+                      (devmgr_block_desc*)devmgr_getdevice_ref(node->memid);
+
+            /* Stop namespace discovery before dropping vfs_busy. Existing
+               open/workdir users were rejected above, and mount refs pin
+               both operation tables while callbacks execute. */
+            node->unmounting=1;
+            if (!vfs_removenode(node)) {
+                node->unmounting=0;
+                if (temp_fs_ref)
+                    devmgr_putdevice((devmgr_generic*)fs);
+                if (temp_block_ref)
+                    devmgr_putdevice((devmgr_generic*)myblock);
+                return -1;
+            }
+            sync_leavecrit(&vfs_busy);
             
             printf("Calling unmount function\n");
             if (fs!=-1) //check if exists
@@ -526,9 +574,6 @@ int vfs_unmount(vfs_node *node)
                    if (fs->unmount)           
                    bridges_call(fs,&fs->unmount,node);//do it!         
             };
-            
-            //unlock the mounted device
-            devmgr_setlock(node->memid,0);
             
             printf("deallocating child nodes..\n");
             //deallocate memory used by child nodes
@@ -544,10 +589,16 @@ int vfs_unmount(vfs_node *node)
             if (myblock!=-1) 
             if (myblock->invalidate_cache!=0)
             bridges_call(myblock,&myblock->invalidate_cache);
-            
-            printf("Removing node\n");
-            //remove the mountpoint from the vfs
-            vfs_removenode(node);
+
+            //release the exclusive mount claim only after teardown callbacks
+            devmgr_setlock(node->memid,0);
+
+            sync_entercrit(&vfs_busy);
+
+            node->fs_device_ref=0;
+            node->block_device_ref=0;
+            devmgr_putdevice((devmgr_generic*)fs);
+            devmgr_putdevice((devmgr_generic*)myblock);
             
             //free the memory allocated to the node
             free(node);
@@ -567,9 +618,9 @@ vfs_node *mkvirtualdir(const char *name,int fsid,int deviceid);
 //it becomes visible to the operating system.
 int vfs_mount_device(const char *fsname,const char *devname,const char *location)
 {
-    devmgr_fs_desc *myfs;
-    devmgr_block_desc *myblock;
-    int retval=0;
+    devmgr_fs_desc *myfs=(devmgr_fs_desc*)-1;
+    devmgr_block_desc *myblock=(devmgr_block_desc*)-1;
+    int retval=-1;
     
     if (fsname == 0 ) //autodetect file system?
     {
@@ -582,48 +633,42 @@ int vfs_mount_device(const char *fsname,const char *devname,const char *location
 
         int fsid, devid;
         vfs_node *mount_location;
+        sync_entercrit(&vfs_mount_busy);
         //get the device id of the devices requested
         fsid = devmgr_finddevice( fsname);
         if (fsid == -1)
 	{
            printf("Unknown filesystem type: %s\n",fsname);
-	   return -1;
+       goto mount_fail;
 	}
         devid = devmgr_finddevice(devname);
         if (devid == -1) 
         {
           printf("Unknown device name: %s\n",devname);
-          return -1;
+          goto mount_fail;
         }
 
         //tell the device manager to obtain the interfaces for the
         //filesystem and block device driver
-        myfs = (devmgr_fs_desc*) devmgr_getdevice(fsid);
-        myblock = (devmgr_block_desc*) devmgr_getdevice(devid);
+        myfs = (devmgr_fs_desc*)devmgr_getdevice_ref(fsid);
+        myblock = (devmgr_block_desc*)devmgr_claimdevice_ref(devid);
 
         /**************** Validate the interfaces******************/
         
         // the device driver selected is not a filesystem
-        if (myfs->hdr.type != DEVMGR_FS)  return -1;
+          if (myfs==(devmgr_fs_desc*)-1 || myfs->hdr.type != DEVMGR_FS)
+              goto mount_fail;
 
         // the device driver selected is not a block device
-        if (myblock->hdr.type != DEVMGR_BLOCK){
+          if (myblock==(devmgr_block_desc*)-1 || myblock->hdr.type != DEVMGR_BLOCK){
            printf("Not a valid block device.\n");
-           return -1;
+              goto mount_fail;
         }
-
-        //Make sure that the device has not already been mounted...
-        if (devmgr_getlock(devid))
-	{
-           printf("%s device is already mounted.\n", devname);
-	   return -1;
-	}
-
 
         //obtain the vfs_node for the mountpoint
         if (location==0){
             printf("No mount point specified.\n");
-            return -1;
+            goto mount_fail;
         }
         else{
             mount_location= vfs_searchname(location);
@@ -631,17 +676,18 @@ int vfs_mount_device(const char *fsname,const char *devname,const char *location
         if (mount_location == 0) //create directory
         {
             mount_location = mkvirtualdir(location,fsid,devid);
+            if (mount_location==(vfs_node*)-1 || mount_location==0)
+                goto mount_fail;
         }
         else{
-		printf("%s device is already mounted.\n", devname);
-        	return -1; //mountpoint already exists!!
-	}
+            printf("%s device is already mounted.\n", devname);
+            goto mount_fail; //mountpoint already exists!!
+        }
         
         mount_location->attb|= FILE_MOUNT;
+        mount_location->fs_device_ref=myfs;
+        mount_location->block_device_ref=myblock;
         
-        //lock the device to prevent it from being mounted again
-        devmgr_setlock(devid,1);
-
         //everything seems to be in order, mount the device using the selected filesystem
         retval = bridges_link(myfs,&myfs->mountroot,mount_location,devid,0,0,0,0);
         
@@ -650,7 +696,16 @@ int vfs_mount_device(const char *fsname,const char *devname,const char *location
                     vfs_unmount(mount_location);
         };
         //return myfs->mountroot(mount_location, devid);
+        sync_leavecrit(&vfs_mount_busy);
         return retval;
+
+    mount_fail:
+        if (myblock!=(devmgr_block_desc*)-1)
+            devmgr_setlock(devid,0);
+        devmgr_putdevice((devmgr_generic*)myfs);
+        devmgr_putdevice((devmgr_generic*)myblock);
+        sync_leavecrit(&vfs_mount_busy);
+        return -1;
     };  
     //return -1;
 };
@@ -660,9 +715,11 @@ file_PCB *openfilex(char *filename,int mode)
 {
     DWORD sectsize,flag;
     int fs_device;
-    file_PCB *fcb;
-    
-    vfs_node *ptr=vfs_searchname(filename);
+    file_PCB *fcb=0;
+    vfs_node *ptr;
+
+    sync_entercrit(&vfs_busy);
+    ptr=vfs_searchname(filename);
 
 #ifdef DEBUG_VFSREAD
     printf("openfilex %s called\n",filename);
@@ -671,7 +728,7 @@ file_PCB *openfilex(char *filename,int mode)
     if (ptr!=0)
     {
         fs_device = ptr->fsid;
-        if (fs_device==-1) return 0;
+        if (fs_device==-1) goto out;
     };
 
     if (ptr == 0 && (mode == FILE_READWRITE || mode == FILE_WRITE || mode == FILE_APPEND) ) 
@@ -680,14 +737,16 @@ file_PCB *openfilex(char *filename,int mode)
     if (ptr!=0 && (mode == FILE_WRITE) && !ptr->locked && !ptr->opened)
         {
             devmgr_fs_desc *fs; 
-            fs=(devmgr_fs_desc*)devmgr_devlist[fs_device];
+            fs=(devmgr_fs_desc*)devmgr_getdevice(fs_device);
             
             //make sure the filesystem supports this command           
-            if (fs->rewritefile!=0)
+            if (fs!=(devmgr_fs_desc*)-1 && fs!=0 && fs->rewritefile!=0)
                         bridges_call(fs,&fs->rewritefile,ptr,ptr->memid);
             else
-                        return 0;
+                        goto out;
         };
+
+    if (ptr==(vfs_node*)-1) ptr=0;
 
     //check for file locking    
     if ( (ptr==0) || (ptr->locked) || (mode!=FILE_READ && ptr->opened))
@@ -695,18 +754,18 @@ file_PCB *openfilex(char *filename,int mode)
 #ifdef WRITE_DEBUG
         printf("openfilex failed.\n");
 #endif
-        return 0;
+    goto out;
     };   
 
     ptr->opened++;
-
-
-
-    sync_entercrit(&vfs_busy);
     //create the file_PCB list which maintains the list of
     //opened files!!!!
 
     fcb = (file_PCB*)malloc(sizeof(file_PCB));    
+    if (fcb==0) {
+        ptr->opened--;
+        goto out;
+    };
     memset(fcb,0,sizeof(file_PCB));    
     
     //use add to head method
@@ -748,8 +807,8 @@ file_PCB *openfilex(char *filename,int mode)
     //set file buffering mode using Full buffering
     vfs_setbuffer(fcb,0,512,FILE_IOFBF);
 
+out:
     sync_leavecrit(&vfs_busy);
-
     //printf("openfile(%s) called handle value %d\n",filename,file_nextptr);
     return fcb;
 };
@@ -1333,13 +1392,16 @@ int fwrite(char *buf, int itemsize, int n, file_PCB* fhandle)
 /*fclose closes a file handle, it returns 0 on success, -1 on an error otherwise*/
 int fclose(file_PCB *fhandle)
 {
+    int retval=-1;
+
+    sync_entercrit(&vfs_busy);
     //validate handle given
     if (fhandle!=0)
         if (file_ok(fhandle)) //validate this handle
         {
             
             //save all changes the file needs to do    
-            if (!fflush(fhandle)) return -1;
+            if (!fflush(fhandle)) goto out;
             fhandle->ptr->opened--;
 
            
@@ -1360,13 +1422,13 @@ int fclose(file_PCB *fhandle)
             if (file_globalopen == fhandle)
                 file_globalopen = fhandle->next;                   
             free(fhandle);
-            
-            /*tell the I/O manager to commit all writes to the disk*/
-            iomgr_request_flush(); 
-            
-            return 0;
+            retval=0;
         };
-    return -1;
+out:
+    sync_leavecrit(&vfs_busy);
+    if (retval==0)
+        iomgr_request_flush();
+    return retval;
 };
 
 void findfile(char *name)
@@ -1554,9 +1616,9 @@ int vfs_isvalidname(const char *name)
 //if the mode is FILE_WRITE and no file exists
 vfs_node *createfile(const char *name,DWORD attb)
 {
-    vfs_node *destdir,*rollback,*node,*retval; //obtain the destination directory
+    vfs_node *destdir=0,*rollback=0,*node=0,*retval=(vfs_node*)-1; //obtain the destination directory
     devmgr_fs_desc *fs;
-    int fs_deviceid = 0,result;
+    int fs_deviceid = 0,result=-1;
     char path[255],dirname[255],fname[255];
 
     //wait until the vfs is ready
@@ -1566,7 +1628,10 @@ vfs_node *createfile(const char *name,DWORD attb)
     node=vfs_searchname(name);
 
     //file already exists!!
-    if (node!=0) return node;
+    if (node!=0) {
+        retval=node;
+        goto out;
+    };
 
 #ifdef WRITE_DEBUG
     printf("decoding name..\n");
@@ -1577,7 +1642,7 @@ vfs_node *createfile(const char *name,DWORD attb)
     parsedir(path,dirname,fname);
 
     //verify that this is a valid filename
-    if (!vfs_isvalidname(fname)) return -1;
+    if (!vfs_isvalidname(fname)) goto out;
     
     //obtain the vfs_node of the parent directory
     destdir=vfs_searchname(dirname);
@@ -1585,8 +1650,7 @@ vfs_node *createfile(const char *name,DWORD attb)
     if (destdir==0) {
 
         printf("error locating directory!\n");
-        sync_leavecrit(&vfs_busy);
-        return -1;
+        goto out;
     }; //directory or folder not found!
 
 #ifdef WRITE_DEBUG
@@ -1595,6 +1659,7 @@ vfs_node *createfile(const char *name,DWORD attb)
 
     //create a new vfs_node
     node = (vfs_node*)malloc(sizeof(vfs_node));
+    if (node==0) goto out;
 
     //Initialize the node structure
     memset(node,0,sizeof(vfs_node));
@@ -1605,7 +1670,11 @@ vfs_node *createfile(const char *name,DWORD attb)
 
     //use the FS driver of the parent
     fs_deviceid = destdir->fsid;
-    if (fs_deviceid==-1) return -1;
+    if (fs_deviceid==-1) {
+        free(node);
+        node=0;
+        goto out;
+    };
 
     //attach the node to the parent directory
     vfs_createnode(node,destdir);
@@ -1626,10 +1695,10 @@ vfs_node *createfile(const char *name,DWORD attb)
     fs=(devmgr_fs_desc*)devmgr_getdevice(fs_deviceid);
 
     //tell the fs driver to create file on disk
-    if (fs->createfile!=0)
-    result = bridges_call(fs,&fs->createfile,node,node->memid);
+    if (fs!=(devmgr_fs_desc*)-1 && fs!=0 && fs->createfile!=0)
+        result = bridges_call(fs,&fs->createfile,node,node->memid);
 
-    if (fs->createfile == 0 || result == -1)
+    if (fs==(devmgr_fs_desc*)-1 || fs==0 || fs->createfile == 0 || result == -1)
     {
         //create file unsuccessful, rollback to previous state
         free(node);
@@ -1639,7 +1708,7 @@ vfs_node *createfile(const char *name,DWORD attb)
         else
     retval = node;
 
-        
+out:
     sync_leavecrit(&vfs_busy);
     
 #ifdef WRITE_DEBUG

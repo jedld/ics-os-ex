@@ -31,6 +31,7 @@
 #include "../dextypes.h"
 #include "../process/sync.h"
 #include "../process/process.h"
+#include "devmgr_lifecycle.h"
 
 //The maximum number of filesystems that could be supported
 #define MAXDEVICES 255
@@ -151,6 +152,9 @@ int maxblocks;
 typedef struct _devmgr_status {
 int size;           //size of this structure
 int locked;
+DWORD refs;         //active referenced users
+DWORD generation;   //incremented whenever this registry slot is reused
+int state;          //DEVMGR_STATE_*
 } devmgr_status;
 
 typedef struct _devmgr_pci {
@@ -250,10 +254,14 @@ typedef struct _devmgr_interface {
     int  (*devmgr_flushblocks)();
     int  (*devmgr_finddevice)(const char *name);
     int  (*devmgr_copyinterface)(const char *name,devmgr_generic *interface);
-    devmgr_generic (*devmgr_getdevice)(int deviceid);
+    devmgr_generic *(*devmgr_getdevice)(int deviceid);
     void (*devmgr_disableints)();
     void (*devmgr_enableints)();
     int  (*extension_override)(devmgr_generic *ext, devmgr_generic **prev);
+    devmgr_generic *(*devmgr_getdevice_ref)(int deviceid);
+    devmgr_generic *(*devmgr_claimdevice_ref)(int deviceid);
+    void (*devmgr_putdevice)(devmgr_generic *device);
+    int (*devmgr_removedevice)(int deviceid);
 } devmgr_interface;
 
 //defines a filesystem interface
@@ -307,12 +315,16 @@ extern sync_sharedvar devmgr_busy;
 /*---------------------------------Function Prototypes Here----------------------------------*/
 int  devmgr_copyinterface(const char *name,devmgr_generic *interface);
 devmgr_generic *devmgr_getdevice(int deviceid);
+devmgr_generic *devmgr_getdevice_ref(int deviceid);
+devmgr_generic *devmgr_claimdevice_ref(int deviceid);
+void devmgr_putdevice(devmgr_generic *device);
 devmgr_generic *devmgr_getdevicebyname(const char *name);
 int  devmgr_finddevice(const char *name);
 int  devmgr_flushblocks();
 int  devmgr_getcontext();
 int  devmgr_getfunction();
 int  devmgr_getlock(int devicehandle);
+DWORD devmgr_get_generation(int devicehandle);
 char *devmgr_getname(int deviceid);
 char *devmgr_identify(int type,char *buf);
 void devmgr_init();

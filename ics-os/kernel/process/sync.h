@@ -11,7 +11,7 @@
 //a synchronized shared variable for 
 //synchronization
 typedef struct _sync_sharedvar {
-   int busy;
+  volatile int busy;
    int ready;
    int wait;
 } sync_sharedvar;

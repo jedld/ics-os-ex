@@ -32,6 +32,7 @@
 #include "../vfs/vfs_core.h"
 #include "../console/dex_DDL.h"
 #include "../cpu/context.h"
+#include "../cpu/spinlock.h"
 
 //access levels used in accesslevel field of PCB                                
 #define ACCESS_SYS 0
@@ -198,6 +199,8 @@ typedef struct _PCB386 {
    DWORD owner;        /*The owner refers to the pid of the process that spawned
                         this thread/process*/
 
+   int exit_status;    /*low-byte process exit code reported by waitpid*/
+
    char name[256];     // the name of the process
 
    vfs_node *workdir;  //points to the vfs_node of the working directory 
@@ -262,6 +265,7 @@ typedef struct _PCB386 {
 #define FD_VFS   2
 #define FD_URING 3
 #define FD_BLK   4
+#define FD_RESERVED 5
 /* Compiler frontends retain handles for their include-search directories.
    Sixteen descriptors is exhausted by GCC's normal internal header set before
    it can open config.h; 64 remains compact while meeting the POSIX minimum
@@ -271,6 +275,7 @@ typedef struct _PCB386 {
       int type;
       void *ptr;
    } fds[FD_MAX];
+   spinlock_t fd_lock;
    struct _tty *ctty;
    int session;
    int pgrp;

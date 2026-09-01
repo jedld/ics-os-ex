@@ -6,6 +6,19 @@
 /* 4KiB page cache (P2). Index is (device, byte_offset >> 12). Dirty pages
    are written back by blkcache_flush() from disk_mgr / fclose. */
 
+static inline int blkcache_writeback_is_current(int same_key,
+                                                 u32 current_generation,
+                                                 u32 written_generation)
+{
+   return same_key && current_generation == written_generation;
+}
+
+static inline int blkcache_device_key_is_current(DWORD cached_generation,
+                                                  DWORD live_generation)
+{
+   return cached_generation != 0 && cached_generation == live_generation;
+}
+
 void blkcache_init(void);
 int  blkcache_get(int deviceid, u64 sector, DWORD numblocks, void *buf);
 int  blkcache_put(int deviceid, u64 sector, DWORD numblocks, void *buf);

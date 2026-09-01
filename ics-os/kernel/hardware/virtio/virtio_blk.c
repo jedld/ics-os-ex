@@ -11,7 +11,9 @@
 #include "virtio_blk.h"
 #include "../../devmgr/dex32_devmgr.h"
 #include "../../cpu/lapic.h"
+#include "../../cpu/spinlock.h"
 #include "../../process/process.h"
+#include "../../process/completion.h"
 #include "../../stdlib/time.h"
 
 extern void *malloc(unsigned int);
@@ -61,6 +63,8 @@ extern void virtio_msixwrapper(void);
 #define PCI_STATUS_CAPS  0x0010
 
 static volatile int vblk_irq_count;
+static volatile int vblk_reset_count;
+static volatile int vblk_fault_hold_completions;
 
 static inline void virt_mb(void)
 {
@@ -161,7 +165,7 @@ struct vblk_slot {
    struct virtio_blk_req req;
    u32 nbytes;
    int res;
-   PCB386 *waiter;
+   completion_t completion;
    void (*done_fn)(void *arg, int res);
    void *done_arg;
    void *user_buf;
@@ -169,7 +173,9 @@ struct vblk_slot {
    u8 busy;
    u8 status;
    u8 copy_back;
-   u8 pad[4];
+   u8 abandoned;
+   u8 sync_wait;
+   u8 pad[2];
 };
 typedef char vblk_slot_sz[(sizeof(struct vblk_slot) == 64) ? 1 : -1];
 
@@ -197,6 +203,7 @@ struct vblk_dev {
    int has_flush;
    int has_msix;
    int deviceid;
+   spinlock_t qlock;
 };
 
 static struct vblk_dev vblk;
@@ -391,6 +398,85 @@ static void virtio_notify(struct vblk_dev *d)
    mmio_w16(p, 0);
 }
 
+/* Stop DMA ownership before reusing descriptors. Every outstanding request is
+   completed with EIO exactly once; callback execution remains outside qlock. */
+static int vblk_reset_locked(struct vblk_dev *d)
+{
+   unsigned spins;
+   u8 st;
+   int i;
+
+   mmio_w8(&d->common->device_status, 0);
+   for (spins = 0; spins < 1000000; spins++) {
+      if (mmio_r8(&d->common->device_status) == 0)
+         break;
+      __asm__ volatile ("pause");
+   }
+   if (spins == 1000000) {
+      printf("virtio-blk: reset acknowledgement timeout\n");
+      vblk_ready = 0;
+      for (i = 0; i < (int)d->nslots; i++) {
+         struct vblk_slot *s=&d->slots[i];
+         if (!s->busy || s->done)
+            continue;
+         s->res=VBLK_EIO;
+         s->user_buf=0;
+         s->abandoned=1;
+         s->done=1;
+         if (s->sync_wait)
+            complete_all(&s->completion);
+      }
+      return 0;
+   }
+
+   for (i = 0; i < (int)d->nslots; i++) {
+      struct vblk_slot *s = &d->slots[i];
+      if (!s->busy || s->done)
+         continue;
+      s->res = VBLK_EIO;
+      s->done = 1;
+      if (s->sync_wait)
+         complete_all(&s->completion);
+      if (s->abandoned) {
+         s->user_buf = 0;
+         s->busy = 0;
+      }
+   }
+
+   memset((void *)d->desc, 0, sizeof(struct virtq_desc) * d->qsize);
+   memset((void *)d->avail, 0, sizeof(struct virtq_avail));
+   memset((void *)d->used, 0, sizeof(struct virtq_used));
+   d->avail_idx = 0;
+   d->last_used = 0;
+
+   mmio_w8(&d->common->device_status, VIRTIO_STATUS_ACKNOWLEDGE);
+   mmio_w8(&d->common->device_status,
+           VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+   virtio_write_features(d, d->features);
+   st = (u8)(VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
+             VIRTIO_STATUS_FEATURES_OK);
+   mmio_w8(&d->common->device_status, st);
+   if (!(mmio_r8(&d->common->device_status) & VIRTIO_STATUS_FEATURES_OK)) {
+      mmio_w8(&d->common->device_status, VIRTIO_STATUS_FAILED);
+      vblk_ready = 0;
+      return 0;
+   }
+
+   mmio_w16(&d->common->queue_select, 0);
+   mmio_w16(&d->common->queue_size, d->qsize);
+   mmio_w16(&d->common->queue_msix_vector,
+            d->has_msix ? 0 : VIRTIO_MSI_NO_VECTOR);
+   mmio_w64(&d->common->queue_desc, (u64)(uintptr)d->desc);
+   mmio_w64(&d->common->queue_driver, (u64)(uintptr)d->avail);
+   mmio_w64(&d->common->queue_device, (u64)(uintptr)d->used);
+   d->notify_off = mmio_r16(&d->common->queue_notify_off);
+   mmio_w16(&d->common->queue_enable, 1);
+   mmio_w8(&d->common->device_status,
+           (u8)(st | VIRTIO_STATUS_DRIVER_OK));
+   vblk_reset_count++;
+   return 1;
+}
+
 static void vblk_complete_slot(struct vblk_slot *s)
 {
    int res;
@@ -401,8 +487,12 @@ static void vblk_complete_slot(struct vblk_slot *s)
       res = VBLK_EIO;
    s->res = res;
    s->done = 1;
-   if (s->waiter)
-      s->waiter->waiting = 0;
+   if (s->sync_wait)
+      complete_all(&s->completion);
+   if (s->abandoned) {
+      s->user_buf = 0;
+      s->busy = 0;
+   }
 }
 
 static void vblk_finish_async(struct vblk_dev *d, int si)
@@ -410,17 +500,34 @@ static void vblk_finish_async(struct vblk_dev *d, int si)
    struct vblk_slot *s = &d->slots[si];
    void (*fn)(void *arg, int res);
    void *arg;
+   int res;
+   spin_irq_flags_t flags;
 
-   if (!s->done || !s->busy || !s->done_fn)
+   flags = spin_lock_irqsave(&d->qlock);
+   if (!s->done || !s->busy || !s->done_fn) {
+      spin_unlock_irqrestore(&d->qlock, flags);
       return;
+   }
    if (s->copy_back && s->user_buf && s->res > 0)
       memcpy(s->user_buf, d->bounce + (unsigned)si * VBLK_BOUNCE,
              (unsigned)s->res);
    fn = s->done_fn;
    arg = s->done_arg;
+   res = s->res;
    s->done_fn = 0;
+   s->user_buf = 0;
    s->busy = 0;
-   fn(arg, s->res);
+   spin_unlock_irqrestore(&d->qlock, flags);
+   fn(arg, res);
+}
+
+static void vblk_drain_callbacks(struct vblk_dev *d)
+{
+   int i;
+   if (!d->slots)
+      return;
+   for (i = 0; i < (int)d->nslots; i++)
+      vblk_finish_async(d, i);
 }
 
 static void vblk_harvest_locked(struct vblk_dev *d)
@@ -451,17 +558,14 @@ static void vblk_harvest_locked(struct vblk_dev *d)
 
 void virtio_blk_harvest(void)
 {
-   DWORD flags;
-   int i;
+   spin_irq_flags_t flags;
 
-   if (!vblk_ready)
-      return;
-   storeflags(&flags);
-   stopints();
-   vblk_harvest_locked(&vblk);
-   restoreflags(flags);
-   for (i = 0; i < (int)vblk.nslots; i++)
-      vblk_finish_async(&vblk, i);
+   if (vblk_ready) {
+      flags = spin_lock_irqsave(&vblk.qlock);
+      vblk_harvest_locked(&vblk);
+      spin_unlock_irqrestore(&vblk.qlock, flags);
+   }
+   vblk_drain_callbacks(&vblk);
 }
 
 static int vblk_alloc_slot(struct vblk_dev *d)
@@ -472,11 +576,13 @@ static int vblk_alloc_slot(struct vblk_dev *d)
          d->slots[i].busy = 1;
          d->slots[i].done = 0;
          d->slots[i].res = 0;
-         d->slots[i].waiter = 0;
+         completion_init(&d->slots[i].completion);
          d->slots[i].done_fn = 0;
          d->slots[i].done_arg = 0;
          d->slots[i].user_buf = 0;
          d->slots[i].copy_back = 0;
+         d->slots[i].abandoned = 0;
+         d->slots[i].sync_wait = 0;
          return (int)i;
       }
    }
@@ -489,7 +595,7 @@ int virtio_blk_submit(u32 type, u64 sector, void *buf, u32 bytes,
 {
    struct vblk_dev *d = &vblk;
    struct vblk_slot *s;
-   DWORD flags;
+   spin_irq_flags_t flags;
    unsigned start;
    int si, has_data;
    u16 head, i;
@@ -515,13 +621,12 @@ int virtio_blk_submit(u32 type, u64 sector, void *buf, u32 bytes,
 
    start = ticks;
    for (;;) {
-      storeflags(&flags);
-      stopints();
+      flags = spin_lock_irqsave(&d->qlock);
       vblk_harvest_locked(d);
       si = vblk_alloc_slot(d);
       if (si >= 0)
          break;
-      restoreflags(flags);
+      spin_unlock_irqrestore(&d->qlock, flags);
       for (i = 0; i < (int)d->nslots; i++)
          vblk_finish_async(d, i);
       if (ticks - start > VBLK_TIMEOUT_TICKS)
@@ -535,8 +640,7 @@ int virtio_blk_submit(u32 type, u64 sector, void *buf, u32 bytes,
    s->done_arg = arg;
    s->user_buf = buf;
    s->copy_back = (type == VIRTIO_BLK_T_IN) ? 1 : 0;
-   if (!done && current_process)
-      s->waiter = current_process;
+   s->sync_wait = done ? 0 : 1;
    s->req.type = type;
    s->req.reserved = 0;
    s->req.sector = sector;
@@ -575,7 +679,7 @@ int virtio_blk_submit(u32 type, u64 sector, void *buf, u32 bytes,
    d->avail->idx = d->avail_idx;
    virt_mb();
    virtio_notify(d);
-   restoreflags(flags);
+   spin_unlock_irqrestore(&d->qlock, flags);
 
    if (slot_out)
       *slot_out = si;
@@ -588,27 +692,43 @@ int virtio_blk_wait(int slot)
    struct vblk_slot *s;
    unsigned start;
    int res;
+   spin_irq_flags_t flags;
 
    if (!vblk_ready || slot < 0 || slot >= (int)d->nslots)
       return VBLK_EINVAL;
    s = &d->slots[slot];
    start = ticks;
-   while (!s->done) {
+   while (!completion_done(&s->completion)) {
       virtio_blk_harvest();
-      if (s->done)
+      if (completion_done(&s->completion))
          break;
       if (ticks - start > VBLK_TIMEOUT_TICKS) {
-         printf("virtio-blk: timeout slot=%d\n", slot);
-         s->busy = 0;
-         return VBLK_EIO;
+         flags = spin_lock_irqsave(&d->qlock);
+         if (!s->done) {
+            /* Timeout does not transfer DMA ownership. Reset first, which
+               retires every outstanding chain before any descriptor reuse. */
+            (void)vblk_reset_locked(d);
+            spin_unlock_irqrestore(&d->qlock, flags);
+            vblk_drain_callbacks(d);
+            printf("virtio-blk: timeout slot=%d reset=%d\n",
+                   slot, vblk_ready);
+            break;
+         }
+         spin_unlock_irqrestore(&d->qlock, flags);
+         break;
       }
       cpu_idle();
    }
+   flags = spin_lock_irqsave(&d->qlock);
    res = s->res;
    if (s->copy_back && s->user_buf && res > 0)
       memcpy(s->user_buf, d->bounce + (unsigned)slot * VBLK_BOUNCE,
              (unsigned)res);
-   s->busy = 0;
+   s->sync_wait = 0;
+   s->user_buf = 0;
+   if (!s->abandoned)
+      s->busy = 0;
+   spin_unlock_irqrestore(&d->qlock, flags);
    return res;
 }
 
@@ -733,6 +853,31 @@ static void vblk_selftest(void)
       printf("virtio-blk: pipelined reads [OK]\n");
    }
 
+   {
+      int slot, reset_before=vblk_reset_count;
+      char *p=(char *)malloc(VIRTIO_BLK_SECTOR_SIZE);
+      spin_irq_flags_t flags;
+      vblk_fault_hold_completions=1;
+      if (!p || virtio_blk_submit(VIRTIO_BLK_T_IN, sector, p,
+                                  VIRTIO_BLK_SECTOR_SIZE, 0, 0, &slot)<0) {
+         vblk_fault_hold_completions=0;
+         printf("VIRTIO_RESET_RECOVERY_FAIL\n");
+         return;
+      }
+      flags=spin_lock_irqsave(&vblk.qlock);
+      (void)vblk_reset_locked(&vblk);
+      spin_unlock_irqrestore(&vblk.qlock,flags);
+      vblk_fault_hold_completions=0;
+      if (virtio_blk_wait(slot)!=VBLK_EIO ||
+          vblk_reset_count!=reset_before+1 ||
+          !vblk_read_block(sector,p,1) ||
+          memcmp(p,a,VIRTIO_BLK_SECTOR_SIZE)!=0) {
+         printf("VIRTIO_RESET_RECOVERY_FAIL\n");
+         return;
+      }
+      printf("VIRTIO_RESET_RECOVERY_OK\n");
+   }
+
    printf("virtio-blk: irqs=%d slots=%u\n",
           vblk_irq_count, (unsigned)vblk.nslots);
    if (vblk_irq_count > 0)
@@ -794,8 +939,14 @@ void virtio_blk_irq(void)
    vblk_irq_count++;
    if (vblk.isr)
       (void)*vblk.isr;
-   if (vblk_ready)
+   if (vblk_ready && !vblk_fault_hold_completions) {
+      spin_lock(&vblk.qlock);
       vblk_harvest_locked(&vblk);
+      spin_unlock(&vblk.qlock);
+      /* Callback dispatch may take locks or free a closing ring. Keep it in
+         process context; the reschedule IPI wakes the drain worker. */
+      smp_reschedule_others();
+   }
    lapic_eoi();
 }
 
@@ -806,6 +957,7 @@ void virtio_blk_init(void)
    u8 st;
 
    memset(&vblk, 0, sizeof(vblk));
+   spin_init(&vblk.qlock);
    vblk.deviceid = -1;
 
    if (!virtio_find_blk(&vblk.bus, &vblk.dev, &vblk.fn)) {

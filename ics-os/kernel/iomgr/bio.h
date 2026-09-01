@@ -17,6 +17,7 @@ struct bio {
    int deviceid;
    int op;
    int status;
+   DWORD device_generation;
    u64 sector;
    DWORD nsect;
    void *buf;

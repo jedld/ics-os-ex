@@ -122,6 +122,12 @@ typedef struct _file {
                 
  DWORD miscsize, miscsize2; //the size of the structure pointed to by misc
 
+ /* A mounted root pins both operation tables until unmount completes. Child
+     nodes rely on their containing mount's references. */
+ void *fs_device_ref;
+ void *block_device_ref;
+ int unmounting;
+
 } vfs_node;
 
 

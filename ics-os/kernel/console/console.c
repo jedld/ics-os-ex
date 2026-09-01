@@ -1149,10 +1149,15 @@ int console_execute(const char *str){
          printf("POSIXIO_FAIL\n");
    }else
    if (strcmp(u,"spawntest") == 0){
-       printf("spawntest: running /icsos/apps/spawn.exe\n");
-       if (!user_execp("/icsos/apps/spawn.exe", 0, "/icsos/apps/spawn.exe"))
-          printf("SPAWN_FAIL\n");
-    }else
+        printf("spawntest: running /icsos/apps/spawn.exe\n");
+        if (!user_execp("/icsos/apps/spawn.exe", 0, "/icsos/apps/spawn.exe"))
+           printf("SPAWN_FAIL\n");
+     }else
+     if (strcmp(u,"ext4test") == 0){
+        printf("ext4test: running /icsos/apps/ext4test.exe\n");
+        if (!user_execp("/icsos/apps/ext4test.exe", 0, "/icsos/apps/ext4test.exe"))
+           printf("EXT4_RUN_FAIL\n");
+     }else
     if (strcmp(u,"cc1test") == 0){  //-- Run host-built GCC cc1 to compile a trivial file in-OS.
        char cmd[512];
        int ok = 1;

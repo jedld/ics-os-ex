@@ -111,6 +111,7 @@ extern void textcolor(unsigned char c);
 #include "filesystem/iso9660.h"
 #include "filesystem/devfs.h"
 #include "filesystem/ramdisk.h"
+#include "filesystem/ext4.h"
 #include "process/event.h"
 #include "devmgr/extensions.h"
 #include "process/environment.h"
@@ -589,27 +590,41 @@ void dex32_startup(){
 /* Mount a host-formatted FAT volume on virtio-blk at /work when present.
    Zeroed disks (test-virtio / test-posixio) and ATA-only boots skip. */
 static void work_mount_vblk(void)
-{
-   unsigned char bpb[512];
-   int n;
+ {
+    unsigned char bpb[512];
+    unsigned char sb[512];
+    int n;
 
-   if (!virtio_blk_present())
-      return;
-   memset(bpb, 0, sizeof(bpb));
-   n = virtio_blk_rw(0, 0, bpb, 512);
-   if (n < 0) {
-      printf("work: vblk read failed (skipped)\n");
-      return;
-   }
-   if (bpb[11] != 0x00 || bpb[12] != 0x02 || bpb[13] == 0 || bpb[16] == 0) {
-      printf("work: no FAT on vblk (skipped)\n");
-      return;
-   }
-   if (vfs_mount_device("fat", "vblk", "work") == -1)
-      printf("work: mount failed\n");
-   else
-      printf("work: mounted\n");
-}
+    if (!virtio_blk_present())
+       return;
+
+    /* Probe sector 2 for an ext4 superblock (magic 0xEF53 at sb+0x38). */
+    memset(sb, 0, sizeof(sb));
+    n = virtio_blk_rw(0, 1024, sb, 512);
+    if (n > 0 && sb[0x38] == 0x53 && sb[0x39] == 0xEF) {
+       if (vfs_mount_device("ext4", "vblk", "work") == -1)
+          printf("work: ext4 mount failed\n");
+       else
+          printf("work: mounted ext4\n");
+       return;
+    }
+
+    /* Fall back to FAT. */
+    memset(bpb, 0, sizeof(bpb));
+    n = virtio_blk_rw(0, 0, bpb, 512);
+    if (n < 0) {
+       printf("work: vblk read failed (skipped)\n");
+       return;
+    }
+    if (bpb[11] != 0x00 || bpb[12] != 0x02 || bpb[13] == 0 || bpb[16] == 0) {
+       printf("work: no FAT on vblk (skipped)\n");
+       return;
+    }
+    if (vfs_mount_device("fat", "vblk", "work") == -1)
+       printf("work: mount failed\n");
+    else
+       printf("work: mounted\n");
+ }
 
 /*This function is the first function that is called by the taskswitcher
  see process/process.c
@@ -757,8 +772,11 @@ void dex_init(){
    fat_register("fat");
     
    //initialize the CDFS (ISO9660/Joliet) filesystem
-   iso9660_init();
-   printf("[OK]\n");   
+    iso9660_init();
+
+    //register the ext4 filesystem driver
+    ext4_register("ext4");
+    printf("[OK]\n");
 
    printf("Mounting boot device %s...\n", boot_device_name);
    {

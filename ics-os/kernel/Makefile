@@ -24,7 +24,7 @@ bzImage: all
 
 all: obj Kernel64.bin
 
-obj: scheduler.o fat.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o posixfd.o devmgr_error.o kernel32.o \
+obj: scheduler.o fat.o ext4.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o posixfd.o devmgr_error.o kernel32.o \
 		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o virtio_blk.o
 		
 kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
@@ -51,6 +51,9 @@ scheduler.o: process/scheduler.c process/process.h
 
 fat.o: filesystem/fat12.c filesystem/fat12.h
 	$(CC) $(TOOLPREFIX) $(CFLAGS) -o fat.o filesystem/fat12.c
+
+ext4.o: filesystem/ext4.c filesystem/ext4.h
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o ext4.o filesystem/ext4.c
 	
 iso9660.o: filesystem/iso9660.c filesystem/iso9660.h
 	$(CC) $(TOOLPREFIX) $(CFLAGS) -o iso9660.o filesystem/iso9660.c
@@ -101,7 +104,7 @@ smp.o: cpu/smp.c cpu/smp.h process/process.h
 	$(CC) $(TOOLPREFIX) $(CFLAGS) -o smp.o cpu/smp.c
 	
 Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
-		scheduler.o iomgr.o blkcache.o posixfd.o fat.o iso9660.o ramdisk.o \
+		scheduler.o iomgr.o blkcache.o posixfd.o fat.o ext4.o iso9660.o ramdisk.o \
 		devfs.o irqwrap.o devmgr_error.o kexec.o virtio_blk.o
 	$(LD) $(LDFLAGS) $(MAPFLAGS)
 

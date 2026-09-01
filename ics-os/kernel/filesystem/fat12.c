@@ -43,6 +43,19 @@ static void fat_wait_io(DWORD hdl)
 }
 
 int fat_deviceid;
+static sync_sharedvar fat_volume_busy[MAXDEVICES];
+
+static void fat_lock_volume(int id)
+{
+   if (id >= 0 && id < MAXDEVICES)
+      sync_entercrit(&fat_volume_busy[id]);
+}
+
+static void fat_unlock_volume(int id)
+{
+   if (id >= 0 && id < MAXDEVICES)
+      sync_leavecrit(&fat_volume_busy[id]);
+}
 
 int obtain_next_cluster(int cluster,void *fat,int fat_type,BPB *bpbblock,int id)
 {
@@ -115,6 +128,11 @@ int fat_write_cluster(int cluster,int value,void *fat,int fat_type,BPB *bpbblock
    WORD  *fat16;
    DWORD *fat32;
    int x,index;
+
+   /* Data clusters start at 2. Reject allocation failure (-1) and other
+      reserved indices before deriving a FAT offset or disk sector. */
+   if (cluster < 2 || bpbblock == 0)
+      return -1;
 
    /* Disk path only when we have no in-memory FAT. FAT32 used to always
       take this path, which left obtainfreecluster() unable to see updates
@@ -565,11 +583,17 @@ void file12tostr(fatdirentry *dir,char *str)
 
 DWORD fat_writefileEX(vfs_node *f,char *bufr,int start,int end,int id)
 {
-   BPB    *buf=(BPB*)malloc(512);
+   BPB    *buf;
    //perform the read
    
    fatdirentry   *buf2=0;
    int found=0,size=0,i;
+   fat_lock_volume(id);
+   buf=(BPB*)malloc(512);
+   if (!buf) {
+      fat_unlock_volume(id);
+      return (DWORD)-1;
+   }
    readBPB(buf,id);
    
 #ifdef WRITE_DEBUG
@@ -590,6 +614,7 @@ DWORD fat_writefileEX(vfs_node *f,char *bufr,int start,int end,int id)
          //error while loading the file
          
          free(buf);
+         fat_unlock_volume(id);
          return 0;
       };
       
@@ -599,6 +624,7 @@ DWORD fat_writefileEX(vfs_node *f,char *bufr,int start,int end,int id)
    //    else
    //  return 0;
    free(buf);
+   fat_unlock_volume(id);
    return size;
 };
 
@@ -611,7 +637,12 @@ DWORD fat_createfileEX(vfs_node *f,int id)
    printf("fat_createfileex called [%s].\n",f->path->name);
 #endif
    
+   fat_lock_volume(id);
    buf=(BPB*)malloc(512);
+   if (!buf) {
+      fat_unlock_volume(id);
+      return 0;
+   }
    readBPB(buf,id);
    
 #ifdef WRITE_DEBUG
@@ -625,18 +656,28 @@ DWORD fat_createfileEX(vfs_node *f,int id)
 #endif
    
    free(buf);
+   fat_unlock_volume(id);
    return ret;
 };
 
 DWORD fat_addsectorsEX(vfs_node *f,DWORD sectors /*sectors to add*/,int id)
 {
-   BPB    *buf=(BPB*)malloc(512);
+   BPB    *buf;
+   DWORD ret;
+   fat_lock_volume(id);
+   buf=(BPB*)malloc(512);
+   if (!buf) {
+      fat_unlock_volume(id);
+      return -1;
+   }
 #ifdef WRITE_DEBUG
    printf("fat_addsectorsEX called..\n");
 #endif
    readBPB(buf,id);
-   return fat_addsectors(f,buf,sectors,id);
+   ret=fat_addsectors(f,buf,sectors,id);
    free(buf);
+   fat_unlock_volume(id);
+   return ret;
 };
 
 
@@ -896,10 +937,17 @@ int fat_getsectorsizeEX(vfs_node *f,int id)
 
 void fat_rewritefileEX(vfs_node *f,int id)
 {
-   BPB  *buf=(BPB*)malloc(512);
+   BPB  *buf;
+   fat_lock_volume(id);
+   buf=(BPB*)malloc(512);
+   if (!buf) {
+      fat_unlock_volume(id);
+      return;
+   }
    readBPB(buf,id);
    fat_rewritefile(f,buf,id);
    free(buf);
+   fat_unlock_volume(id);
 ;};
 
 
@@ -911,10 +959,21 @@ DWORD fat_modifyattb(vfs_node *f, DWORD attb,int id)
    char temp[255];
    vfs_node *parentdir=(vfs_node*)f->path;
    BYTE *fat = 0;
-   BPB  *bpbblock=(BPB*)malloc(512);
+   BPB  *bpbblock;
+   fat_lock_volume(id);
+   bpbblock=(BPB*)malloc(512);
+   if (!bpbblock) {
+      fat_unlock_volume(id);
+      return 0;
+   }
    readBPB(bpbblock,id);
    
    fat=(BYTE*)malloc(fat_sectors_per_fat(bpbblock)*512);//allocate memory for FAT
+   if (!fat) {
+      free(bpbblock);
+      fat_unlock_volume(id);
+      return 0;
+   }
    
    loadfat(bpbblock,fat,id);
    
@@ -934,6 +993,8 @@ DWORD fat_modifyattb(vfs_node *f, DWORD attb,int id)
    update_dirs(bpbblock,parentdir,fat,id);
    free(bpbblock);
    free(fat);
+   fat_unlock_volume(id);
+   return 1;
 };
 
 //This function is when the vfs wants to append sectors to a file
@@ -953,10 +1014,10 @@ DWORD sectors /*sectors to add*/,int id)
 #endif
    
    
+    if (!bpbblock || !fat_sectors_per_fat(bpbblock))
+       return -1;
     fat_type = fat_get_fat_type(id,bpbblock);
     if (fat_type < 0)
-       return -1;
-    if (!bpbblock || !fat_sectors_per_fat(bpbblock))
        return -1;
 
     fat=(BYTE*)malloc(fat_sectors_per_fat(bpbblock)*512);
@@ -993,15 +1054,15 @@ DWORD sectors /*sectors to add*/,int id)
    {
       fc=obtainfreecluster(fat,fat_type,fat_cluster_count(bpbblock)+2);
 
-      /*Mark this cluster as being used*/     
-      fat_write_cluster(fc,1,fat,fat_type,bpbblock,id);
-      
       if (fc==-1) //out of space on disk??
       {
          free(fat);
          printf("fat: Out of space on the device\n");
          return -1;
       };
+
+      /* Mark this cluster as used only after allocation succeeded. */
+      fat_write_cluster(fc,1,fat,fat_type,bpbblock,id);
       //write to the last sector
 #ifdef WRITE_DEBUG2
       printf("writing to cluster %d value %d.\n",cur,fc);
@@ -1076,11 +1137,16 @@ DWORD fat_deletefile(vfs_node *f,int id)
    BYTE *fat = 0;
    int cluster,i;
    int fat_type;
+   fat_lock_volume(id);
    readBPB(&bpbblock,id);
    // dir=(fatdirentry*)f->path->misc;
    desc=(fatdirentry*)f->misc;
    
    fat_type = fat_get_fat_type(id,&bpbblock);
+   if (fat_type < 0) {
+      fat_unlock_volume(id);
+      return -1;
+   }
    
    f->size=0;
    desc->file_size=0;
@@ -1090,6 +1156,10 @@ DWORD fat_deletefile(vfs_node *f,int id)
    if (fat_type!=FAT12_FAT32)
    {
            fat=(BYTE*)malloc(fat_sectors_per_fat(&bpbblock)*512);//allocate memory for FAT
+           if (!fat) {
+              fat_unlock_volume(id);
+              return -1;
+           }
            loadfat(&bpbblock,fat,id);
    };
    
@@ -1107,6 +1177,8 @@ DWORD fat_deletefile(vfs_node *f,int id)
    update_dirs_fats(&bpbblock,fat,parentdir,id);
    
    if (fat_type!=FAT12_FAT32) free(fat);
+   fat_unlock_volume(id);
+   return 1;
 };
 
 

@@ -16,6 +16,7 @@
 #include "bio.h"
 #include "../stdlib/time.h"
 #include "../process/process.h"
+#include "../hardware/virtio/virtio_blk.h"
 
 extern void *malloc(unsigned int);
 extern void *memset(void *s, int c, unsigned int n);
@@ -124,6 +125,10 @@ DWORD iomgr_diskmgr()
    do
     {
 
+      /* Deferred virtio callbacks may lock rings and release memory, so they
+         are drained by this process-context worker rather than hard IRQ. */
+      virtio_blk_harvest();
+
       while (IOmgr_pause)
          sleep(1);
 
@@ -166,14 +171,17 @@ static u64 iomgr_execjob(IOrequest *ptr)
 {
    devmgr_block_desc *myblock;
 
-   myblock = (devmgr_block_desc*)devmgr_devlist[ptr->deviceid];
+   myblock = (devmgr_block_desc*)devmgr_getdevice_ref(ptr->deviceid);
 
    devmgr_setcontext(ptr->deviceid);
 
-   if (myblock->hdr.type!=DEVMGR_BLOCK)
+      if (myblock==(devmgr_block_desc*)-1 || myblock->hdr.type!=DEVMGR_BLOCK ||
+         (ptr->device_generation &&
+         ptr->device_generation!=devmgr_get_generation(ptr->deviceid)))
    {
       printf("IO ERROR: Device %d is not a block device!\n", ptr->deviceid);
       ptr->status=IO_ERROR;
+      devmgr_putdevice((devmgr_generic*)myblock);
       return ptr->lba;
    };
 
@@ -203,6 +211,7 @@ static u64 iomgr_execjob(IOrequest *ptr)
    else
       ptr->status=IO_ERROR;
 
+   devmgr_putdevice((devmgr_generic*)myblock);
    return ptr->lba;
 };
 
@@ -298,15 +307,18 @@ static IOrequest *iomgr_alloc_done(int type, u64 block, DWORD numblocks, void *b
 DWORD dex32_requestIO(int deviceid,int type,u64 block,DWORD numblocks, void *buf)
 {
      IOrequest *ptr;
-     devmgr_block_desc *myblock = (devmgr_block_desc*) devmgr_getdevice(deviceid);
+   devmgr_block_desc *myblock = (devmgr_block_desc*)devmgr_getdevice_ref(deviceid);
+   DWORD device_generation;
 
-     if (!myblock)
+   if (myblock==(devmgr_block_desc*)-1)
         return 0;
+   device_generation=devmgr_get_generation(deviceid);
 
      if (myblock->getcache!=0)
      if (type==IO_READ&&myblock->getcache(buf,(DWORD)block,numblocks))
       {
         ptr=iomgr_alloc_done(type, block, numblocks, buf, IO_COMPLETE);
+      devmgr_putdevice((devmgr_generic*)myblock);
         return ptr ? ptr->rID : 0;
       };
 
@@ -314,6 +326,7 @@ DWORD dex32_requestIO(int deviceid,int type,u64 block,DWORD numblocks, void *buf
          blkcache_get(deviceid, block, numblocks, buf))
       {
         ptr=iomgr_alloc_done(type, block, numblocks, buf, IO_COMPLETE);
+      devmgr_putdevice((devmgr_generic*)myblock);
         return ptr ? ptr->rID : 0;
       };
 
@@ -321,13 +334,17 @@ DWORD dex32_requestIO(int deviceid,int type,u64 block,DWORD numblocks, void *buf
       if (type==IO_WRITE&&myblock->putcache(buf,(DWORD)block,numblocks))
       {
         ptr=iomgr_alloc_done(type, block, numblocks, buf, IO_COMPLETE);
+        devmgr_putdevice((devmgr_generic*)myblock);
         return ptr ? ptr->rID : 0;
       };
+
+     devmgr_putdevice((devmgr_generic*)myblock);
 
      ptr=(IOrequest*)malloc(sizeof(IOrequest));
      if (!ptr) return 0;
       memset(ptr, 0, sizeof(IOrequest));
       ptr->deviceid = deviceid;
+      ptr->device_generation = device_generation;
       ptr->rID=(DWORD)(uintptr)ptr;
       ptr->type = type;
       ptr->lba = block;
@@ -340,6 +357,7 @@ DWORD dex32_requestIO(int deviceid,int type,u64 block,DWORD numblocks, void *buf
          struct bio b;
          memset(&b, 0, sizeof(b));
          b.deviceid = deviceid;
+         b.device_generation = device_generation;
          b.op = (type == IO_WRITE) ? BIO_WRITE : BIO_READ;
          b.sector = block;
          b.nsect = numblocks;
@@ -363,6 +381,7 @@ int bio_submit_sync(struct bio *bio)
    }
    memset(&req, 0, sizeof(req));
    req.deviceid = bio->deviceid;
+   req.device_generation = bio->device_generation;
    req.type = (bio->op == BIO_WRITE) ? IO_WRITE : IO_READ;
    req.lba = bio->sector;
    req.num_of_blocks = bio->nsect;

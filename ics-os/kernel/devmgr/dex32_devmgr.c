@@ -30,6 +30,29 @@ devmgr_generic **devmgr_devlist;         //points to the list of devices
 devmgr_status *devmgr_statuslist;
 sync_sharedvar devmgr_busy;
 
+static int devmgr_finddevice_locked(const char *name)
+{
+    int i;
+    for (i=0;i<MAXDEVICES;i++)
+        if (devmgr_devlist[i]!=0 &&
+                devmgr_statuslist[i].state==DEVMGR_STATE_LIVE &&
+                strcmp(name,devmgr_devlist[i]->name)==0)
+            return i;
+    return -1;
+}
+
+static devmgr_generic *devmgr_retire_locked(int deviceid)
+{
+    devmgr_generic *retired;
+    if (!devmgr_lifecycle_can_retire(devmgr_statuslist[deviceid].state,
+                                                                     devmgr_statuslist[deviceid].refs))
+        return 0;
+    retired=devmgr_devlist[deviceid];
+    devmgr_devlist[deviceid]=0;
+    devmgr_statuslist[deviceid].state=DEVMGR_STATE_DEAD;
+    return retired;
+}
+
 void devmgr_init()
 {
   int i;
@@ -45,7 +68,10 @@ void devmgr_init()
   for (i=0;i<MAXDEVICES;i++)
     {
     devmgr_devlist[i]=(devmgr_fs_desc*)0;
-    devmgr_statuslist->locked = 0;
+    devmgr_statuslist[i].locked = 0;
+    devmgr_statuslist[i].refs = 0;
+    devmgr_statuslist[i].generation = 0;
+    devmgr_statuslist[i].state = DEVMGR_STATE_FREE;
     };
 
   //the myinterface structure will be passed on to drivers upon startup
@@ -61,6 +87,10 @@ void devmgr_init()
   myinterface.devmgr_identify = devmgr_identify;
   myinterface.devmgr_finddevice = devmgr_finddevice;
   myinterface.devmgr_getdevice = devmgr_getdevice;
+    myinterface.devmgr_getdevice_ref = devmgr_getdevice_ref;
+    myinterface.devmgr_claimdevice_ref = devmgr_claimdevice_ref;
+    myinterface.devmgr_putdevice = devmgr_putdevice;
+    myinterface.devmgr_removedevice = devmgr_removedevice;
   myinterface.devmgr_copyinterface = devmgr_copyinterface;
   myinterface.devmgr_disableints = stopints;
   myinterface.devmgr_enableints= startints;
@@ -88,13 +118,22 @@ void devmgr_init()
 
 int devmgr_removedevice(int deviceid)
 {
-    devmgr_generic *dev = devmgr_getdevice(deviceid);
-    if (dev==-1) return -1;
-    if (devmgr_getlock(deviceid)) return -1; //device is locked
-    
-    devmgr_devlist[deviceid] = 0;
-    
-    return 1;
+    devmgr_generic *retired=0;
+    int retval=-1;
+    sync_entercrit(&devmgr_busy);
+    if (deviceid>=0 && deviceid<MAXDEVICES &&
+        devmgr_devlist[deviceid]!=0 && !devmgr_statuslist[deviceid].locked) {
+        if (devmgr_statuslist[deviceid].state==DEVMGR_STATE_LIVE)
+            devmgr_statuslist[deviceid].state=DEVMGR_STATE_QUIESCING;
+        retired=devmgr_retire_locked(deviceid);
+        retval=retired ? 1 : 0;
+    }
+    sync_leavecrit(&devmgr_busy);
+    /* Legacy devmgr_getdevice() callers cannot publish a read-side reference.
+       Keep the detached copy allocated until all callers use get/put; no new
+       lookup can reach it and referenced users have already drained. */
+    (void)retired;
+    return retval;
 };
 
 //Gets the name of a device
@@ -114,7 +153,7 @@ devmgr_generic *devmgr_getdevice(int deviceid)
     //wait until the device manager is ready
     sync_entercrit(&devmgr_busy);
     
-    if (deviceid<MAXDEVICES)
+    if (deviceid>=0 && deviceid<MAXDEVICES)
         retval = devmgr_devlist[deviceid];
     else
         retval = (devmgr_generic*) -1;
@@ -124,20 +163,69 @@ devmgr_generic *devmgr_getdevice(int deviceid)
     return retval;
 };
 
+/* Referenced lookup for any code that calls through a device operation table.
+   Quiescing prevents new references; final put retires a pending removal. */
+devmgr_generic *devmgr_getdevice_ref(int deviceid)
+{
+    devmgr_generic *retval=(devmgr_generic*)-1;
+    sync_entercrit(&devmgr_busy);
+    if (deviceid>=0 && deviceid<MAXDEVICES &&
+        devmgr_devlist[deviceid]!=0 &&
+        devmgr_lifecycle_get(devmgr_statuslist[deviceid].state,
+                             &devmgr_statuslist[deviceid].refs))
+        retval=devmgr_devlist[deviceid];
+    sync_leavecrit(&devmgr_busy);
+    return retval;
+}
+
+/* Atomically acquire both an operation reference and the legacy exclusive
+   claim used by mounts. */
+devmgr_generic *devmgr_claimdevice_ref(int deviceid)
+{
+    devmgr_generic *retval=(devmgr_generic*)-1;
+    sync_entercrit(&devmgr_busy);
+    if (deviceid>=0 && deviceid<MAXDEVICES &&
+        devmgr_devlist[deviceid]!=0 &&
+        !devmgr_statuslist[deviceid].locked &&
+        devmgr_lifecycle_get(devmgr_statuslist[deviceid].state,
+                             &devmgr_statuslist[deviceid].refs)) {
+        devmgr_statuslist[deviceid].locked=1;
+        retval=devmgr_devlist[deviceid];
+    }
+    sync_leavecrit(&devmgr_busy);
+    return retval;
+}
+
+void devmgr_putdevice(devmgr_generic *device)
+{
+    devmgr_generic *retired=0;
+    int deviceid;
+    if (!device || device==(devmgr_generic*)-1)
+        return;
+    deviceid=device->id;
+    sync_entercrit(&devmgr_busy);
+    if (deviceid>=0 && deviceid<MAXDEVICES &&
+        devmgr_devlist[deviceid]==device) {
+        if (!devmgr_lifecycle_put(&devmgr_statuslist[deviceid].refs))
+            printf("devmgr: reference underflow id=%d\n",deviceid);
+        retired=devmgr_retire_locked(deviceid);
+    }
+    sync_leavecrit(&devmgr_busy);
+    (void)retired; /* See compatibility reclamation note above. */
+}
+
 
 
 
 //used to send a message to a module
 int devmgr_sendmessage(int deviceid,int type,DWORD message)
 {
-    devmgr_generic *dev = devmgr_getdevice(deviceid);
+    devmgr_generic *dev = devmgr_getdevice_ref(deviceid);
     DWORD cpuflags;
     int retval = 0;
     
     //cannot find device?
     if (dev == -1) return -1;
-    
-    sync_entercrit(&devmgr_busy);
     
     storeflags(&cpuflags);
     stopints();
@@ -149,8 +237,7 @@ int devmgr_sendmessage(int deviceid,int type,DWORD message)
          retval = -1;   
     
     restoreflags(cpuflags);
-    
-    sync_leavecrit(&devmgr_busy);
+    devmgr_putdevice(dev);
     
     return retval;
 };
@@ -166,17 +253,23 @@ char temp[255];
 int devno,retval = -1;
 
 
-//Check if the device already exists or if there is
-//another device with the same name
-if (devmgr_finddevice(d->name)!=-1) return -1;
-
 //the size cannot be smaller than devmgr_generic !!
 if (d->size < sizeof(devmgr_generic) ) return -1;
 
 //wait until the device manager is ready
 sync_entercrit(&devmgr_busy);
 
+//Check atomically for another device with the same name.
+if (devmgr_finddevice_locked(d->name)!=-1) {
+    sync_leavecrit(&devmgr_busy);
+    return -1;
+}
+
 devmgr_generic *mydev = (devmgr_generic*)malloc(d->size);
+if (!mydev) {
+    sync_leavecrit(&devmgr_busy);
+    return -1;
+}
 memcpy(mydev,d,d->size);
 
 for (devno=0;devno<MAXDEVICES;devno++)
@@ -185,12 +278,19 @@ for (devno=0;devno<MAXDEVICES;devno++)
                 {
                     mydev->id = devno;
                     devmgr_devlist[devno]=mydev;
+                    devmgr_statuslist[devno].refs=0;
+                    devmgr_statuslist[devno].locked=0;
+                    devmgr_statuslist[devno].generation++;
+                    devmgr_statuslist[devno].state=DEVMGR_STATE_LIVE;
                     retval = mydev->id;
                     break;
                 };
     };
 
 sync_leavecrit(&devmgr_busy);
+
+if (retval==-1)
+    free(mydev);
 
 return retval;
 };
@@ -311,10 +411,8 @@ int deviceid = devmgr_finddevice(name);
 //device not found!
 if (deviceid == -1) return -1;
 
-devmgr_generic *srcdevice = devmgr_getdevice(deviceid);
-
-//wait until the device manager is ready
-sync_entercrit(&devmgr_busy);
+devmgr_generic *srcdevice = devmgr_getdevice_ref(deviceid);
+if (srcdevice==(devmgr_generic*)-1) return -1;
 
 //take note of the size to maintain upward and downward compatibility
 
@@ -323,8 +421,7 @@ sync_entercrit(&devmgr_busy);
               else
                     memcpy(interface,srcdevice,srcdevice->size);
                     
-//leave critical section
-sync_leavecrit(&devmgr_busy);
+devmgr_putdevice(srcdevice);
 
 return 1;
 };
@@ -335,12 +432,15 @@ locking mechanism is not really enforced by the device manager so modules
 must still manually check if a device is locked or not using devmgr_getlock()*/
 int devmgr_setlock(int devicehandle,int val)
 {
-    if (devmgr_getdevice(devicehandle)!=-1)
-    {
+    int retval=-1;
+    sync_entercrit(&devmgr_busy);
+    if (devicehandle>=0 && devicehandle<MAXDEVICES &&
+        devmgr_devlist[devicehandle]!=0) {
           devmgr_statuslist[devicehandle].locked = val;
-          return 1;
-    };
-    return -1;
+          retval=1;
+    }
+    sync_leavecrit(&devmgr_busy);
+    return retval;
 };
 
 /*****************************************************************************
@@ -348,35 +448,36 @@ devmgr_getlock(int devicehandle) - returns the lock status of a current
 device, if it is locked it returns the value placed in locked*/
 int devmgr_getlock(int devicehandle)
 {
-    if (devmgr_getdevice(devicehandle)!=-1)
-    {
-        return devmgr_statuslist[devicehandle].locked;
-    };
-    return -1;
+    int retval=-1;
+    sync_entercrit(&devmgr_busy);
+    if (devicehandle>=0 && devicehandle<MAXDEVICES &&
+        devmgr_devlist[devicehandle]!=0)
+        retval=devmgr_statuslist[devicehandle].locked;
+    sync_leavecrit(&devmgr_busy);
+    return retval;
 };
+
+DWORD devmgr_get_generation(int devicehandle)
+{
+    DWORD generation=0;
+    sync_entercrit(&devmgr_busy);
+    if (devicehandle>=0 && devicehandle<MAXDEVICES &&
+        devmgr_devlist[devicehandle]!=0)
+        generation=devmgr_statuslist[devicehandle].generation;
+    sync_leavecrit(&devmgr_busy);
+    return generation;
+}
 
 //returns the device ID of a device given the name
 int devmgr_finddevice(const char *name)
 {
-    int i;
+    int retval;
     //wait until the device manager is ready
     sync_entercrit(&devmgr_busy);
 
-    for (i=0;i<MAXDEVICES;i++)
-    {
-       if (devmgr_devlist[i]!=0)
-            {
-
-		        if (strcmp(name,devmgr_devlist[i]->name)==0)
-      			  {
-    			     sync_leavecrit(&devmgr_busy);
-                	 return devmgr_devlist[i]->id;
-			      };
-             };
-    };
+     retval=devmgr_finddevice_locked(name);
     sync_leavecrit(&devmgr_busy);
-
- return -1;
+     return retval;
 };
 
 /********************************************************************************
@@ -420,28 +521,30 @@ devmgr_flushblocks() - called by the current IO manager to flush the contents
     of all the block devices in the list, if the block device supports it*/
 int devmgr_flushblocks()
 {
-    int i,err=0;
+        devmgr_generic *snapshot[MAXDEVICES];
+        int i,n=0,err=0;
 
-    //wait until the device manager is ready
+        /* Snapshot referenced block devices, then invoke drivers without the
+             registry lock. Removal quiesces until every snapshot reference drops. */
     sync_entercrit(&devmgr_busy);
-    
     for (i=0;i<MAXDEVICES;i++)
-      {
-            if (devmgr_devlist[i]!=0)
-            {
-                 devmgr_block_desc *myblock;
-                 if (devmgr_devlist[i]->type == DEVMGR_BLOCK)
-                 {
-                     myblock = (devmgr_block_desc*) devmgr_devlist[i];
-                     devmgr_setcontext(i);
-                     if (myblock->flush_device!=0)
-                             err=myblock->flush_device();
-                 };
-            };
-      };
-
+            if (devmgr_devlist[i]!=0 &&
+                    devmgr_devlist[i]->type==DEVMGR_BLOCK &&
+                    devmgr_lifecycle_get(devmgr_statuslist[i].state,
+                                                             &devmgr_statuslist[i].refs))
+                snapshot[n++]=devmgr_devlist[i];
     sync_leavecrit(&devmgr_busy);
-    
+
+        for (i=0;i<n;i++) {
+            devmgr_block_desc *myblock=(devmgr_block_desc*)snapshot[i];
+            int result=0;
+            devmgr_setcontext(myblock->hdr.id);
+            if (myblock->flush_device!=0)
+                result=myblock->flush_device();
+            if (result<0 && err==0)
+                err=result;
+            devmgr_putdevice(snapshot[i]);
+        }
     return err;
 };
 
@@ -451,12 +554,12 @@ int devmgr_ioctl(int deviceid, int func , void *buffer,int block,int bufsize)
 devmgr_generic *buf=(devmgr_generic*)buffer;
 if (buf->type == DEVMGR_BLOCK && func == DEVMGR_IOCTL_GETINFO)
   {
-  		devmgr_generic *buf=(devmgr_generic*)buffer;
-    	devmgr_block_desc *myblock=(devmgr_block_desc*)devmgr_getdevice(deviceid);
+    devmgr_generic *buf=(devmgr_generic*)buffer;
+    devmgr_block_desc *myblock=(devmgr_block_desc*)devmgr_getdevice_ref(deviceid);
       devmgr_block_info *myinfo=(devmgr_block_info*)malloc(sizeof(devmgr_block_info));
       int size;
       
-      if (myblock!=-1)
+    if (myblock!=(devmgr_block_desc*)-1 && myinfo)
          {
          //make sure it is really a block device
          if (myblock->hdr.type == DEVMGR_BLOCK)
@@ -479,19 +582,27 @@ if (buf->type == DEVMGR_BLOCK && func == DEVMGR_IOCTL_GETINFO)
              myinfo->maxblocks = myblock->total_blocks();
 
              memcpy(buffer,myinfo,size);
+				 free(myinfo);
+				 devmgr_putdevice((devmgr_generic*)myblock);
 				 return 1;
 			}
              else
-            return -1; 	 
+                        {
+                            free(myinfo);
+                            devmgr_putdevice((devmgr_generic*)myblock);
+                            return -1;
+                        }
          };
+         free(myinfo);
+         devmgr_putdevice((devmgr_generic*)myblock);
      return -1;
   };
 
 if (func == DEVMGR_IOCTL_READ || func == DEVMGR_IOCTL_WRITE)
  {
  		//validate the deviceid
-      devmgr_block_desc *myblock = (devmgr_block_desc*)devmgr_getdevice(deviceid);
-      if (myblock!=-1)
+    devmgr_block_desc *myblock = (devmgr_block_desc*)devmgr_getdevice_ref(deviceid);
+    if (myblock!=(devmgr_block_desc*)-1)
       {
       	if (myblock->hdr.type == DEVMGR_BLOCK)
          	{
@@ -505,6 +616,7 @@ if (func == DEVMGR_IOCTL_READ || func == DEVMGR_IOCTL_WRITE)
 					         dex32_closeIO(hdl);
 							 memcpy(buffer,temp,512);
                        free(temp);	
+                               devmgr_putdevice((devmgr_generic*)myblock);
                        return 1;
                    }
                else
@@ -518,13 +630,18 @@ if (func == DEVMGR_IOCTL_READ || func == DEVMGR_IOCTL_WRITE)
    	   			        while (!dex32_IOcomplete(hdl));
                         dex32_closeIO(hdl);
                         free(temp);
+                        devmgr_putdevice((devmgr_generic*)myblock);
                         return 1;
 
                   };
-               return -1;
+                             devmgr_putdevice((devmgr_generic*)myblock);
+                             return -1;
             }
               else
-            return -1;
+                        {
+                            devmgr_putdevice((devmgr_generic*)myblock);
+                            return -1;
+                        }
       };
    return -1;
  };

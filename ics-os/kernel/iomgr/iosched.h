@@ -27,6 +27,7 @@ typedef struct _IOrequest
  DWORD rID;
  int type;
  int deviceid;
+ DWORD device_generation;
  int status;
  DWORD time;
  void *buf;

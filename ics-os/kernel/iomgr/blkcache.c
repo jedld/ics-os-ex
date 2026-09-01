@@ -32,12 +32,15 @@ typedef struct {
    int   deviceid;
    u64   index;
    DWORD age;
+   DWORD generation;
+   DWORD device_generation;
    BYTE  flags;
    BYTE  data[PC_SIZE];
 } pc_page;
 
 static pc_page *pc_tab;
 static DWORD pc_bsz[MAXDEVICES];
+static DWORD pc_bsz_generation[MAXDEVICES];
 static DWORD pc_clock;
 static DWORD pc_hits, pc_misses, pc_fills, pc_merged;
 static DWORD pc_dirty;
@@ -48,6 +51,7 @@ void blkcache_init(void)
    int i;
    memset(&pc_busy, 0, sizeof(pc_busy));
    memset(pc_bsz, 0, sizeof(pc_bsz));
+   memset(pc_bsz_generation, 0, sizeof(pc_bsz_generation));
    pc_tab = (pc_page *)malloc(sizeof(pc_page) * PC_NPAGES);
    if (!pc_tab) {
       printf("pagecache: alloc failed\n");
@@ -57,6 +61,8 @@ void blkcache_init(void)
       pc_tab[i].flags = 0;
       pc_tab[i].deviceid = -1;
       pc_tab[i].index = ~(u64)0;
+      pc_tab[i].generation = 0;
+      pc_tab[i].device_generation = 0;
    }
    pc_clock = 1;
    pc_hits = pc_misses = pc_fills = pc_merged = 0;
@@ -72,35 +78,48 @@ static int pc_valid_bsize(DWORD s)
 static DWORD pc_bsize(int deviceid)
 {
    devmgr_block_desc *b;
-   DWORD s;
+   DWORD s,generation=0;
    if (deviceid < 0 || deviceid >= MAXDEVICES)
       return 512;
-   if (pc_bsz[deviceid])
+   if (pc_bsz[deviceid] &&
+       pc_bsz_generation[deviceid]==devmgr_get_generation(deviceid))
       return pc_bsz[deviceid];
-   b = (devmgr_block_desc *)devmgr_getdevice(deviceid);
+   b = (devmgr_block_desc *)devmgr_getdevice_ref(deviceid);
    s = 512;
-   if (b && b->get_block_size) {
+   if (b != (devmgr_block_desc *)-1) {
+      generation=devmgr_get_generation(deviceid);
+   }
+   if (b != (devmgr_block_desc *)-1 && b->get_block_size) {
       int got = b->get_block_size();
       if (pc_valid_bsize((DWORD)got))
          s = (DWORD)got;
    }
-   if (pc_valid_bsize(s))
+   devmgr_putdevice((devmgr_generic *)b);
+   if (generation && pc_valid_bsize(s)) {
       pc_bsz[deviceid] = s;
+      pc_bsz_generation[deviceid]=generation;
+   }
    return s;
 }
 
 static void pc_remember_bsize(int deviceid)
 {
    devmgr_block_desc *b;
-   DWORD s;
+   DWORD s,generation;
    if (deviceid < 0 || deviceid >= MAXDEVICES)
       return;
-   b = (devmgr_block_desc *)devmgr_getdevice(deviceid);
-   if (!b || !b->get_block_size)
+   b = (devmgr_block_desc *)devmgr_getdevice_ref(deviceid);
+   if (b == (devmgr_block_desc *)-1 || !b->get_block_size) {
+      devmgr_putdevice((devmgr_generic *)b);
       return;
+   }
+   generation=devmgr_get_generation(deviceid);
    s = (DWORD)b->get_block_size();
-   if (pc_valid_bsize(s))
+   devmgr_putdevice((devmgr_generic *)b);
+   if (generation && pc_valid_bsize(s)) {
       pc_bsz[deviceid] = s;
+      pc_bsz_generation[deviceid]=generation;
+   }
 }
 
 static int pc_slot(int deviceid, u64 index)
@@ -114,10 +133,13 @@ static pc_page *pc_lookup(int deviceid, u64 index)
 {
    int s = pc_slot(deviceid, index);
    int probe;
+   DWORD device_generation=devmgr_get_generation(deviceid);
    for (probe = 0; probe < 8; probe++) {
       int idx = (s + probe) % PC_NPAGES;
       if ((pc_tab[idx].flags & PC_UPTODATE) &&
           pc_tab[idx].deviceid == deviceid &&
+          blkcache_device_key_is_current(pc_tab[idx].device_generation,
+                                         device_generation) &&
           pc_tab[idx].index == index)
          return &pc_tab[idx];
    }
@@ -167,6 +189,8 @@ static pc_page *pc_claim(int deviceid, u64 index)
       return 0;
    p->deviceid = deviceid;
    p->index = index;
+   p->generation = 0;
+   p->device_generation = devmgr_get_generation(deviceid);
    p->flags = 0;
    return p;
 }
@@ -246,19 +270,32 @@ int blkcache_put(int deviceid, u64 sector, DWORD numblocks, void *buf)
    return 1;
 }
 
-static int pc_dev_rw(int deviceid, int write, u64 lba, DWORD nsect, void *buf)
+static int pc_dev_rw(int deviceid, int write, u64 lba, DWORD nsect, void *buf,
+                     DWORD *device_generation)
 {
-   devmgr_block_desc *b = (devmgr_block_desc *)devmgr_getdevice(deviceid);
-   if (!b || b->hdr.type != DEVMGR_BLOCK)
+   devmgr_block_desc *b = (devmgr_block_desc *)devmgr_getdevice_ref(deviceid);
+   int retval=0;
+   DWORD generation;
+   if (b == (devmgr_block_desc *)-1 || b->hdr.type != DEVMGR_BLOCK) {
+      devmgr_putdevice((devmgr_generic *)b);
       return 0;
-   if (write) {
-      if (!b->write_block)
-         return 0;
-      return b->write_block(lba, (char *)buf, nsect) > 0;
    }
-   if (!b->read_block)
+   generation=devmgr_get_generation(deviceid);
+   if (!generation || (device_generation && *device_generation &&
+                       *device_generation!=generation)) {
+      devmgr_putdevice((devmgr_generic *)b);
       return 0;
-   return b->read_block(lba, (char *)buf, nsect) > 0;
+   }
+   if (device_generation)
+      *device_generation=generation;
+   if (write) {
+      if (b->write_block)
+         retval=b->write_block(lba, (char *)buf, nsect) > 0;
+   } else if (b->read_block) {
+      retval=b->read_block(lba, (char *)buf, nsect) > 0;
+   }
+   devmgr_putdevice((devmgr_generic *)b);
+   return retval;
 }
 
 static int pc_fill_range(int deviceid, u64 pg0, u64 pg1)
@@ -270,6 +307,7 @@ static int pc_fill_range(int deviceid, u64 pg0, u64 pg1)
    while (pg <= pg1) {
       u64 run0, run1, i;
       DWORD np, nsect;
+      DWORD device_generation=0;
       char *bounce;
 
       sync_entercrit(&pc_busy);
@@ -291,7 +329,8 @@ static int pc_fill_range(int deviceid, u64 pg0, u64 pg1)
       if (!bounce)
          return 0;
       nsect = np * sect_per;
-      if (!pc_dev_rw(deviceid, 0, run0 * sect_per, nsect, bounce)) {
+      if (!pc_dev_rw(deviceid, 0, run0 * sect_per, nsect, bounce,
+               &device_generation)) {
          free(bounce);
          return 0;
       }
@@ -305,6 +344,7 @@ static int pc_fill_range(int deviceid, u64 pg0, u64 pg1)
          p = pc_claim(deviceid, run0 + i);
          if (!p)
             continue;
+         p->device_generation=device_generation;
          memcpy(p->data, bounce + (DWORD)i * PC_SIZE, PC_SIZE);
          p->flags = PC_UPTODATE;
          p->age = ++pc_clock;
@@ -325,7 +365,7 @@ int blkcache_read(int deviceid, u64 sector, DWORD numblocks, void *buf)
    if (numblocks == 0 || !buf)
       return 0;
    if (!pc_tab)
-      return pc_dev_rw(deviceid, 0, sector, numblocks, buf);
+      return pc_dev_rw(deviceid, 0, sector, numblocks, buf, 0);
 
    pc_remember_bsize(deviceid);
    bsz = pc_bsize(deviceid);
@@ -345,14 +385,14 @@ int blkcache_read(int deviceid, u64 sector, DWORD numblocks, void *buf)
    sync_leavecrit(&pc_busy);
 
    if (!pc_fill_range(deviceid, pg0, pg1))
-      return pc_dev_rw(deviceid, 0, sector, numblocks, buf);
+      return pc_dev_rw(deviceid, 0, sector, numblocks, buf, 0);
 
    sync_entercrit(&pc_busy);
    ok = pc_copy_out(deviceid, start, end - start, (char *)buf);
    sync_leavecrit(&pc_busy);
    if (ok)
       return 1;
-   return pc_dev_rw(deviceid, 0, sector, numblocks, buf);
+   return pc_dev_rw(deviceid, 0, sector, numblocks, buf, 0);
 }
 
 int blkcache_write(int deviceid, u64 sector, DWORD numblocks, void *buf)
@@ -365,7 +405,7 @@ int blkcache_write(int deviceid, u64 sector, DWORD numblocks, void *buf)
    if (numblocks == 0 || !buf)
       return 0;
    if (!pc_tab)
-      return pc_dev_rw(deviceid, 1, sector, numblocks, buf);
+      return pc_dev_rw(deviceid, 1, sector, numblocks, buf, 0);
 
    pc_remember_bsize(deviceid);
    bsz = pc_bsize(deviceid);
@@ -378,7 +418,7 @@ int blkcache_write(int deviceid, u64 sector, DWORD numblocks, void *buf)
 
    if ((start & (PC_SIZE - 1)) != 0 || (end & (PC_SIZE - 1)) != 0) {
       if (!pc_fill_range(deviceid, pg0, pg1))
-         return pc_dev_rw(deviceid, 1, sector, numblocks, buf);
+         return pc_dev_rw(deviceid, 1, sector, numblocks, buf, 0);
    }
 
    sync_entercrit(&pc_busy);
@@ -401,6 +441,7 @@ int blkcache_write(int deviceid, u64 sector, DWORD numblocks, void *buf)
          p->flags = PC_UPTODATE;
       }
       memcpy(p->data + poff, src + (DWORD)done, n);
+      p->generation++;
       if (!(p->flags & PC_DIRTY))
          pc_dirty++;
       p->flags = PC_UPTODATE | PC_DIRTY;
@@ -410,7 +451,7 @@ int blkcache_write(int deviceid, u64 sector, DWORD numblocks, void *buf)
    sync_leavecrit(&pc_busy);
 
    if (fail)
-      return pc_dev_rw(deviceid, 1, sector, numblocks, buf);
+      return pc_dev_rw(deviceid, 1, sector, numblocks, buf, 0);
    return 1;
 }
 
@@ -427,6 +468,8 @@ int blkcache_flush(void)
    for (i = 0; i < PC_NPAGES; i++) {
       pc_page *p;
       DWORD bsz, nsect;
+      DWORD generation;
+      DWORD device_generation;
       int dev;
       u64 lba, index;
       BYTE copy[PC_SIZE];
@@ -440,23 +483,40 @@ int blkcache_flush(void)
       }
       dev = p->deviceid;
       index = p->index;
+      generation = p->generation;
+      device_generation = p->device_generation;
       memcpy(copy, p->data, PC_SIZE);
       sync_leavecrit(&pc_busy);
 
       pc_remember_bsize(dev);
+      if (!blkcache_device_key_is_current(device_generation,
+                                          devmgr_get_generation(dev))) {
+         sync_entercrit(&pc_busy);
+         if (pc_tab[i].deviceid==dev && pc_tab[i].index==index &&
+             pc_tab[i].device_generation==device_generation) {
+            if (pc_tab[i].flags & PC_DIRTY && pc_dirty)
+               pc_dirty--;
+            pc_tab[i].flags=0;
+            pc_tab[i].deviceid=-1;
+         }
+         sync_leavecrit(&pc_busy);
+         return 0;
+      }
       bsz = pc_bsize(dev);
       lba = index * (PC_SIZE / bsz);
       nsect = PC_SIZE / bsz;
 
       blk_mq_lock(dev);
-      if (!pc_dev_rw(dev, 1, lba, nsect, copy)) {
+      if (!pc_dev_rw(dev, 1, lba, nsect, copy, &device_generation)) {
          blk_mq_unlock(dev);
          return 0;
       }
       blk_mq_unlock(dev);
 
       sync_entercrit(&pc_busy);
-      if (pc_tab[i].deviceid == dev && pc_tab[i].index == index &&
+            if (blkcache_writeback_is_current(
+               pc_tab[i].deviceid == dev && pc_tab[i].index == index,
+               pc_tab[i].generation, generation) &&
           (pc_tab[i].flags & PC_DIRTY)) {
          pc_tab[i].flags &= (BYTE)~PC_DIRTY;
          if (pc_dirty)

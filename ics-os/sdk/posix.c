@@ -946,6 +946,16 @@ int io_uring_enter(int fd, unsigned to_submit, unsigned min_complete, unsigned f
                        (long)min_complete, (long)flags, 0);
 }
 
+static uint32_t uring_load_acquire(uint32_t *p)
+{
+   return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static void uring_store_release(uint32_t *p, uint32_t v)
+{
+   __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
 int io_uring_queue_init(unsigned entries, struct io_uring *ring, unsigned flags)
 {
    struct io_uring_params p;
@@ -971,13 +981,16 @@ int io_uring_queue_init(unsigned entries, struct io_uring *ring, unsigned flags)
    ring->cq_tail = (uint32_t *)(base + p.cq_off.tail);
    ring->cq_mask = (uint32_t *)(base + p.cq_off.ring_mask);
    ring->cqes = (struct io_uring_cqe *)(base + p.cq_off.cqes);
+   ring->sqe_tail = uring_load_acquire(ring->sq_tail);
    return 0;
 }
 
 void io_uring_queue_exit(struct io_uring *ring)
 {
-   if (ring && ring->ring_fd >= 0)
+   if (ring && ring->ring_fd >= 0) {
       close(ring->ring_fd);
+      ring->ring_fd = -1;
+   }
 }
 
 struct io_uring_sqe *io_uring_get_sqe(struct io_uring *ring)
@@ -985,14 +998,14 @@ struct io_uring_sqe *io_uring_get_sqe(struct io_uring *ring)
    unsigned tail, head, mask, idx;
    if (!ring)
       return 0;
-   tail = *ring->sq_tail;
-   head = *ring->sq_head;
+   tail = ring->sqe_tail;
+   head = uring_load_acquire(ring->sq_head);
    mask = *ring->sq_mask;
    if (tail - head >= ring->sq_entries)
       return 0;
    idx = ring->sq_array[tail & mask];
-   *ring->sq_tail = tail + 1;
    memset(&ring->sqes[idx], 0, sizeof(struct io_uring_sqe));
+   ring->sqe_tail = tail + 1;
    return &ring->sqes[idx];
 }
 
@@ -1001,10 +1014,11 @@ int io_uring_submit(struct io_uring *ring)
    unsigned head, tail;
    if (!ring)
       return -1;
-   head = *ring->sq_head;
-   tail = *ring->sq_tail;
+   head = uring_load_acquire(ring->sq_head);
+   tail = ring->sqe_tail;
    if (tail == head)
       return 0;
+   uring_store_release(ring->sq_tail, tail);
    return io_uring_enter(ring->ring_fd, tail - head, 0, 0);
 }
 
@@ -1013,8 +1027,9 @@ int io_uring_submit_and_wait(struct io_uring *ring, unsigned wait_nr)
    unsigned head, tail;
    if (!ring)
       return -1;
-   head = *ring->sq_head;
-   tail = *ring->sq_tail;
+   head = uring_load_acquire(ring->sq_head);
+   tail = ring->sqe_tail;
+   uring_store_release(ring->sq_tail, tail);
    return io_uring_enter(ring->ring_fd, tail - head, wait_nr,
                          IORING_ENTER_GETEVENTS);
 }
@@ -1024,13 +1039,13 @@ int io_uring_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe)
    unsigned head, tail, mask;
    if (!ring || !cqe)
       return -1;
-   head = *ring->cq_head;
-   tail = *ring->cq_tail;
+   head = uring_load_acquire(ring->cq_head);
+   tail = uring_load_acquire(ring->cq_tail);
    if (head == tail) {
       if (io_uring_enter(ring->ring_fd, 0, 1, IORING_ENTER_GETEVENTS) < 0)
          return -1;
-      head = *ring->cq_head;
-      tail = *ring->cq_tail;
+      head = uring_load_acquire(ring->cq_head);
+      tail = uring_load_acquire(ring->cq_tail);
       if (head == tail)
          return -1;
    }
@@ -1043,7 +1058,8 @@ void io_uring_cqe_seen(struct io_uring *ring, struct io_uring_cqe *cqe)
 {
    (void)cqe;
    if (ring)
-      *ring->cq_head = *ring->cq_head + 1;
+      uring_store_release(ring->cq_head,
+                 uring_load_acquire(ring->cq_head) + 1);
 }
 
 static char *ics_env_empty[] = { 0 };

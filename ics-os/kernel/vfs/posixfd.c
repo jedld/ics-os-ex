@@ -14,6 +14,8 @@
 #include "../iomgr/iosched.h"
 #include "../hardware/virtio/virtio.h"
 #include "../hardware/virtio/virtio_blk.h"
+#include "../cpu/spinlock.h"
+#include "../process/completion.h"
 #include "../stdlib/time.h"
 #include "posixfd.h"
 
@@ -104,9 +106,23 @@ struct ics_uring {
    DWORD sq_array[URING_MAX];
    io_uring_cqe cqes[URING_MAX];
    io_uring_sqe sqes[URING_MAX];
-   PCB386 *waiter;
+   completion_t cq_event;
    uring_blk_cb blkcb[URING_MAX];
+   spinlock_t lock;
+   DWORD inflight;
+   DWORD closing;
+   DWORD refs;
 };
+
+static inline DWORD uring_load_acquire(volatile DWORD *p)
+{
+   return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static inline void uring_store_release(volatile DWORD *p, DWORD v)
+{
+   __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
 
 typedef struct __attribute__((packed)) {
    DWORD head, tail, ring_mask, ring_entries, flags, dropped, array, resv1;
@@ -133,13 +149,39 @@ typedef struct __attribute__((packed)) {
 
 static int fd_alloc_slot(void)
 {
-   int i;
+   int i,fd=-EMFILE;
    if (!current_process)
       return -EMFILE;
+   spin_lock(&current_process->fd_lock);
    for (i = 3; i < FD_MAX; i++)
-      if (current_process->fds[i].type == FD_NONE)
-         return i;
-   return -EMFILE;
+      if (current_process->fds[i].type == FD_NONE) {
+         current_process->fds[i].type=FD_RESERVED;
+         current_process->fds[i].ptr=0;
+         fd=i;
+         break;
+      }
+   spin_unlock(&current_process->fd_lock);
+   return fd;
+}
+
+static void fd_install(int fd,int type,void *ptr)
+{
+   spin_lock(&current_process->fd_lock);
+   if (fd>=0 && fd<FD_MAX && current_process->fds[fd].type==FD_RESERVED) {
+      current_process->fds[fd].ptr=ptr;
+      current_process->fds[fd].type=type;
+   }
+   spin_unlock(&current_process->fd_lock);
+}
+
+static void fd_release_slot(int fd)
+{
+   spin_lock(&current_process->fd_lock);
+   if (fd>=0 && fd<FD_MAX && current_process->fds[fd].type==FD_RESERVED) {
+      current_process->fds[fd].type=FD_NONE;
+      current_process->fds[fd].ptr=0;
+   }
+   spin_unlock(&current_process->fd_lock);
 }
 
 static file_PCB *fd_file(int fd)
@@ -230,11 +272,12 @@ long sys_open(const char *path, int flags, int mode)
       if (fd < 0)
          return fd;
       b = (fd_blk_t *)malloc(sizeof(fd_blk_t));
-      if (!b)
+      if (!b) {
+         fd_release_slot(fd);
          return -ENOMEM;
+      }
       b->off = 0;
-      current_process->fds[fd].type = FD_BLK;
-      current_process->fds[fd].ptr = b;
+      fd_install(fd,FD_BLK,b);
       return fd;
    }
    fd = fd_alloc_slot();
@@ -242,12 +285,13 @@ long sys_open(const char *path, int flags, int mode)
       return fd;
    vmode = posix_to_vfs_mode(flags);
    fcb = openfilex((char *)path, vmode);
-   if (!fcb)
+   if (!fcb) {
+      fd_release_slot(fd);
       return -ENOENT;
+   }
    if (flags & ICSOS_O_DIRECT)
       vfs_setbuffer(fcb, 0, 0, FILE_IONBF);
-   current_process->fds[fd].type = FD_VFS;
-   current_process->fds[fd].ptr = fcb;
+   fd_install(fd,FD_VFS,fcb);
    return fd;
 }
 
@@ -255,6 +299,72 @@ static void uring_free(ics_uring *r)
 {
    if (r)
       free(r);
+}
+
+static void uring_put(ics_uring *r)
+{
+   int release=0;
+   if (!r)
+      return;
+   spin_lock(&r->lock);
+   if (r->refs)
+      r->refs--;
+   if (r->closing && r->refs==0 && r->inflight==0)
+      release=1;
+   spin_unlock(&r->lock);
+   if (release)
+      uring_free(r);
+}
+
+static ics_uring *uring_fdget(int fd)
+{
+   ics_uring *r=0,*candidate;
+   if (!current_process || fd<0 || fd>=FD_MAX)
+      return 0;
+   spin_lock(&current_process->fd_lock);
+   if (current_process->fds[fd].type==FD_URING) {
+      candidate=(ics_uring*)current_process->fds[fd].ptr;
+      if (candidate) {
+         spin_lock(&candidate->lock);
+         if (!candidate->closing) {
+            candidate->refs++;
+            r=candidate;
+         }
+         spin_unlock(&candidate->lock);
+      }
+   }
+   spin_unlock(&current_process->fd_lock);
+   return r;
+}
+
+static int uring_close(ics_uring *r)
+{
+   unsigned start;
+
+   if (!r)
+      return 0;
+   spin_lock(&r->lock);
+   r->closing = 1;
+   spin_unlock(&r->lock);
+
+   start = ticks;
+   for (;;) {
+      DWORD inflight;
+      virtio_blk_harvest();
+      spin_lock(&r->lock);
+      inflight = r->inflight;
+      if (!inflight && r->refs==1) {
+         spin_unlock(&r->lock);
+         uring_put(r);
+         return 0;
+      }
+      spin_unlock(&r->lock);
+      if (ticks - start > URING_WAIT_TICKS) {
+         uring_put(r); /* Last callback/syscall performs deferred release. */
+         return -EIO;
+      }
+      cpu_idle();
+   }
 }
 
 long sys_close(int fd)
@@ -270,10 +380,17 @@ long sys_close(int fd)
       return fclose(f);
    }
    if (current_process->fds[fd].type == FD_URING) {
-      uring_free((ics_uring *)current_process->fds[fd].ptr);
+      ics_uring *r;
+      spin_lock(&current_process->fd_lock);
+      if (current_process->fds[fd].type != FD_URING) {
+         spin_unlock(&current_process->fd_lock);
+         return -EBADF;
+      }
+      r = (ics_uring *)current_process->fds[fd].ptr;
       current_process->fds[fd].type = FD_NONE;
       current_process->fds[fd].ptr = 0;
-      return 0;
+      spin_unlock(&current_process->fd_lock);
+      return uring_close(r);
    }
    if (current_process->fds[fd].type == FD_BLK) {
       fd_blk_t *b = (fd_blk_t *)current_process->fds[fd].ptr;
@@ -579,9 +696,14 @@ long sys_io_uring_setup(unsigned entries, void *params)
    if (fd < 0)
       return fd;
    r = (ics_uring *)malloc(sizeof(ics_uring));
-   if (!r)
+   if (!r) {
+      fd_release_slot(fd);
       return -ENOMEM;
+   }
    memset(r, 0, sizeof(ics_uring));
+   spin_init(&r->lock);
+   completion_init(&r->cq_event);
+   r->refs = 1; /* fd ownership */
    r->sq_ring_mask = n - 1;
    r->sq_ring_entries = n;
    r->cq_ring_mask = n - 1;
@@ -609,8 +731,7 @@ long sys_io_uring_setup(unsigned entries, void *params)
    p->cq_off.user_addr = (u64)(uintptr)r;
    p->resv[0] = (DWORD)((uintptr)&r->sqes[0] - (uintptr)r);
 
-   current_process->fds[fd].type = FD_URING;
-   current_process->fds[fd].ptr = r;
+   fd_install(fd,FD_URING,r);
    return fd;
 }
 
@@ -620,21 +741,34 @@ static void uring_vblk_done(void *arg, int res)
    ics_uring *r;
    DWORD cq_tail;
    io_uring_cqe *cqe;
+   int release=0;
 
    if (!cb || !cb->ring)
       return;
    r = cb->ring;
-   cq_tail = r->cq_tail;
-   cqe = &r->cqes[cq_tail & r->cq_ring_mask];
-   cqe->user_data = cb->user_data;
-   cqe->res = res;
-   cqe->flags = 0;
-   r->cq_tail = cq_tail + 1;
+   spin_lock(&r->lock);
+   cq_tail = uring_load_acquire(&r->cq_tail);
+   if (cq_tail - uring_load_acquire(&r->cq_head) < r->cq_ring_entries) {
+      cqe = &r->cqes[cq_tail & r->cq_ring_mask];
+      cqe->user_data = cb->user_data;
+      cqe->res = res;
+      cqe->flags = 0;
+      uring_store_release(&r->cq_tail, cq_tail + 1);
+   } else {
+      r->cq_overflow++;
+   }
    cb->ring = 0;
-   if (r->waiter)
-      r->waiter->waiting = 0;
+   if (r->inflight)
+      r->inflight--;
+   complete_all(&r->cq_event);
+   if (r->closing && r->refs==0 && r->inflight==0)
+      release=1;
+   spin_unlock(&r->lock);
+   if (release)
+      uring_free(r);
 }
 
+/* Caller holds r->lock. */
 static int uring_alloc_cb(ics_uring *r)
 {
    int i;
@@ -654,16 +788,31 @@ static int uring_queue_vblk(ics_uring *r, io_uring_sqe *sqe,
       return -EINVAL;
    if (!virtio_blk_present())
       return -EIO;
+   spin_lock(&r->lock);
+   if (r->closing) {
+      spin_unlock(&r->lock);
+      return -EBADF;
+   }
    i = uring_alloc_cb(r);
-   if (i < 0)
+   if (i < 0) {
+      spin_unlock(&r->lock);
       return -ENOMEM;
+   }
    r->blkcb[i].ring = r;
    r->blkcb[i].user_data = sqe->user_data;
+   r->inflight++;
+   spin_unlock(&r->lock);
    sector = off / VIRTIO_BLK_SECTOR_SIZE;
    n = virtio_blk_submit(type, sector, buf, bytes,
                          uring_vblk_done, &r->blkcb[i], 0);
    if (n < 0) {
-      r->blkcb[i].ring = 0;
+      spin_lock(&r->lock);
+      if (r->blkcb[i].ring) {
+         r->blkcb[i].ring = 0;
+         if (r->inflight)
+            r->inflight--;
+      }
+      spin_unlock(&r->lock);
       return n;
    }
    return URING_QUEUED;
@@ -687,15 +836,30 @@ static int uring_try_vblk(ics_uring *r, io_uring_sqe *sqe)
 
    if (sqe->opcode == IORING_OP_FSYNC) {
       int i, n;
+      spin_lock(&r->lock);
+      if (r->closing) {
+         spin_unlock(&r->lock);
+         return -EBADF;
+      }
       i = uring_alloc_cb(r);
-      if (i < 0)
+      if (i < 0) {
+         spin_unlock(&r->lock);
          return -ENOMEM;
+      }
       r->blkcb[i].ring = r;
       r->blkcb[i].user_data = sqe->user_data;
+      r->inflight++;
+      spin_unlock(&r->lock);
       n = virtio_blk_submit(VIRTIO_BLK_T_FLUSH, 0, 0, 0,
                             uring_vblk_done, &r->blkcb[i], 0);
       if (n < 0) {
-         r->blkcb[i].ring = 0;
+         spin_lock(&r->lock);
+         if (r->blkcb[i].ring) {
+            r->blkcb[i].ring = 0;
+            if (r->inflight)
+               r->inflight--;
+         }
+         spin_unlock(&r->lock);
          return n;
       }
       return URING_QUEUED;
@@ -777,17 +941,13 @@ long sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
    ics_uring *r;
    unsigned i, done = 0;
 
-   if (!current_process || fd < 0 || fd >= FD_MAX)
-      return -EBADF;
-   if (current_process->fds[fd].type != FD_URING)
-      return -EBADF;
-   r = (ics_uring *)current_process->fds[fd].ptr;
+   r=uring_fdget(fd);
    if (!r)
       return -EBADF;
 
    for (i = 0; i < to_submit; i++) {
-      DWORD head = r->sq_head;
-      DWORD tail = r->sq_tail;
+      DWORD head = uring_load_acquire(&r->sq_head);
+      DWORD tail = uring_load_acquire(&r->sq_tail);
       DWORD mask = r->sq_ring_mask;
       DWORD idx;
       io_uring_sqe *sqe;
@@ -802,31 +962,51 @@ long sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
       v = uring_try_vblk(r, sqe);
       if (v != URING_QUEUED) {
          io_uring_cqe *cqe;
-         DWORD cq_tail = r->cq_tail;
-         cqe = &r->cqes[cq_tail & r->cq_ring_mask];
-         cqe->user_data = sqe->user_data;
-         cqe->res = (v < 0) ? v : uring_do_sqe(sqe);
-         cqe->flags = 0;
-         r->cq_tail = cq_tail + 1;
+         int res = (v < 0) ? v :
+                   ((sqe->opcode == IORING_OP_CLOSE && sqe->fd == fd) ?
+                    -EBADF : uring_do_sqe(sqe));
+         DWORD cq_tail;
+         spin_lock(&r->lock);
+         cq_tail = uring_load_acquire(&r->cq_tail);
+         if (cq_tail - uring_load_acquire(&r->cq_head) < r->cq_ring_entries) {
+            cqe = &r->cqes[cq_tail & r->cq_ring_mask];
+            cqe->user_data = sqe->user_data;
+            cqe->res = res;
+            cqe->flags = 0;
+            uring_store_release(&r->cq_tail, cq_tail + 1);
+            complete_all(&r->cq_event);
+         } else {
+            r->cq_overflow++;
+         }
+         spin_unlock(&r->lock);
       }
-      r->sq_head = head + 1;
+      uring_store_release(&r->sq_head, head + 1);
       done++;
    }
 
    if (min_complete) {
       unsigned start = ticks;
-      r->waiter = current_process;
-      while ((r->cq_tail - r->cq_head) < min_complete) {
+      for (;;) {
+         spin_lock(&r->lock);
+         if ((uring_load_acquire(&r->cq_tail) -
+              uring_load_acquire(&r->cq_head)) >= min_complete) {
+            spin_unlock(&r->lock);
+            break;
+         }
+         completion_init(&r->cq_event);
+         spin_unlock(&r->lock);
          virtio_blk_harvest();
-         if ((r->cq_tail - r->cq_head) >= min_complete)
+         if ((uring_load_acquire(&r->cq_tail) -
+              uring_load_acquire(&r->cq_head)) >= min_complete)
             break;
          if (ticks - start > URING_WAIT_TICKS)
             break;
-         cpu_idle();
+         if (!completion_done(&r->cq_event))
+            cpu_idle();
       }
-      r->waiter = 0;
    }
    (void)flags;
+   uring_put(r);
    return (int)done;
 }
 

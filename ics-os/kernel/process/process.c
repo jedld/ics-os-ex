@@ -872,7 +872,7 @@ DWORD kill_process(DWORD processid){
                parent->nlive--;
             if (parent->waitq_n < WAITQ_MAX) {
                parent->waitq_pid[parent->waitq_n] = (int)ptr->processid;
-               parent->waitq_st[parent->waitq_n] = 0;
+               parent->waitq_st[parent->waitq_n] = ptr->exit_status;
                parent->waitq_n++;
             }
          }
@@ -992,7 +992,7 @@ DWORD kill_children(DWORD processid){
 //called when a process wishes to terminate itself
 DWORD exit(DWORD val){
    DWORD flags;
-   (void)val;
+   current_process->exit_status = (int)(val & 0xff);
    //close all files the process has opened
    closeallfiles(current_process->processid);
     
@@ -1634,7 +1634,7 @@ void schedule_from_timer(void){
                parent->nlive--;
             if (parent->waitq_n < WAITQ_MAX) {
                parent->waitq_pid[parent->waitq_n] = (int)dying->processid;
-               parent->waitq_st[parent->waitq_n] = 0;
+               parent->waitq_st[parent->waitq_n] = dying->exit_status;
                parent->waitq_n++;
             }
          }
