@@ -27,7 +27,7 @@ all: obj Kernel64.bin
 obj: scheduler.o fat.o ext4.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o posixfd.o devmgr_error.o kernel32.o \
 		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o virtio_blk.o
 		
-kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/usb.h \
+kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/xhci.c hardware/usb/usb.h \
 		hardware/chips/serial.c hardware/ATA/ide.c \
 		hardware/floppy/floppy.c hardware/floppy/floppy.h \
 		memory/dexmem.c memory/dexmem.h memory/memlayout.h \

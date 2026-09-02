@@ -68,7 +68,12 @@ static int copy_one(const char *src, const char *dst)
 static int cp_main(int argc, char **argv)
 {
    int i = 1;
-   while (i < argc && argv[i][0] == '-') i++;
+   int verbose = 0;
+   while (i < argc && argv[i][0] == '-') {
+      if (strcmp(argv[i], "-v") == 0)
+         verbose = 1;
+      i++;
+   }
    if (argc - i != 2) {
       fprintf(stderr, "usage: cp source destination\n");
       return 2;
@@ -77,6 +82,8 @@ static int cp_main(int argc, char **argv)
       fprintf(stderr, "cp: failed: %s -> %s\n", argv[i], argv[i + 1]);
       return 1;
    }
+   if (verbose)
+      printf("cp: copied %s -> %s\n", argv[i], argv[i + 1]);
    return 0;
 }
 

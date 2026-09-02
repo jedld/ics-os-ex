@@ -787,8 +787,7 @@ long sys_fsync(int fd)
    }
    sync_leavecrit(&f->io_busy);
    vfs_file_put(f);
-   iomgr_request_flush();
-   if (!blkcache_flush())
+   if (!iomgr_flushmgr())
       return -EIO;
    return 0;
 }

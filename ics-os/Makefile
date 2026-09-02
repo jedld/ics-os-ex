@@ -17,7 +17,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci-gap
+.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-no-device
 
 test-io-unit:
 	@mkdir -p /tmp/icsos-tests
@@ -179,9 +179,14 @@ test-usb-storage: vmdex ics-os-usb.img
 	@chmod +x scripts/test-qemu-uhci-storage.sh
 	@QEMU_X64=$(QEMU_X64) scripts/test-qemu-uhci-storage.sh ics-os-usb.img
 
-test-usb-storage-xhci-gap: vmdex ics-os-usb.img
-	@chmod +x scripts/test-qemu-xhci-gap.sh
-	@QEMU_X64=$(QEMU_X64) scripts/test-qemu-xhci-gap.sh ics-os-usb.img
+test-usb-storage-xhci: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-no-device: vmdex
+	@chmod +x scripts/test-qemu-xhci-no-device.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 scripts/test-qemu-xhci-no-device.sh
 
 test-smp: vmdex
 	@echo "Building Multiboot2 ISO for SMP test..."

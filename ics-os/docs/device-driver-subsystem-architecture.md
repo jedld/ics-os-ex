@@ -834,9 +834,12 @@ Core concepts:
 - USB disconnect closes interface gates before URB cancellation and waits for all
   completions before freeing endpoints.
 
-Migrate current UHCI as the first host-controller backend, but replace polling/global
-state with HCD-owned objects and URBs. Add xHCI for modern hardware after the USB core
-is stable.
+UHCI and the first xHCI bring-up backend now share the legacy polling MSC/BOT
+layer. The xHCI path covers one directly attached mass-storage device in QEMU,
+including command/event/transfer rings and cache synchronization. It remains a
+transition implementation: replace polling/global state with HCD-owned objects,
+URBs, managed DMA, interrupts, hubs, hotplug, cancellation, and recovery before
+claiming a production USB stack.
 
 ### 17.2 Networking
 

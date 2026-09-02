@@ -2,6 +2,50 @@
 
 ## 2026-09-02 (Manila, UTC+8)
 
+### 16:08 — xHCI correctness hardening
+
+**Current problem:** QEMU's direct-attached storage path passed, but review
+found specification, concurrency, malformed-input, and test-oracle cases that
+could fail on a physical controller or hide a failed guest copy.
+
+**Activity completed:** corrected scratchpad-count decoding, preserved chained
+transfer TDs across ring wrap, rejected truncated configuration descriptors,
+serialized device flush callbacks with ordinary block I/O, negotiated EP0
+packet size from the device descriptor, sized the PCI BAR with decoding and bus
+mastering disabled, validated controller register ranges, and avoided writes to
+PCI status bits. UHCI enumeration now falls through to xHCI when no UHCI
+mass-storage device is attached. The persistence runner removes any old result
+before boot, so its mandatory host extraction and byte comparison cannot pass
+on stale output.
+
+**QA delivered:** sequential q35 xHCI persistence, q35 xHCI no-device, UHCI
+persistence, POSIX I/O, and build-tool gates pass. A final focused code review
+found no blocking correctness issues. Physical N150 readiness remains
+unclaimed; BARs above 4 GiB, hubs/hotplug, interrupts, robust recovery, and
+hardware qualification remain unsupported.
+
+### 16:02 — Initial xHCI mass-storage support
+
+**Current problem:** keep a boot thumb drive available as writable root storage
+after firmware handoff on modern Intel systems that expose USB through xHCI.
+
+**Activity completed:** added a polling xHCI backend under the existing USB
+descriptor/BOT/block layer. It discovers PCI class `0c0330`, performs ownership
+handoff and bounded controller/port reset, manages command/event/control/bulk
+rings, supports 32/64-byte contexts and scratchpads, configures one directly
+attached MSC device, and reuses `usb0`/`usb0p0`. Added synchronous SCSI
+`SYNCHRONIZE CACHE(10)` and serialized `fsync` page-cache/device flushes. Fixed
+the kernel Make dependency so changes to text-included `xhci.c` cannot reuse a
+stale object.
+
+**QA delivered:** `make test-usb-storage-xhci` passes on QEMU q35 with a
+separate firmware boot CD, xHCI-only image attachment, USB FAT root, guest
+write/`fsync`, successful device-cache synchronization, and byte-identical host
+readback. `make test-usb-storage-xhci-no-device`, the UHCI persistence gate, and
+`make test-posixio` pass. Physical N150 readiness remains unclaimed pending BAR
+mapping above 4 GiB, hubs/hotplug/recovery, interrupt/DMA hardening, and laptop
+qualification.
+
 ### 15:48 — QEMU USB-controller qualification
 
 **Current problem:** qualify the image through an actual emulated USB host

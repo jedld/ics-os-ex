@@ -705,7 +705,7 @@ void dex_init(){
    printf("Initializing virtio-blk...\n");
    virtio_blk_init();
 
-   printf("Initializing USB (UHCI) mass-storage driver...\n");
+   printf("Initializing USB mass-storage drivers...\n");
    usb_init();
    if (usb_storage_available())
       printf("[OK]\n");

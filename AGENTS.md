@@ -39,6 +39,9 @@ Useful individual targets (from `ics-os/`):
 | `test-tccboot` | In-OS TinyCC rebuilds itself (`tccnew.exe`) and compiles `min.c` |
 | `test-tcc-kbuild` | Optional TinyCC kernel experiment; not a supported-path gate |
 | `test-iobench` | CD sequential map; 4KiB page cache hits; `IOBENCH_PASS` + `IOBENCH_CACHE_OK` |
+| `test-usb-storage` | UHCI USB root; guest write + SCSI cache sync + host readback |
+| `test-usb-storage-xhci` | q35 xHCI USB root; guest write + SCSI cache sync + host readback |
+| `test-usb-storage-xhci-no-device` | q35 xHCI no-device path reaches console without registering USB storage |
 | `test-posixio` | POSIX fds + preadv/pwritev/fsync + io_uring; ramdisk `POSIXIO_PASS`/`URING_PASS`; virtio `/dev/vblk` `URING_VBLK_PASS` |
 | `test-virtio` | QEMU virtio-blk DMA; MSI-X completions; `VIRTIO_BLK_OK` + `VIRTIO_IRQ_OK` |
 | `test-spawn` | `posix_spawn` + `waitpid` of `hello.exe` (`SPAWN_PASS`); FAT `/work` on virtio (`WORK_DISK_PASS`) |

@@ -37,6 +37,7 @@ int flushing=0,flushok=1;
 sync_sharedvar IOrequest_busy;
 static sync_sharedvar io_devlock[MAXDEVICES];
 static DWORD blk_mq_dispatched[MAXDEVICES];
+static sync_sharedvar iomgr_flush_busy;
 static DWORD iomgr_diskmgr_pid;
 
 extern PCB386 *ps_findprocess(DWORD processid);
@@ -88,6 +89,7 @@ DWORD iomgr_init()
    memset(&IOrequest_busy,0,sizeof(sync_sharedvar));
    memset(io_devlock, 0, sizeof(io_devlock));
    memset(blk_mq_dispatched, 0, sizeof(blk_mq_dispatched));
+   memset(&iomgr_flush_busy, 0, sizeof(iomgr_flush_busy));
 
    blkcache_init();
 
@@ -105,15 +107,22 @@ DWORD iomgr_init()
 
 DWORD iomgr_flushmgr()
  {
- int ret;
+ int ret,ok=1;
 
+ sync_entercrit(&iomgr_flush_busy);
  if (!blkcache_flush())
+    {
     printf("Error writing page cache. Data might be lost.\n");
+    ok=0;
+    }
 
  ret = devmgr_flushblocks();
- if (ret==-1)
+ if (ret<0) {
     printf("Error writing to device %d. Data might be lost.\n",ret);
- return 1;
+    ok=0;
+ }
+ sync_leavecrit(&iomgr_flush_busy);
+ return ok;
  };
 
 static u64 iomgr_execjob(IOrequest *ptr);

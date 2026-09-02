@@ -35,13 +35,13 @@ functional test suite**, not as a mature unit-testing or production QA
 framework. Its end-to-end tests should be retained and placed at the top of a
 new test pyramid rather than replaced.
 
-The USB image has disposable VirtualBox BIOS and UEFI gates plus a QEMU UHCI
-controller gate. They require FAT32 root mount, guest create/write/`fsync`, VM
-termination, and byte-for-byte host readback. The QEMU gate boots from a
-separate CD and asserts UHCI enumeration and `usb0p0` root selection. An xHCI
-expected-gap lane proves the same image remains undiscovered behind xHCI and
-cannot pass through CD fallback. Modern xHCI hardware still requires a passing
-emulated lane and physical qualification.
+The USB image has disposable VirtualBox BIOS and UEFI gates plus QEMU UHCI and
+q35 xHCI controller gates. They require FAT32 root mount, guest
+create/write/`fsync`, synchronous SCSI cache flush, VM termination, and
+byte-for-byte host readback. The QEMU gates boot from a separate CD and assert
+the selected HCD plus `usb0p0` root selection. An xHCI no-device lane checks
+bounded failure, no accidental USB registration, and continued console startup.
+Modern xHCI hardware still requires physical qualification.
 
 The first incremental host-unit foothold now exists: `make test-io-unit` emits
 TAP 13 for block-cache generation decisions. `test-posixio` runs twice under
@@ -118,7 +118,7 @@ timeouts, crashes, skips, and artifacts.
 | Process and ABI | `test-exec`, `test-spawn` | ELF64 load/execute, `posix_spawn()`, `waitpid()`, writable work disk | Smoke cases only; spawn test does not assert decoded child status or abnormal exits |
 | Fork | `test-fork`, `test-fork-matrix` | COW return ABI and isolation, one-owner fast path, immutable text, injected COW OOM, inherited fd, wait/exit semantics, and ten-child delayed reap on 1/2/4/8 vCPUs | Active CPL0 user/syscall stacks are eager-copied; no shootdown-loss, DMA-pin, unmap-race, multithread rejection, or in-flight io_uring rejection case yet |
 | Storage and async I/O | `test-iobench`, `test-virtio`, `test-posixio` | CD/page-cache behavior, virtio-blk DMA/MSI-X, selected POSIX and io_uring operations | Mostly one vCPU; no saturation, cancellation, reset, ENOSPC, corruption, or durability matrix |
-| USB devices | `test-usb-storage`, `test-usb-storage-xhci-gap`; `test-usb`, `test-usb-amd64` launch helpers | UHCI enumeration, USB-root selection, durable FAT write/readback; deterministic xHCI unsupported boundary | xHCI remains an expected gap; launch helpers still have no assertions; no hot-unplug, reset, contention, or physical-hardware lane |
+| USB devices | `test-usb-storage`, `test-usb-storage-xhci`, `test-usb-storage-xhci-no-device`; `test-usb`, `test-usb-amd64` launch helpers | UHCI/q35 xHCI enumeration, USB-root selection, SCSI cache sync, durable FAT readback, and xHCI no-device failure | Polling single-device backend; no hubs, hot-unplug, recovery, contention, high-BAR, or physical-hardware lane |
 | User toolchain | `test-bintools`, `test-buildtools`, `test-make` | In-OS assembler, archiver, linker, utilities, GNU Make, and generated program execution | Expensive whole-guest tests with ad hoc probes and marker contracts |
 | GCC path | `test-cc1`, `test-gcc`, `test-gccdriver`, `test-gcc-kbuild`, `test-kbuild` | Frontend, driver, toolchain, kernel generation, kexec, and capability checks | KVM/host-CPU dependence for most jobs; long feedback cycle |
 | Strict closure | `test-selfhost-cert` | Intended GCC rebuild, rebuilt Make, provenance, kernel rebuild, kexec, and capability loop | Eight-hour timeout, one vCPU, hard-coded object count, and strict closure not yet a consistently green release gate |

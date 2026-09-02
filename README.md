@@ -59,7 +59,8 @@ $ make test-smp-matrix    # QEMU -smp 1/2/4/8 topology matrix
 $ make test-exec          # host-built hello.exe (ELF64 CRT)
 $ make test-kbuild        # in-OS GCC builds ICS-OS and kexecs the result
 $ make test-usb-storage   # QEMU UHCI USB root + durable FAT write/readback
-$ make test-usb-storage-xhci-gap # expected gap: xHCI image is not discovered
+$ make test-usb-storage-xhci # QEMU q35 xHCI USB root + durable readback
+$ make test-usb-storage-xhci-no-device # clean xHCI no-device failure path
 $ make test-vbox-usb-image      # BIOS USB image + persistent FAT write/readback
 $ make test-vbox-usb-image-efi  # UEFI USB image + persistent FAT write/readback
 $ make test-integration   # test-boot + test-smp + test-exec

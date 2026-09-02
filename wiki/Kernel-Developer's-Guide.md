@@ -152,9 +152,10 @@ a global registry lock, or force-unload active in-kernel driver text.
 
 For USB storage changes, run `make test-usb-storage`. It boots from a separate
 CD and requires the image attached through QEMU UHCI to enumerate as `usb0p0`,
-mount as root, and survive guest `fsync` plus host byte readback. Also run
-`make test-usb-storage-xhci-gap`; until xHCI exists this must report
-`EXPECTED_GAP`, use the CD root, and never register `usb0`.
+mount as root, issue SCSI cache synchronization, and survive guest `fsync` plus
+host byte readback. `make test-usb-storage-xhci` applies the same contract on
+q35 xHCI. `make test-usb-storage-xhci-no-device` requires bounded probe failure,
+no `usb0` registration, and continued console operation.
 
 The first implementation target is a virtual bus/device and sample async driver,
 followed by the IRQ and DMA foundations and a complete virtio-blk lifecycle. Do not

@@ -1,6 +1,6 @@
 /*
   Name: usb.h
-  Description: USB UHCI host and Mass Storage Class (Bulk-Only) support.
+  Description: USB UHCI/xHCI host and Mass Storage Class (Bulk-Only) support.
                Used to boot ICS-OS from a USB thumb drive and mount that
                drive as the root filesystem.
 */

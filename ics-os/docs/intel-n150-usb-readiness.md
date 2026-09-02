@@ -26,52 +26,54 @@ Run these gates before flashing:
 cd ics-os
 make usb
 make test-usb-storage
-make test-usb-storage-xhci-gap
+make test-usb-storage-xhci
+make test-usb-storage-xhci-no-device
 make test-vbox-usb-image
 make test-vbox-usb-image-efi
 ```
 
 The QEMU UHCI gate boots the kernel from a separate CD, attaches a disposable
 copy of the image only through `piix3-usb-uhci`, requires `usb0p0` to become the
-root, performs a guest write and `fsync`, and compares the persisted bytes on
-the host. The xHCI expected-gap lane attaches the same image through
-`qemu-xhci` and requires the kernel to leave it undiscovered while using the CD
-root. A CD fallback can therefore never be mistaken for USB success.
+root, performs a guest write and `fsync`, requires SCSI cache synchronization,
+and compares the persisted bytes on the host. The QEMU q35 xHCI lane applies
+the same contract through `qemu-xhci`. Its no-device lane requires bounded
+probe failure, no `usb0` registration, no kernel fault, and continued console
+operation. Firmware boot can therefore never be mistaken for USB success.
 
 VirtualBox IDE validates firmware discovery, GRUB, kernel boot, FAT32 mounting,
 allocation, block-cache writeback, and persistence. It does not validate that
 the kernel can operate the laptop's physical USB controller.
 
-## N150 blocker
+## N150 qualification blockers
 
 Intel N150-class laptops expose modern USB ports through an xHCI controller.
-ICS-OS currently has only a polling UHCI host controller and USB mass-storage
-path. GRUB firmware can read the stick and load the kernel, but after firmware
-services end the kernel must own xHCI to continue reading `/icsos`. Without an
-xHCI driver, physical boot is expected to fail at root-device discovery or root
-mount unless the firmware provides a nonstandard legacy handoff.
+ICS-OS now has a polling xHCI bring-up backend that passes on QEMU q35. It
+performs PCI class discovery, low-MMIO BAR sizing and register-range validation,
+BIOS ownership handoff, controller/port reset, command and event rings,
+32/64-byte contexts, scratchpad allocation, slot/address/configuration commands,
+control and bulk transfers, BOT mass storage, FAT root I/O, and SCSI cache
+synchronization.
 
-xHCI support is therefore the release blocker for using the same physical stick
-as the root and working disk. Required work includes:
+This is not yet a production xHCI stack or proof of N150 compatibility. The
+remaining blockers are:
 
-1. PCI xHCI discovery, BAR mapping with uncacheable MMIO attributes, BIOS/OS
-   ownership handoff, reset, halt, and run-state management.
-2. DMA-safe command, event, and transfer rings; 64-bit DMA addressing; cycle-bit
-   handling; memory barriers; and cache coherency through a shared DMA API.
-3. Root-hub port reset and state changes, device-slot/address/configuration
-   commands, endpoint contexts, and control transfers.
-4. Bulk-only transport for USB mass storage over xHCI, including stalls,
-   timeouts, reset recovery, short transfers, media removal, and flush behavior.
-5. Interrupt support (prefer MSI/MSI-X), polling fallback for bring-up, bounded
-   waits, cancellation, teardown, and surprise-removal safety.
-6. Stable topology and transfer diagnostics plus QEMU xHCI and physical-device
-   qualification tests.
+1. Map controller BARs placed above 4 GiB; the current kernel can dereference
+   only MMIO in its low 4 GiB identity map.
+2. Replace global polling state and direct pointer DMA with HCD-owned objects,
+   the shared DMA API, interrupts (prefer MSI/MSI-X), and IOMMU isolation.
+3. Add hubs, multiple devices, USB 2/3 protocol and endpoint-companion coverage,
+   hotplug, disconnect cancellation, and surprise-removal safety.
+4. Add stall/timeout recovery, endpoint and controller reset, malformed
+   descriptor handling, sustained and concurrent I/O, and deterministic fault
+   injection.
+5. Qualify 64-byte contexts, nonzero scratchpad counts, firmware handoff, the
+   exact N150 controller, every intended port, and the target thumb drive on
+   physical hardware.
 
-QEMU now provides a passing UHCI qualification lane and an xHCI expected-gap
-lane. The latter should become a persistence PASS gate as xHCI is implemented.
-Emulation is useful for driver development but does not replace testing the
-exact laptop controller, firmware, ports, and thumb drive. VirtualBox does not
-provide a useful UHCI compatibility lane for this image.
+QEMU now provides passing UHCI and q35 xHCI persistence lanes. Emulation is
+useful for driver development but does not replace testing the exact laptop
+controller, firmware, ports, and thumb drive. VirtualBox does not provide a
+useful UHCI compatibility lane for this image.
 
 ## Other laptop gaps
 
@@ -130,5 +132,6 @@ following through serial or persistent structured logs:
 - clean shutdown flushes data, and injected power loss has a documented recovery
   result.
 
-Until xHCI and this hardware gate pass, retain the image as an emulator-qualified
-BIOS/UEFI disk image, not as a production-ready N150 USB installation.
+Until the physical hardware gate passes, retain the image as an
+emulator-qualified BIOS/UEFI USB image, not as a production-ready N150 USB
+installation.

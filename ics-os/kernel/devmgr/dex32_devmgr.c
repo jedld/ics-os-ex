@@ -26,6 +26,9 @@
 */
 #include "dex32_devmgr.h"
 
+extern void blk_mq_lock(int deviceid);
+extern void blk_mq_unlock(int deviceid);
+
 devmgr_generic **devmgr_devlist;         //points to the list of devices
 devmgr_status *devmgr_statuslist;
 sync_sharedvar devmgr_busy;
@@ -538,9 +541,14 @@ int devmgr_flushblocks()
         for (i=0;i<n;i++) {
             devmgr_block_desc *myblock=(devmgr_block_desc*)snapshot[i];
             int result=0;
+            int last_context=devmgr_getcontext();
             devmgr_setcontext(myblock->hdr.id);
-            if (myblock->flush_device!=0)
+            if (myblock->flush_device!=0) {
+                blk_mq_lock(myblock->hdr.id);
                 result=myblock->flush_device();
+                blk_mq_unlock(myblock->hdr.id);
+            }
+            devmgr_setcontext(last_context);
             if (result<0 && err==0)
                 err=result;
             devmgr_putdevice(snapshot[i]);
