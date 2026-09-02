@@ -65,6 +65,11 @@ typedef struct {
 
 typedef struct {
    u64 off;
+   spinlock_t state_lock;
+   sync_sharedvar io_busy;
+   DWORD fd_refs;
+   DWORD active_refs;
+   DWORD closing;
 } fd_blk_t;
 
 typedef struct __attribute__((packed)) {
@@ -111,7 +116,9 @@ struct ics_uring {
    spinlock_t lock;
    DWORD inflight;
    DWORD closing;
-   DWORD refs;
+   DWORD fd_refs;
+   DWORD active_refs;
+   DWORD close_waiting;
 };
 
 static inline DWORD uring_load_acquire(volatile DWORD *p)
@@ -184,13 +191,19 @@ static void fd_release_slot(int fd)
    spin_unlock(&current_process->fd_lock);
 }
 
-static file_PCB *fd_file(int fd)
+static file_PCB *fd_file_get(int fd)
 {
+   file_PCB *f=0,*candidate;
    if (!current_process || fd < 0 || fd >= FD_MAX)
       return 0;
-   if (current_process->fds[fd].type != FD_VFS)
-      return 0;
-   return (file_PCB *)current_process->fds[fd].ptr;
+   spin_lock(&current_process->fd_lock);
+   if (current_process->fds[fd].type == FD_VFS) {
+      candidate=(file_PCB *)current_process->fds[fd].ptr;
+      if (candidate && vfs_file_get(candidate))
+         f=candidate;
+   }
+   spin_unlock(&current_process->fd_lock);
+   return f;
 }
 
 static tty_t *fd_istty(int fd)
@@ -209,13 +222,72 @@ static int path_is_vblk(const char *p)
    return p && (strcmp(p, "/dev/vblk") == 0 || strcmp(p, "vblk") == 0);
 }
 
-static fd_blk_t *fd_blk(int fd)
+static fd_blk_t *fd_blk_get(int fd)
 {
+   fd_blk_t *b=0,*candidate;
    if (!current_process || fd < 0 || fd >= FD_MAX)
       return 0;
-   if (current_process->fds[fd].type != FD_BLK)
+   spin_lock(&current_process->fd_lock);
+   if (current_process->fds[fd].type == FD_BLK) {
+      candidate=(fd_blk_t *)current_process->fds[fd].ptr;
+      if (candidate) {
+         spin_lock(&candidate->state_lock);
+         if (!candidate->closing) {
+            candidate->active_refs++;
+            b=candidate;
+         }
+         spin_unlock(&candidate->state_lock);
+      }
+   }
+   spin_unlock(&current_process->fd_lock);
+   return b;
+}
+
+static void fd_blk_put(fd_blk_t *b)
+{
+   int release=0;
+   if (!b)
+      return;
+   spin_lock(&b->state_lock);
+   if (b->active_refs)
+      b->active_refs--;
+   if (b->closing && !b->fd_refs && !b->active_refs)
+      release=1;
+   spin_unlock(&b->state_lock);
+   if (release)
+      free(b);
+}
+
+static int fd_blk_inherit(fd_blk_t *b)
+{
+   int ok=0;
+   if (!b)
       return 0;
-   return (fd_blk_t *)current_process->fds[fd].ptr;
+   spin_lock(&b->state_lock);
+   if (!b->closing && b->fd_refs) {
+      b->fd_refs++;
+      ok=1;
+   }
+   spin_unlock(&b->state_lock);
+   return ok;
+}
+
+static void fd_blk_close(fd_blk_t *b)
+{
+   int release=0;
+   if (!b)
+      return;
+   spin_lock(&b->state_lock);
+   if (b->fd_refs)
+      b->fd_refs--;
+   if (!b->fd_refs) {
+      b->closing=1;
+      if (!b->active_refs)
+         release=1;
+   }
+   spin_unlock(&b->state_lock);
+   if (release)
+      free(b);
 }
 
 static long vblk_posix_rw(int write, u64 off, void *buf, unsigned long len)
@@ -277,6 +349,11 @@ long sys_open(const char *path, int flags, int mode)
          return -ENOMEM;
       }
       b->off = 0;
+      spin_init(&b->state_lock);
+      memset(&b->io_busy,0,sizeof(b->io_busy));
+      b->fd_refs=1;
+      b->active_refs=0;
+      b->closing=0;
       fd_install(fd,FD_BLK,b);
       return fd;
    }
@@ -291,6 +368,7 @@ long sys_open(const char *path, int flags, int mode)
    }
    if (flags & ICSOS_O_DIRECT)
       vfs_setbuffer(fcb, 0, 0, FILE_IONBF);
+   vfs_file_mark_posix(fcb);
    fd_install(fd,FD_VFS,fcb);
    return fd;
 }
@@ -307,9 +385,10 @@ static void uring_put(ics_uring *r)
    if (!r)
       return;
    spin_lock(&r->lock);
-   if (r->refs)
-      r->refs--;
-   if (r->closing && r->refs==0 && r->inflight==0)
+   if (r->active_refs)
+      r->active_refs--;
+      if (r->closing && !r->close_waiting && !r->fd_refs &&
+         !r->active_refs && !r->inflight)
       release=1;
    spin_unlock(&r->lock);
    if (release)
@@ -327,7 +406,7 @@ static ics_uring *uring_fdget(int fd)
       if (candidate) {
          spin_lock(&candidate->lock);
          if (!candidate->closing) {
-            candidate->refs++;
+            candidate->active_refs++;
             r=candidate;
          }
          spin_unlock(&candidate->lock);
@@ -340,12 +419,22 @@ static ics_uring *uring_fdget(int fd)
 static int uring_close(ics_uring *r)
 {
    unsigned start;
+   int last=0;
 
    if (!r)
       return 0;
    spin_lock(&r->lock);
-   r->closing = 1;
+   if (r->fd_refs)
+      r->fd_refs--;
+   if (!r->fd_refs) {
+      r->closing=1;
+      r->close_waiting=1;
+      last=1;
+   }
    spin_unlock(&r->lock);
+
+   if (!last)
+      return 0;
 
    start = ticks;
    for (;;) {
@@ -353,14 +442,21 @@ static int uring_close(ics_uring *r)
       virtio_blk_harvest();
       spin_lock(&r->lock);
       inflight = r->inflight;
-      if (!inflight && r->refs==1) {
+      if (!inflight && !r->active_refs) {
          spin_unlock(&r->lock);
-         uring_put(r);
+         uring_free(r);
          return 0;
       }
       spin_unlock(&r->lock);
       if (ticks - start > URING_WAIT_TICKS) {
-         uring_put(r); /* Last callback/syscall performs deferred release. */
+         int release=0;
+         spin_lock(&r->lock);
+         r->close_waiting=0;
+         if (!r->active_refs && !r->inflight)
+            release=1;
+         spin_unlock(&r->lock);
+         if (release)
+            uring_free(r);
          return -EIO;
       }
       cpu_idle();
@@ -369,38 +465,31 @@ static int uring_close(ics_uring *r)
 
 long sys_close(int fd)
 {
+   int type;
+   void *ptr;
    if (!current_process || fd < 0 || fd >= FD_MAX)
       return -EBADF;
    if (fd < 3)
       return 0;
-   if (current_process->fds[fd].type == FD_VFS) {
-      file_PCB *f = (file_PCB *)current_process->fds[fd].ptr;
-      current_process->fds[fd].type = FD_NONE;
-      current_process->fds[fd].ptr = 0;
-      return fclose(f);
-   }
-   if (current_process->fds[fd].type == FD_URING) {
-      ics_uring *r;
-      spin_lock(&current_process->fd_lock);
-      if (current_process->fds[fd].type != FD_URING) {
-         spin_unlock(&current_process->fd_lock);
-         return -EBADF;
-      }
-      r = (ics_uring *)current_process->fds[fd].ptr;
-      current_process->fds[fd].type = FD_NONE;
-      current_process->fds[fd].ptr = 0;
+   spin_lock(&current_process->fd_lock);
+   type=current_process->fds[fd].type;
+   ptr=current_process->fds[fd].ptr;
+   if (type==FD_NONE || type==FD_RESERVED || type==FD_TTY) {
       spin_unlock(&current_process->fd_lock);
-      return uring_close(r);
+      return -EBADF;
    }
-   if (current_process->fds[fd].type == FD_BLK) {
-      fd_blk_t *b = (fd_blk_t *)current_process->fds[fd].ptr;
-      current_process->fds[fd].type = FD_NONE;
-      current_process->fds[fd].ptr = 0;
-      if (b)
-         free(b);
+   current_process->fds[fd].type=FD_NONE;
+   current_process->fds[fd].ptr=0;
+   spin_unlock(&current_process->fd_lock);
+   if (type==FD_VFS)
+      return vfs_file_fdclose((file_PCB *)ptr);
+   if (type==FD_URING)
+      return uring_close((ics_uring *)ptr);
+   if (type==FD_BLK) {
+      fd_blk_close((fd_blk_t *)ptr);
       return 0;
    }
-   return -EBADF;
+   return 0;
 }
 
 long sys_read(int fd, void *buf, long n)
@@ -414,18 +503,25 @@ long sys_read(int fd, void *buf, long n)
    if (t)
       return tty_read(t, (char *)buf, (int)n);
    {
-      fd_blk_t *b = fd_blk(fd);
+      fd_blk_t *b = fd_blk_get(fd);
       if (b) {
-         long got = vblk_posix_rw(0, b->off, buf, (unsigned long)n);
+         long got;
+         sync_entercrit(&b->io_busy);
+         got = vblk_posix_rw(0, b->off, buf, (unsigned long)n);
          if (got > 0)
             b->off += (u64)got;
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return got;
       }
    }
-   f = fd_file(fd);
+   f = fd_file_get(fd);
    if (!f)
       return -EBADF;
+   sync_entercrit(&f->io_busy);
    got = fread((char *)buf, 1, (int)n, f);
+   sync_leavecrit(&f->io_busy);
+   vfs_file_put(f);
    return got;
 }
 
@@ -441,17 +537,27 @@ long sys_write(int fd, const void *buf, long n)
    if (current_process && current_process->ctty && (fd == 1 || fd == 2))
       return tty_write(current_process->ctty, (const char *)buf, (int)n);
    {
-      fd_blk_t *b = fd_blk(fd);
+      fd_blk_t *b = fd_blk_get(fd);
       if (b) {
-         long got = vblk_posix_rw(1, b->off, (void *)buf, (unsigned long)n);
+         long got;
+         sync_entercrit(&b->io_busy);
+         got = vblk_posix_rw(1, b->off, (void *)buf, (unsigned long)n);
          if (got > 0)
             b->off += (u64)got;
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return got;
       }
    }
-   f = fd_file(fd);
-   if (f)
-      return fwrite((char *)buf, 1, (int)n, f);
+   f = fd_file_get(fd);
+   if (f) {
+      long written;
+      sync_entercrit(&f->io_busy);
+      written=fwrite((char *)buf, 1, (int)n, f);
+      sync_leavecrit(&f->io_busy);
+      vfs_file_put(f);
+      return written;
+   }
    if (buf && n > 0) {
       int i;
       for (i = 0; i < (int)n; i++)
@@ -464,28 +570,43 @@ long sys_write(int fd, const void *buf, long n)
 long sys_lseek(int fd, long off, int whence)
 {
    file_PCB *f;
-   fd_blk_t *b = fd_blk(fd);
+   fd_blk_t *b = fd_blk_get(fd);
    if (b) {
       u64 cap = virtio_blk_sectors() * (u64)VIRTIO_BLK_SECTOR_SIZE;
       s64 noff;
+      long result;
+      sync_entercrit(&b->io_busy);
       if (whence == SEEK_SET)
          noff = off;
       else if (whence == SEEK_CUR)
          noff = (s64)b->off + off;
       else if (whence == SEEK_END)
          noff = (s64)cap + off;
-      else
+      else {
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return -EINVAL;
-      if (noff < 0)
+      }
+      if (noff < 0) {
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return -EINVAL;
+      }
       b->off = (u64)noff;
-      return (long)b->off;
+      result=(long)b->off;
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
+      return result;
    }
-   f = fd_file(fd);
+   f = fd_file_get(fd);
    if (!f)
       return -EBADF;
+   sync_entercrit(&f->io_busy);
    fseek(f, off, whence);
-   return ftell(f);
+   off=ftell(f);
+   sync_leavecrit(&f->io_busy);
+   vfs_file_put(f);
+   return off;
 }
 
 static long do_iov_rw(file_PCB *f, const struct k_iovec *iov, int iovcnt,
@@ -517,39 +638,54 @@ static long do_iov_rw(file_PCB *f, const struct k_iovec *iov, int iovcnt,
 long sys_preadv(int fd, const struct k_iovec *iov, int iovcnt, long offset)
 {
    file_PCB *f;
-   fd_blk_t *b = fd_blk(fd);
+   fd_blk_t *b = fd_blk_get(fd);
    long total = 0;
    int i;
 
    if (b) {
       u64 off = (u64)offset;
+      sync_entercrit(&b->io_busy);
       if (!iov || iovcnt <= 0)
-         return -EINVAL;
+         goto blk_invalid;
       for (i = 0; i < iovcnt; i++) {
          long n;
          if (!iov[i].iov_base && iov[i].iov_len)
-            return -EINVAL;
+            goto blk_invalid;
          if (iov[i].iov_len == 0)
             continue;
          n = vblk_posix_rw(0, off, iov[i].iov_base, iov[i].iov_len);
          if (n < 0)
-            return total ? total : n;
+            {
+               long result=total ? total : n;
+               sync_leavecrit(&b->io_busy);
+               fd_blk_put(b);
+               return result;
+            }
          total += n;
          off += (u64)n;
          if ((unsigned long)n < iov[i].iov_len)
             break;
       }
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
       return total;
+   blk_invalid:
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
+      return -EINVAL;
    }
-   f = fd_file(fd);
+      f = fd_file_get(fd);
    {
       long old, n;
       if (!f)
          return -EBADF;
+      sync_entercrit(&f->io_busy);
       old = ftell(f);
       fseek(f, offset, SEEK_SET);
       n = do_iov_rw(f, iov, iovcnt, 0);
       fseek(f, old, SEEK_SET);
+      sync_leavecrit(&f->io_busy);
+      vfs_file_put(f);
       return n;
    }
 }
@@ -557,39 +693,54 @@ long sys_preadv(int fd, const struct k_iovec *iov, int iovcnt, long offset)
 long sys_pwritev(int fd, const struct k_iovec *iov, int iovcnt, long offset)
 {
    file_PCB *f;
-   fd_blk_t *b = fd_blk(fd);
+   fd_blk_t *b = fd_blk_get(fd);
    long total = 0;
    int i;
 
    if (b) {
       u64 off = (u64)offset;
+      sync_entercrit(&b->io_busy);
       if (!iov || iovcnt <= 0)
-         return -EINVAL;
+         goto blk_invalid;
       for (i = 0; i < iovcnt; i++) {
          long n;
          if (!iov[i].iov_base && iov[i].iov_len)
-            return -EINVAL;
+            goto blk_invalid;
          if (iov[i].iov_len == 0)
             continue;
          n = vblk_posix_rw(1, off, iov[i].iov_base, iov[i].iov_len);
          if (n < 0)
-            return total ? total : n;
+            {
+               long result=total ? total : n;
+               sync_leavecrit(&b->io_busy);
+               fd_blk_put(b);
+               return result;
+            }
          total += n;
          off += (u64)n;
          if ((unsigned long)n < iov[i].iov_len)
             break;
       }
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
       return total;
+   blk_invalid:
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
+      return -EINVAL;
    }
-   f = fd_file(fd);
+      f = fd_file_get(fd);
    {
       long old, n;
       if (!f)
          return -EBADF;
+      sync_entercrit(&f->io_busy);
       old = ftell(f);
       fseek(f, offset, SEEK_SET);
       n = do_iov_rw(f, iov, iovcnt, 1);
       fseek(f, old, SEEK_SET);
+      sync_leavecrit(&f->io_busy);
+      vfs_file_put(f);
       return n;
    }
 }
@@ -597,13 +748,26 @@ long sys_pwritev(int fd, const struct k_iovec *iov, int iovcnt, long offset)
 long sys_fsync(int fd)
 {
    file_PCB *f;
-   if (fd_blk(fd))
-      return virtio_blk_flush();
-   f = fd_file(fd);
+   fd_blk_t *b=fd_blk_get(fd);
+   if (b) {
+      long result;
+      sync_entercrit(&b->io_busy);
+      result=virtio_blk_flush();
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
+      return result;
+   }
+   f = fd_file_get(fd);
    if (!f)
       return -EBADF;
-   if (!fflush(f))
+   sync_entercrit(&f->io_busy);
+   if (!fflush(f)) {
+      sync_leavecrit(&f->io_busy);
+      vfs_file_put(f);
       return -EIO;
+   }
+   sync_leavecrit(&f->io_busy);
+   vfs_file_put(f);
    iomgr_request_flush();
    if (!blkcache_flush())
       return -EIO;
@@ -612,7 +776,8 @@ long sys_fsync(int fd)
 
 long sys_fstat_fd(int fd, void *statbuf)
 {
-   file_PCB *f = fd_file(fd);
+   file_PCB *f = 0;
+   fd_blk_t *b;
    vfs_stat vs;
    struct {
       unsigned int st_dev, st_ino, st_mode, st_nlink, st_uid, st_gid, st_rdev;
@@ -626,18 +791,25 @@ long sys_fstat_fd(int fd, void *statbuf)
       st->st_mode = 0020000 | 0666; /* S_IFCHR */
       return 0;
    }
-   if (fd_blk(fd)) {
+   b=fd_blk_get(fd);
+   if (b) {
       memset(st, 0, sizeof(*st));
       st->st_mode = 0060000 | 0666; /* S_IFBLK */
       st->st_size = (long)(virtio_blk_sectors() * (u64)VIRTIO_BLK_SECTOR_SIZE);
+      fd_blk_put(b);
       return 0;
    }
+   f=fd_file_get(fd);
    if (!f)
       return -EBADF;
    memset(&vs, 0, sizeof(vs));
    vs.size = (int)sizeof(vs);
-   if (fstat(f, &vs) < 0)
+   sync_entercrit(&f->io_busy);
+   if (fstat(f, &vs) < 0) {
+      sync_leavecrit(&f->io_busy);
+      vfs_file_put(f);
       return -EIO;
+   }
    memset(st, 0, sizeof(*st));
    /* Build tools compare (st_dev, st_ino) to remove duplicate include and
       search directories. Returning zero for every VFS object collapsed
@@ -662,12 +834,24 @@ long sys_fstat_fd(int fd, void *statbuf)
     * GNU binutils smart_rename() only uses rename(2) when the destination
     * has st_nlink == 1; a zero value forces its copy-fallback path. */
    st->st_nlink = 1;
+   sync_leavecrit(&f->io_busy);
+   vfs_file_put(f);
    return 0;
 }
 
 void *sys_fd_file(int fd)
 {
-   return fd_file(fd);
+   file_PCB *f=0,*candidate;
+   if (!current_process || fd<0 || fd>=FD_MAX)
+      return 0;
+   spin_lock(&current_process->fd_lock);
+   if (current_process->fds[fd].type==FD_VFS) {
+      candidate=(file_PCB *)current_process->fds[fd].ptr;
+      if (candidate)
+         f=candidate;
+   }
+   spin_unlock(&current_process->fd_lock);
+   return f;
 }
 
 long sys_io_uring_setup(unsigned entries, void *params)
@@ -703,7 +887,7 @@ long sys_io_uring_setup(unsigned entries, void *params)
    memset(r, 0, sizeof(ics_uring));
    spin_init(&r->lock);
    completion_init(&r->cq_event);
-   r->refs = 1; /* fd ownership */
+   r->fd_refs = 1;
    r->sq_ring_mask = n - 1;
    r->sq_ring_entries = n;
    r->cq_ring_mask = n - 1;
@@ -761,7 +945,8 @@ static void uring_vblk_done(void *arg, int res)
    if (r->inflight)
       r->inflight--;
    complete_all(&r->cq_event);
-   if (r->closing && r->refs==0 && r->inflight==0)
+      if (r->closing && !r->close_waiting && !r->fd_refs &&
+         !r->active_refs && !r->inflight)
       release=1;
    spin_unlock(&r->lock);
    if (release)
@@ -822,6 +1007,8 @@ static int uring_queue_vblk(ics_uring *r, io_uring_sqe *sqe,
 static int uring_try_vblk(ics_uring *r, io_uring_sqe *sqe)
 {
    int fd;
+   int result;
+   fd_blk_t *b;
    void *buf;
    u32 bytes, type;
    u64 off;
@@ -831,19 +1018,25 @@ static int uring_try_vblk(ics_uring *r, io_uring_sqe *sqe)
    fd = sqe->fd;
    if (!current_process || fd < 0 || fd >= FD_MAX)
       return 0;
-   if (current_process->fds[fd].type != FD_BLK)
+   b=fd_blk_get(fd);
+   if (!b)
       return 0;
+   sync_entercrit(&b->io_busy);
 
    if (sqe->opcode == IORING_OP_FSYNC) {
       int i, n;
       spin_lock(&r->lock);
       if (r->closing) {
          spin_unlock(&r->lock);
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return -EBADF;
       }
       i = uring_alloc_cb(r);
       if (i < 0) {
          spin_unlock(&r->lock);
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return -ENOMEM;
       }
       r->blkcb[i].ring = r;
@@ -860,8 +1053,12 @@ static int uring_try_vblk(ics_uring *r, io_uring_sqe *sqe)
                r->inflight--;
          }
          spin_unlock(&r->lock);
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return n;
       }
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
       return URING_QUEUED;
    }
 
@@ -869,24 +1066,98 @@ static int uring_try_vblk(ics_uring *r, io_uring_sqe *sqe)
       buf = (void *)(uintptr)sqe->addr;
       bytes = sqe->len;
       off = sqe->off;
-      if (off == ~(u64)0) {
-         fd_blk_t *b = fd_blk(fd);
-         off = b ? b->off : 0;
-      }
+      if (off == ~(u64)0)
+         off = b->off;
       type = (sqe->opcode == IORING_OP_WRITE) ?
              VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
-      return uring_queue_vblk(r, sqe, type, buf, bytes, off);
+      result=uring_queue_vblk(r, sqe, type, buf, bytes, off);
+      if (sqe->off == ~(u64)0) {
+         if (result==URING_QUEUED)
+            b->off+=bytes;
+      }
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
+      return result;
    }
    if (sqe->opcode == IORING_OP_READV || sqe->opcode == IORING_OP_WRITEV) {
       const struct k_iovec *iov = (const struct k_iovec *)(uintptr)sqe->addr;
-      if (!iov || sqe->len != 1)
+      if (!iov || sqe->len != 1) {
+         sync_leavecrit(&b->io_busy);
+         fd_blk_put(b);
          return 0;
+      }
       type = (sqe->opcode == IORING_OP_WRITEV) ?
              VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
-      return uring_queue_vblk(r, sqe, type, iov[0].iov_base,
+      result=uring_queue_vblk(r, sqe, type, iov[0].iov_base,
                               (u32)iov[0].iov_len, sqe->off);
+      sync_leavecrit(&b->io_busy);
+      fd_blk_put(b);
+      return result;
    }
+   sync_leavecrit(&b->io_busy);
+   fd_blk_put(b);
    return 0;
+}
+
+static int uring_inherit(ics_uring *r)
+{
+   int ok=0;
+   if (!r)
+      return 0;
+   spin_lock(&r->lock);
+   if (!r->closing && r->fd_refs) {
+      r->fd_refs++;
+      ok=1;
+   }
+   spin_unlock(&r->lock);
+   return ok;
+}
+
+int posix_fd_clone(struct _PCB386 *dst, struct _PCB386 *src)
+{
+   int fd,type;
+   void *ptr;
+   if (!dst || !src)
+      return -EINVAL;
+   spin_lock(&src->fd_lock);
+   for (fd=0;fd<FD_MAX;fd++) {
+      type=src->fds[fd].type;
+      ptr=src->fds[fd].ptr;
+      if (type==FD_RESERVED)
+         continue;
+      if (type==FD_VFS && !vfs_file_inherit((file_PCB *)ptr))
+         continue;
+      if (type==FD_BLK && !fd_blk_inherit((fd_blk_t *)ptr))
+         continue;
+      if (type==FD_URING && !uring_inherit((ics_uring *)ptr))
+         continue;
+      dst->fds[fd].type=type;
+      dst->fds[fd].ptr=ptr;
+   }
+   spin_unlock(&src->fd_lock);
+   return 0;
+}
+
+void posix_fd_close_all(struct _PCB386 *process)
+{
+   int fd,type;
+   void *ptr;
+   if (!process)
+      return;
+   for (fd=3;fd<FD_MAX;fd++) {
+      spin_lock(&process->fd_lock);
+      type=process->fds[fd].type;
+      ptr=process->fds[fd].ptr;
+      process->fds[fd].type=FD_NONE;
+      process->fds[fd].ptr=0;
+      spin_unlock(&process->fd_lock);
+      if (type==FD_VFS)
+         vfs_file_fdclose((file_PCB *)ptr);
+      else if (type==FD_BLK)
+         fd_blk_close((fd_blk_t *)ptr);
+      else if (type==FD_URING)
+         uring_close((ics_uring *)ptr);
+   }
 }
 
 static int uring_do_sqe(io_uring_sqe *sqe)

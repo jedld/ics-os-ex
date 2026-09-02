@@ -159,7 +159,9 @@ typedef struct {
     u32 bg_inode_table_hi;
     u16 bg_free_blocks;
     u16 bg_free_inodes;
+    u16 bg_used_dirs;
     u16 bg_flags;
+    u16 bg_itable_unused;
     u16 bg_checksum;
 } ext4_gd;
 

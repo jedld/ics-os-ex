@@ -30,6 +30,10 @@ struct k_iovec {
    unsigned long iov_len;
 };
 
+struct _PCB386;
+int posix_fd_clone(struct _PCB386 *dst, struct _PCB386 *src);
+void posix_fd_close_all(struct _PCB386 *process);
+
 /* POSIX syscall handlers return a 64-bit (long) value so negative errno
  * codes are sign-extended into rax per the SysV AMD64 ABI. The int 0x30
  * dispatcher (dex32API.c api_syscall) invokes these through an api_arg_t

@@ -767,6 +767,8 @@ file_PCB *openfilex(char *filename,int mode)
         goto out;
     };
     memset(fcb,0,sizeof(file_PCB));    
+    fcb->legacy_refs=1;
+    memset(&fcb->io_busy,0,sizeof(fcb->io_busy));
     
     //use add to head method
     if (file_globalopen==0)
@@ -853,6 +855,74 @@ int file_ok(file_PCB* fhandle)
     return retval;
 };
 
+int vfs_file_get(file_PCB *fhandle)
+{
+    int retval=0;
+    sync_entercrit(&vfs_busy);
+    if (file_ok(fhandle) && !fhandle->closing) {
+        fhandle->active_refs++;
+        retval=1;
+    }
+    sync_leavecrit(&vfs_busy);
+    return retval;
+}
+
+int vfs_file_inherit(file_PCB *fhandle)
+{
+    int retval=0;
+    sync_entercrit(&vfs_busy);
+    if (file_ok(fhandle) && !fhandle->closing && fhandle->fd_refs) {
+        fhandle->fd_refs++;
+        retval=1;
+    }
+    sync_leavecrit(&vfs_busy);
+    return retval;
+}
+
+void vfs_file_mark_posix(file_PCB *fhandle)
+{
+    sync_entercrit(&vfs_busy);
+    if (file_ok(fhandle) && fhandle->legacy_refs) {
+        fhandle->legacy_refs--;
+        fhandle->fd_refs++;
+    }
+    sync_leavecrit(&vfs_busy);
+}
+
+static int vfs_file_destroy_locked(file_PCB *fhandle)
+{
+    if (!fflush(fhandle))
+        return -1;
+    fhandle->ptr->opened--;
+    if (fhandle->buffer && !fhandle->userbuffer)
+        free(fhandle->buffer);
+    if (fhandle->locked&&fhandle->ptr->locked)
+        fhandle->ptr->locked=0;
+    if (fhandle->prev!=0)
+        fhandle->prev->next=fhandle->next;
+    if (fhandle->next!=0)
+        fhandle->next->prev=fhandle->prev;
+    if (file_globalopen==fhandle)
+        file_globalopen=fhandle->next;
+    free(fhandle);
+    return 0;
+}
+
+void vfs_file_put(file_PCB *fhandle)
+{
+    int destroyed=0;
+    sync_entercrit(&vfs_busy);
+    if (file_ok(fhandle) && fhandle->active_refs) {
+        fhandle->active_refs--;
+        if (fhandle->closing && !fhandle->fd_refs && !fhandle->legacy_refs &&
+            !fhandle->active_refs)
+            destroyed=(vfs_file_destroy_locked(fhandle)==0);
+    }
+    sync_leavecrit(&vfs_busy);
+    if (destroyed)
+        iomgr_request_flush();
+}
+
 
 
 //closes all the files a process has opened
@@ -869,7 +939,7 @@ int closeallfiles(DWORD pid)
     else
         while (ptr!=0)
         {
-            if (ptr->processid==pid)
+            if (ptr->processid==pid && ptr->legacy_refs)
             {
                 fclose(ptr);
                 retval = 1;
@@ -1393,43 +1463,47 @@ int fwrite(char *buf, int itemsize, int n, file_PCB* fhandle)
 int fclose(file_PCB *fhandle)
 {
     int retval=-1;
+    int destroyed=0;
 
     sync_entercrit(&vfs_busy);
-    //validate handle given
-    if (fhandle!=0)
-        if (file_ok(fhandle)) //validate this handle
-        {
-            
-            //save all changes the file needs to do    
-            if (!fflush(fhandle)) goto out;
-            fhandle->ptr->opened--;
-
-           
-            if (fhandle->buffer && !fhandle->userbuffer) free(fhandle->buffer);
-            
-            if (fhandle->locked&&fhandle->ptr->locked)
-                fhandle->ptr->locked=0;
-                
-            //remove the file from the list of opened files
-            if (fhandle->prev!=0)
-                fhandle->prev->next = fhandle->next;
-                
-            
-            if (fhandle->next!=0)
-                fhandle->next->prev = fhandle->prev;
-                
-            
-            if (file_globalopen == fhandle)
-                file_globalopen = fhandle->next;                   
-            free(fhandle);
-            retval=0;
-        };
-out:
+    if (fhandle!=0 && file_ok(fhandle) && fhandle->legacy_refs) {
+        fhandle->legacy_refs--;
+        retval=0;
+        if (!fhandle->fd_refs && !fhandle->legacy_refs) {
+            fhandle->closing=1;
+            if (!fhandle->active_refs) {
+                retval=vfs_file_destroy_locked(fhandle);
+                destroyed=(retval==0);
+            }
+        }
+    }
     sync_leavecrit(&vfs_busy);
-    if (retval==0)
+    if (destroyed)
         iomgr_request_flush();
     return retval;
 };
+
+int vfs_file_fdclose(file_PCB *fhandle)
+{
+    int retval=-1;
+    int destroyed=0;
+    sync_entercrit(&vfs_busy);
+    if (fhandle!=0 && file_ok(fhandle) && fhandle->fd_refs) {
+        fhandle->fd_refs--;
+        retval=0;
+        if (!fhandle->fd_refs && !fhandle->legacy_refs) {
+            fhandle->closing=1;
+            if (!fhandle->active_refs) {
+                retval=vfs_file_destroy_locked(fhandle);
+                destroyed=(retval==0);
+            }
+        }
+    }
+    sync_leavecrit(&vfs_busy);
+    if (destroyed)
+        iomgr_request_flush();
+    return retval;
+}
 
 void findfile(char *name)
 {
@@ -1561,7 +1635,7 @@ int mkdir(const char *name)
     if (fs->createfile(node,destdir->memid)==-1)
         retval = -1;
     else
-        retval = 1;
+        retval = 0; /* POSIX mkdir returns 0 on success */
 
     //rollback to previous state if there is trouble
     if (retval == -1)

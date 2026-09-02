@@ -166,16 +166,66 @@ int fsync(int fd)
    return (int)ics_sys(FXN_FSYNC, fd, 0, 0, 0, 0);
 }
 
+#define FDOPEN_SLOTS 16
+static struct {
+   FILE *stream;
+   int fd;
+} fdopen_slots[FDOPEN_SLOTS];
+
+/* Called by tccsdk fclose() after flushing its userspace write buffer. */
+int ics_fdopen_close(FILE *stream)
+{
+   int i;
+   for (i=0;i<FDOPEN_SLOTS;i++)
+      if (fdopen_slots[i].stream==stream) {
+         int fd=fdopen_slots[i].fd;
+         fdopen_slots[i].stream=0;
+         fdopen_slots[i].fd=-1;
+         close(fd);
+         return 1;
+      }
+   return 0;
+}
+
+int ics_fdopen_fd(FILE *stream)
+{
+   int i;
+   for (i=0;i<FDOPEN_SLOTS;i++)
+      if (fdopen_slots[i].stream==stream)
+         return fdopen_slots[i].fd;
+   return -1;
+}
+
 FILE *fdopen(int fd, const char *mode)
 {
    long p;
+   int i;
    (void)mode;
    if (fd == 0) return stdin;
    if (fd == 1) return stdout;
    if (fd == 2) return stderr;
+   for (i=0;i<FDOPEN_SLOTS;i++)
+      if (fdopen_slots[i].stream && fdopen_slots[i].fd==fd) {
+         errno=22;
+         return 0;
+      }
    /* Kernel file_PCB* so DEX fwrite/fclose still work (TinyCC ELF output). */
    p = (long)dexsdk_systemcall(FXN_FDFILE, fd, 0, 0, 0, 0);
-   return p ? (FILE *)p : 0;
+   if (!p)
+      return 0;
+   for (i=0;i<FDOPEN_SLOTS;i++)
+      if (fdopen_slots[i].stream==(FILE *)p) {
+         errno=16;
+         return 0;
+      }
+   for (i=0;i<FDOPEN_SLOTS;i++)
+      if (!fdopen_slots[i].stream) {
+         fdopen_slots[i].stream=(FILE *)p;
+         fdopen_slots[i].fd=fd;
+         return (FILE *)p;
+      }
+   errno=24;
+   return 0;
 }
 
 int unlink(const char *path)
@@ -917,7 +967,10 @@ sighandler_t signal(int sig, sighandler_t handler)
 
 int fseek(FILE *f, long off, int whence)
 {
+   int fd=ics_fdopen_fd(f);
    fflush(f);
+   if (fd >= 0)
+      return lseek(fd,off,whence) < 0 ? -1 : 0;
    dexsdk_systemcall(0x41, (long)f, (long)off, whence, 0, 0);
    return 0;
 }

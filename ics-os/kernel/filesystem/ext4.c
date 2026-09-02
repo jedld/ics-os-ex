@@ -238,7 +238,9 @@ static int ext4_load_gdt(ext4_dev *d, int id)
         gd->bg_inode_table = rd32(desc + 0x08);
         gd->bg_free_blocks = rd16(desc + 0x0c);
         gd->bg_free_inodes = rd16(desc + 0x0e);
+        gd->bg_used_dirs = rd16(desc + 0x10);
         gd->bg_flags = rd16(desc + 0x12);
+        gd->bg_itable_unused = rd16(desc + 0x1c);
         gd->bg_checksum = rd16(desc + 0x1e);
         if (s->desc_size >= 64) {
             gd->bg_block_bitmap_hi = rd32(desc + 0x20);
@@ -246,6 +248,8 @@ static int ext4_load_gdt(ext4_dev *d, int id)
             gd->bg_inode_table_hi = rd32(desc + 0x28);
             gd->bg_free_blocks = (u16)(gd->bg_free_blocks | (rd16(desc + 0x2c) << 16));
             gd->bg_free_inodes = (u16)(gd->bg_free_inodes | (rd16(desc + 0x2e) << 16));
+            gd->bg_used_dirs = (u16)(gd->bg_used_dirs | (rd16(desc + 0x30) << 16));
+            gd->bg_itable_unused = (u16)(gd->bg_itable_unused | (rd16(desc + 0x32) << 16));
         }
     }
     return 0;
@@ -731,13 +735,17 @@ static void ext4_set_ino_used(ext4_dev *d, int id, u32 ino)
     }
     ext4_write_blocks(d, id, ib, 1, bitmap);
     gd->bg_free_inodes = (u16)(gd->bg_free_inodes - 1);
+    gd->bg_itable_unused = (u16)(gd->bg_itable_unused - 1);
     {
         u8 *desc = d->gdt_raw + g * s->desc_size;
         if (s->desc_size >= 64) {
             wr16(desc + 0x0e, (u16)(gd->bg_free_inodes & 0xFFFF));
             wr16(desc + 0x2e, (u16)((gd->bg_free_inodes >> 16) & 0xFFFF));
+            wr16(desc + 0x1c, (u16)(gd->bg_itable_unused & 0xFFFF));
+            wr16(desc + 0x32, (u16)((gd->bg_itable_unused >> 16) & 0xFFFF));
         } else {
             wr16(desc + 0x0e, gd->bg_free_inodes);
+            wr16(desc + 0x1c, gd->bg_itable_unused);
         }
         if (s->has_csum) {
             wr16(desc + 0x1a, (u16)(icsum & 0xFFFF));
@@ -826,13 +834,17 @@ static int ext4_free_ino_raw(ext4_dev *d, int id, u32 ino)
         ext4_write_blocks(d, id, ib, 1, bitmap);
     }
     gd->bg_free_inodes = (u16)(gd->bg_free_inodes + 1);
+    gd->bg_itable_unused = (u16)(gd->bg_itable_unused + 1);
     {
         u8 *desc = d->gdt_raw + g * s->desc_size;
         if (s->desc_size >= 64) {
             wr16(desc + 0x0e, (u16)(gd->bg_free_inodes & 0xFFFF));
             wr16(desc + 0x2e, (u16)((gd->bg_free_inodes >> 16) & 0xFFFF));
+            wr16(desc + 0x1c, (u16)(gd->bg_itable_unused & 0xFFFF));
+            wr16(desc + 0x32, (u16)((gd->bg_itable_unused >> 16) & 0xFFFF));
         } else {
             wr16(desc + 0x0e, gd->bg_free_inodes);
+            wr16(desc + 0x1c, gd->bg_itable_unused);
         }
         if (s->has_csum) {
             wr16(desc + 0x1a, (u16)(icsum & 0xFFFF));
@@ -1506,11 +1518,9 @@ static int ext4_createfile(vfs_node *f, int id)
     if (!pc) return -1;
 
     is_dir = (f->attb & FILE_DIRECTORY) ? 1 : 0;
-    printf("ext4: createfile name=%s is_dir=%d pino=%d pbytes=%d pimg=%x\n",
-           f->name, is_dir, pc->ino, pbytes, (unsigned)(uintptr)pimg);
 
     ino = ext4_alloc_ino(d, id);
-    if (ino == (u32)-1) { printf("ext4: createfile alloc_ino failed\n"); return -1; }
+    if (ino == (u32)-1) return -1;
 
     /* initialize the inode */
     memset(raw, 0, d->sb.inode_size);
@@ -1530,7 +1540,7 @@ static int ext4_createfile(vfs_node *f, int id)
     {
         u32 blk = ext4_alloc_block_raw(d, id);
         ext4_run run;
-        if (blk == (u32)-1) { printf("ext4: createfile alloc_block failed\n"); return -1; }
+        if (blk == (u32)-1) return -1;
         /* dir's first block: . and .. */
         {
             u8 dirblk[4096];
@@ -1565,7 +1575,7 @@ static int ext4_createfile(vfs_node *f, int id)
                 c2 = ext4_crc32c(dirblk, c2, d->sb.blocksize - 12);
                 wr32(dirblk + d->sb.blocksize - 4, c2);
             }
-            if (ext4_write_blocks(d, id, blk, 1, dirblk) < 0) { printf("ext4: createfile write dirblk failed\n"); return -1; }
+            if (ext4_write_blocks(d, id, blk, 1, dirblk) < 0) return -1;
         }
         run.log_block = 0;
         run.len = 1;
@@ -1589,15 +1599,14 @@ static int ext4_createfile(vfs_node *f, int id)
     }
     if (d->sb.has_csum)
         ext4_ino_set_csum(d, ino, 0, raw);
-    if (ext4_write_ino(d, id, ino, 0, raw) < 0) { printf("ext4: createfile write_ino failed\n"); return -1; }
+    if (ext4_write_ino(d, id, ino, 0, raw) < 0) return -1;
 
     /* add directory entry to parent image */
     {
        ext4_dirent *slot = ext4_alloc_entry(d, pimg, &pbytes, ino,
                                               f->name,
                                               (u8)(is_dir ? EXT4_FT_DIR : EXT4_FT_REG_FILE));
-        if (!slot) { printf("ext4: createfile alloc_entry failed name=%s ino=%d\n", f->name, ino); return -1; }
-        printf("ext4: createfile ino=%d slot ok\n", ino);
+        if (!slot) return -1;
         /* write parent dir block back */
         ext4_write_parent_dir(d, id, parent, pimg, pbytes);
         c = (ext4_ino *)malloc(sizeof(ext4_ino));
@@ -1625,6 +1634,20 @@ static int ext4_createfile(vfs_node *f, int id)
         f->miscsize = sizeof(ext4_ino);
         f->size = is_dir ? d->sb.blocksize : 0;
         f->date_created.year = 2020;
+    }
+    if (is_dir)
+    {
+        u32 dg = (ino - 1) / d->sb.inodes_per_group;
+        ext4_gd *dgd = &d->gdt[dg];
+        u8 *ddesc = d->gdt_raw + dg * d->sb.desc_size;
+        dgd->bg_used_dirs = (u16)(dgd->bg_used_dirs + 1);
+        if (d->sb.desc_size >= 64) {
+            wr16(ddesc + 0x10, (u16)(dgd->bg_used_dirs & 0xFFFF));
+            wr16(ddesc + 0x30, (u16)((dgd->bg_used_dirs >> 16) & 0xFFFF));
+        } else {
+            wr16(ddesc + 0x10, dgd->bg_used_dirs);
+        }
+        ext4_gd_set_csum(d, dg);
     }
     ext4_write_gdt(d, id);
     ext4_write_super(d, id);
@@ -1666,6 +1689,21 @@ static int ext4_deletefile(vfs_node *f, int id)
         c->runs_loaded = 1;
     }
     ext4_free_ino_raw(d, id, c->ino);
+    if (c->is_dir)
+    {
+        u32 dg = (c->ino - 1) / d->sb.inodes_per_group;
+        ext4_gd *dgd = &d->gdt[dg];
+        u8 *ddesc = d->gdt_raw + dg * d->sb.desc_size;
+        if (dgd->bg_used_dirs > 0)
+            dgd->bg_used_dirs = (u16)(dgd->bg_used_dirs - 1);
+        if (d->sb.desc_size >= 64) {
+            wr16(ddesc + 0x10, (u16)(dgd->bg_used_dirs & 0xFFFF));
+            wr16(ddesc + 0x30, (u16)((dgd->bg_used_dirs >> 16) & 0xFFFF));
+        } else {
+            wr16(ddesc + 0x10, dgd->bg_used_dirs);
+        }
+        ext4_gd_set_csum(d, dg);
+    }
     ext4_write_gdt(d, id);
     ext4_write_super(d, id);
     return 0;

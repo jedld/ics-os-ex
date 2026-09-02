@@ -161,6 +161,11 @@ typedef struct _file_PCB {
     DWORD bufsize;  //size of buffer allocated in memory
 	DWORD *sectinfo;//for a block device, this stores the list of blocks where the
                  //device is stored
+    DWORD fd_refs;     //POSIX descriptor owners
+    DWORD legacy_refs; //direct FILE handle owners
+    DWORD active_refs; //transient fdget users
+    int closing;
+    sync_sharedvar io_busy; //shared-offset and buffered-I/O serialization
 	struct _file_PCB *next,*prev;
 } file_PCB;
 
@@ -213,6 +218,11 @@ int     fflush(file_PCB* fhandle);
 int     fgetsectors(file_PCB* fhandle);
 char    *fgets(char *s,int n,file_PCB *fhandle);
 int     file_ok(file_PCB* fhandle);
+int     vfs_file_get(file_PCB *fhandle);
+void    vfs_file_put(file_PCB *fhandle);
+int     vfs_file_inherit(file_PCB *fhandle);
+int     vfs_file_fdclose(file_PCB *fhandle);
+void    vfs_file_mark_posix(file_PCB *fhandle);
 void    file_showopenfiles();
 void    findfile(char *name);
 int     fread(char *buf,int itemsize,int noitems,file_PCB* fhandle);

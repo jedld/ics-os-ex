@@ -1226,6 +1226,14 @@ FILE *openfile(const char  *filename,int mode){
 };
 
 int feof(FILE *f){
+   extern int ics_fdopen_fd(FILE *) __attribute__((weak));
+   int fd=ics_fdopen_fd ? ics_fdopen_fd(f) : -1;
+   if (fd >= 0) {
+      long cur=lseek(fd,0,SEEK_CUR);
+      long end=lseek(fd,0,SEEK_END);
+      lseek(fd,cur,SEEK_SET);
+      return cur >= end;
+   }
    return dexsdk_systemcall(0x52,(long)f,0,0,0,0);
 };
 
@@ -1338,6 +1346,8 @@ char *gets(char *buf){
 };
 
 char *fgets(char *s, int n, FILE* f){
+   extern int ics_fdopen_fd(FILE *) __attribute__((weak));
+   int fd=ics_fdopen_fd ? ics_fdopen_fd(f) : -1;
    if (f==stdin){
       int x;
       gets(s);
@@ -1346,10 +1356,28 @@ char *fgets(char *s, int n, FILE* f){
       s[x+1]= 0;
       return s;
    };
+   if (fd >= 0) {
+      int i=0;
+      while (i<n-1 && read(fd,&s[i],1)==1) {
+         if (s[i++]=='\n')
+            break;
+      }
+      s[i]=0;
+      return i ? s : 0;
+   }
    return (char*)dexsdk_systemcall(0x40,(long)s,n,(long)f,0,0);
 };
 
 int fread(void *buf,int itemsize,int noitems,FILE* fhandle){
+   extern int ics_fdopen_fd(FILE *) __attribute__((weak));
+   int fd=ics_fdopen_fd ? ics_fdopen_fd(fhandle) : -1;
+   if (fd >= 0) {
+      int bytes;
+      if (itemsize<=0 || noitems<=0)
+         return 0;
+      bytes=read(fd,buf,(unsigned long)itemsize*(unsigned long)noitems);
+      return bytes > 0 ? bytes/itemsize : 0;
+   }
    return dexsdk_systemcall(0x39,(long)buf,itemsize,noitems,(long)fhandle,0);
 };
 
@@ -1367,6 +1395,15 @@ static struct sdk_write_buffer sdk_write_buffers[SDK_WRITE_SLOTS];
 
 static int sdk_raw_fwrite(const void *buf, int itemsize, int noitems,
                           FILE *fhandle){
+   extern int ics_fdopen_fd(FILE *) __attribute__((weak));
+   int fd=ics_fdopen_fd ? ics_fdopen_fd(fhandle) : -1;
+   if (fd >= 0) {
+      int bytes;
+      if (itemsize<=0 || noitems<=0)
+         return 0;
+      bytes=write(fd,buf,(unsigned long)itemsize*(unsigned long)noitems);
+      return bytes > 0 ? bytes/itemsize : 0;
+   }
    return dexsdk_systemcall(0x45,(long)buf,itemsize,noitems,(long)fhandle,0);
 }
 
@@ -1466,14 +1503,19 @@ int fputs(const char *s, FILE *stream){
 
  
 int fclose(FILE *stream){
+   extern int ics_fdopen_close(FILE *) __attribute__((weak));
    if (stream==stdout || stream==stderr || stream==stdin)
       return 0;
    sdk_flush_write_buffer(stream, 1);
+   if (ics_fdopen_close && ics_fdopen_close(stream))
+      return 0;
    closefile(stream);
    return 0;
 };
 
 int fflush (FILE *stream){
+   extern int ics_fdopen_fd(FILE *) __attribute__((weak));
+   int fd;
    int i;
    if (!stream) {
       for (i = 0; i < SDK_WRITE_SLOTS; i++)
@@ -1484,13 +1526,19 @@ int fflush (FILE *stream){
    if (stream == stdout || stream==stderr || stream == stdin) 
       return 0;
    sdk_flush_write_buffer(stream, 0);
+   fd=ics_fdopen_fd ? ics_fdopen_fd(stream) : -1;
+   if (fd >= 0)
+      return fsync(fd);
    return dexsdk_systemcall(0x59,(long)stream,0,0,0,0);
 };
 
 /* fseek lives in posix.c (POSIX int return) */
 
 long int ftell(FILE *stream){
-   long pos = dexsdk_systemcall(0x47,(long)stream,0,0,0,0);
+   extern int ics_fdopen_fd(FILE *) __attribute__((weak));
+   int fd=ics_fdopen_fd ? ics_fdopen_fd(stream) : -1;
+   long pos = fd >= 0 ? lseek(fd,0,SEEK_CUR) :
+                        dexsdk_systemcall(0x47,(long)stream,0,0,0,0);
    if (pos >= 0)
       pos += sdk_buffered_write_bytes(stream);
    return pos;

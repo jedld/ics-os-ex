@@ -24,6 +24,7 @@
  */
 
 #include "process.h"
+#include "../vfs/posixfd.h"
 
 /*
 int lock_var = 0; // actual lock global variable used to provide synchronization
@@ -157,6 +158,7 @@ DWORD createthread(void *ptr, void *stack, DWORD stacksize){
     
    PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));
    memset(temp,0,sizeof(PCB386));
+   spin_init(&temp->fd_lock);
    fpu_init_default(&temp->fpu);
 
    totalprocesses++;
@@ -309,8 +311,11 @@ DWORD forkprocess(PCB386 *parent){
 #endif
 
    pcb = (PCB386*) malloc(sizeof(PCB386));//Allocate space for PCB
-   dex32_stopints(&flags);                //disable interrupts
    memcpy(pcb,parent,sizeof(PCB386));     //Initialize the new process by copying the parent process' PCB
+   memset(pcb->fds,0,sizeof(pcb->fds));
+   spin_init(&pcb->fd_lock);
+   posix_fd_clone(pcb,parent);
+   dex32_stopints(&flags);                //disable interrupts
    strcat(pcb->name,".fork");             //Add a 'fork' suffix to indicate that it was created by fork
    totalprocesses++;                      //Increase the total number of processes in the system
    pcb->size       = sizeof(PCB386);      //Save the size of the PCB
@@ -392,6 +397,7 @@ DWORD createprocess(
 
    PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));      //allocate the PCB for the process
    memset(temp,0,sizeof(PCB386));                     //Initialize by zeroing it out
+   spin_init(&temp->fd_lock);
    fpu_init_default(&temp->fpu);
    temp->before=current_process;                      //add it after the current process 
    strcpy(temp->name,name);                           //set the name of the process
@@ -406,9 +412,7 @@ DWORD createprocess(
    temp->arrivaltime  = getprecisetime();             //set the time the process was created 
    temp->stdin        = parent->stdin;                //set stdin to be the same as parent
    {
-      int fi;
-      for (fi = 0; fi < FD_MAX; fi++)
-         temp->fds[fi] = parent->fds[fi];
+      posix_fd_clone(temp,parent);
       temp->ctty = parent->ctty;
       temp->session = parent->session;
       temp->pgrp = parent->pgrp;
@@ -729,9 +733,6 @@ DWORD createkthread(void *ptr,char *name,DWORD stacksize){
    temp->arrivaltime = getprecisetime();
    temp->stdin       = current_process->stdin;
    {
-      int fi;
-      for (fi = 0; fi < FD_MAX; fi++)
-         temp->fds[fi] = current_process->fds[fi];
       temp->ctty = current_process->ctty;
       temp->session = current_process->session;
       temp->pgrp = current_process->pgrp;
@@ -862,6 +863,7 @@ DWORD kill_process(DWORD processid){
 
          while (closeallfiles(ptr->processid)==1)              //close all opened files by the process
             ;
+         posix_fd_close_all(ptr);
 
          //locate the parent process and decrement its waiting
          //status...important for the dex32_wait() function
@@ -994,6 +996,7 @@ DWORD exit(DWORD val){
    DWORD flags;
    current_process->exit_status = (int)(val & 0xff);
    //close all files the process has opened
+   posix_fd_close_all(current_process);
    closeallfiles(current_process->processid);
     
    /* Tell the task switcher to kill this process by setting the
@@ -1627,6 +1630,7 @@ void schedule_from_timer(void){
                readyprocess = &sPCB;
          }
 
+         posix_fd_close_all(dying);
          closeallfiles(dying->processid);
          if (parent != (PCB386*)-1) {
             parent->childwait = 0;
