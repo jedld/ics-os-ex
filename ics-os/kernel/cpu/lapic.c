@@ -81,14 +81,29 @@ void lapic_timer_init(u32 hz) {
     printf("LAPIC: timer hz=%d init=%d\n", hz, ticks);
 }
 
-void lapic_send_ipi(u32 apic_id, u32 vector) {
-    lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
-    lapic_write(LAPIC_ICR_LOW, vector);
+static int lapic_wait_icr_idle(void) {
+    volatile u32 spins;
+    for (spins=0;spins<1000000u;spins++) {
+        if (!(lapic_read(LAPIC_ICR_LOW)&(1u<<12)))
+            return 1;
+        __asm__ __volatile__("pause");
+    }
+    printf("LAPIC: ICR delivery timeout cpu=%d\n",lapic_get_id());
+    return 0;
 }
 
-void lapic_send_init(u32 apic_id) {
+int lapic_send_ipi(u32 apic_id, u32 vector) {
+    if (!lapic_wait_icr_idle()) return 0;
+    lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
+    lapic_write(LAPIC_ICR_LOW, vector);
+    return lapic_wait_icr_idle();
+}
+
+int lapic_send_init(u32 apic_id) {
+    if (!lapic_wait_icr_idle()) return 0;
     lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
     lapic_write(LAPIC_ICR_LOW, 0x4500); /* INIT level assert */
+    if (!lapic_wait_icr_idle()) return 0;
     {
         volatile u32 i;
         for (i = 0; i < 100000; i++)
@@ -96,9 +111,12 @@ void lapic_send_init(u32 apic_id) {
     }
     lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
     lapic_write(LAPIC_ICR_LOW, 0x0500); /* INIT deassert */
+    return lapic_wait_icr_idle();
 }
 
-void lapic_send_sipi(u32 apic_id, u32 vector) {
+int lapic_send_sipi(u32 apic_id, u32 vector) {
+    if (!lapic_wait_icr_idle()) return 0;
     lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
     lapic_write(LAPIC_ICR_LOW, 0x4600 | (vector & 0xFF));
+    return lapic_wait_icr_idle();
 }

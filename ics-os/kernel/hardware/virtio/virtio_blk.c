@@ -193,6 +193,7 @@ struct vblk_dev {
    volatile struct virtq_avail *avail;
    volatile struct virtq_used *used;
    struct vblk_slot *slots;
+   u64 slot_owner[VIRTIO_QUEUE_MAX / VBLK_DESCS_PER_REQ];
    u8 *bounce;
    u16 avail_idx;
    u16 last_used;
@@ -508,6 +509,15 @@ static void vblk_finish_async(struct vblk_dev *d, int si)
       spin_unlock_irqrestore(&d->qlock, flags);
       return;
    }
+   /* User virtual addresses are only valid in the submitting address space.
+      A different process may harvest descriptor state, but it must leave this
+      callback queued for its owner to drain. */
+      if (s->copy_back && s->res > 0 && d->slot_owner[si] &&
+       (!current_process ||
+        d->slot_owner[si] != (u64)(uintptr)current_process->pagedirloc)) {
+      spin_unlock_irqrestore(&d->qlock, flags);
+      return;
+   }
    if (s->copy_back && s->user_buf && s->res > 0)
       memcpy(s->user_buf, d->bounce + (unsigned)si * VBLK_BOUNCE,
              (unsigned)s->res);
@@ -517,6 +527,7 @@ static void vblk_finish_async(struct vblk_dev *d, int si)
    s->done_fn = 0;
    s->user_buf = 0;
    s->busy = 0;
+   d->slot_owner[si] = 0;
    spin_unlock_irqrestore(&d->qlock, flags);
    fn(arg, res);
 }
@@ -543,10 +554,13 @@ static void vblk_harvest_locked(struct vblk_dev *d)
       u16 head, si;
       struct vblk_slot *s;
 
-      e = &d->used->ring[d->last_used % d->qsize];
-      head = (u16)e->id;
-      si = (u16)(head / VBLK_DESCS_PER_REQ);
-      d->last_used++;
+ e = &d->used->ring[d->last_used % d->qsize];
+       head = (u16)e->id;
+       si = (u16)(head / VBLK_DESCS_PER_REQ);
+       printf("vblk: HARVEST usedidx=%u last=%u id=%u len=%u\n",
+              (unsigned)used_idx, (unsigned)d->last_used,
+              (unsigned)e->id, (unsigned)e->len);
+       d->last_used++;
       if (si >= d->nslots)
          continue;
       s = &d->slots[si];
@@ -574,6 +588,8 @@ static int vblk_alloc_slot(struct vblk_dev *d)
    for (i = 0; i < d->nslots; i++) {
       if (!d->slots[i].busy) {
          d->slots[i].busy = 1;
+         d->slot_owner[i] = current_process ?
+            (u64)(uintptr)current_process->pagedirloc : 0;
          d->slots[i].done = 0;
          d->slots[i].res = 0;
          completion_init(&d->slots[i].completion);
@@ -677,11 +693,14 @@ int virtio_blk_submit(u32 type, u64 sector, void *buf, u32 bytes,
    virt_mb();
    d->avail_idx++;
    d->avail->idx = d->avail_idx;
-   virt_mb();
-   virtio_notify(d);
-   spin_unlock_irqrestore(&d->qlock, flags);
+    virt_mb();
+    virtio_notify(d);
+    printf("vblk: SUBMIT slot=%d head=%u sector=%llu bytes=%u avail=%u\n",
+           si, (unsigned)head, (unsigned long long)sector,
+           (unsigned)bytes, (unsigned)d->avail_idx);
+    spin_unlock_irqrestore(&d->qlock, flags);
 
-   if (slot_out)
+    if (slot_out)
       *slot_out = si;
    return 0;
 }
@@ -719,12 +738,16 @@ int virtio_blk_wait(int slot)
       }
       cpu_idle();
    }
-   flags = spin_lock_irqsave(&d->qlock);
-   res = s->res;
-   if (s->copy_back && s->user_buf && res > 0)
-      memcpy(s->user_buf, d->bounce + (unsigned)slot * VBLK_BOUNCE,
-             (unsigned)res);
-   s->sync_wait = 0;
+  flags = spin_lock_irqsave(&d->qlock);
+    res = s->res;
+    printf("vblk: WAIT slot=%d res=%d ubuf=%x bnc0=%x bnc1=%x\n",
+           slot, res, (unsigned)(uintptr)s->user_buf,
+           (unsigned)d->bounce[(unsigned)slot * VBLK_BOUNCE + 0],
+           (unsigned)d->bounce[(unsigned)slot * VBLK_BOUNCE + 4]);
+    if (s->copy_back && s->user_buf && res > 0)
+       memcpy(s->user_buf, d->bounce + (unsigned)slot * VBLK_BOUNCE,
+              (unsigned)res);
+    s->sync_wait = 0;
    s->user_buf = 0;
    if (!s->abandoned)
       s->busy = 0;
@@ -932,6 +955,58 @@ int virtio_blk_flush(void)
       return n;
    n = virtio_blk_wait(slot);
    return n < 0 ? n : 0;
+}
+
+int virtio_blk_force_reset(void)
+{
+   int result;
+   spin_irq_flags_t flags;
+
+      if (!vblk.common || !vblk.desc || !vblk.avail || !vblk.used ||
+         !vblk.slots || !vblk.bounce)
+      return 0;
+   flags = spin_lock_irqsave(&vblk.qlock);
+   result = vblk_reset_locked(&vblk);
+   spin_unlock_irqrestore(&vblk.qlock, flags);
+   virtio_blk_harvest();
+   return result;
+}
+
+void virtio_blk_retire_owner(u64 owner)
+{
+   int i, found=0;
+   spin_irq_flags_t flags;
+
+   if (!owner || !vblk.common || !vblk.slots)
+      return;
+   flags=spin_lock_irqsave(&vblk.qlock);
+   for (i=0;i<(int)vblk.nslots;i++) {
+      if (vblk.slots[i].busy && vblk.slot_owner[i]==owner) {
+         found=1;
+         break;
+      }
+   }
+   if (!found) {
+      spin_unlock_irqrestore(&vblk.qlock,flags);
+      return;
+   }
+
+   /* Stopping the whole queue is currently the only safe cancellation: DMA
+      has no per-request ownership return. Afterwards, turn every async owner
+      request (including completed-but-undrained reads) into an address-free
+      error callback before its page tables can be released. */
+   (void)vblk_reset_locked(&vblk);
+   for (i=0;i<(int)vblk.nslots;i++) {
+      struct vblk_slot *s=&vblk.slots[i];
+      if (!s->busy || vblk.slot_owner[i]!=owner || !s->done_fn)
+         continue;
+      s->user_buf=0;
+      s->copy_back=0;
+      s->res=VBLK_EIO;
+      s->done=1;
+   }
+   spin_unlock_irqrestore(&vblk.qlock,flags);
+   vblk_drain_callbacks(&vblk);
 }
 
 void virtio_blk_irq(void)

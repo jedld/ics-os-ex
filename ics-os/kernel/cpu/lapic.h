@@ -26,9 +26,9 @@ u32  lapic_read(u32 reg);
 void lapic_write(u32 reg, u32 val);
 u32  lapic_get_id(void);
 void lapic_timer_init(u32 hz);
-void lapic_send_ipi(u32 apic_id, u32 vector);
-void lapic_send_init(u32 apic_id);
-void lapic_send_sipi(u32 apic_id, u32 vector);
+int  lapic_send_ipi(u32 apic_id, u32 vector);
+int  lapic_send_init(u32 apic_id);
+int  lapic_send_sipi(u32 apic_id, u32 vector);
 
 extern volatile u32 *lapic_mmio;
 

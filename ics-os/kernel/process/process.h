@@ -33,6 +33,7 @@
 #include "../console/dex_DDL.h"
 #include "../cpu/context.h"
 #include "../cpu/spinlock.h"
+#include "waitqueue.h"
 
 //access levels used in accesslevel field of PCB                                
 #define ACCESS_SYS 0
@@ -213,6 +214,12 @@ typedef struct _PCB386 {
 
    DWORD waiting;      //Set to the amount of time for a sleeping process 
 
+   wait_queue_t *wait_queue;
+   void *wait_key;
+   struct _PCB386 *wait_next;
+   DWORD wait_deadline;
+   int wait_queued;
+
    DWORD childwait;    /*used by dex32_wait to check if a child has terminated
                         or not, incremented by 1 when a child process is spawned*/
 
@@ -381,6 +388,7 @@ void     addmemusage(process_mem **memptr,DWORD vaddr,DWORD pages);
 void     addprocess(char *processname,process_mem *mem);  
 int      broadcastmessage(DWORD sender,DWORD mes,DWORD data);
 DWORD    createkthread(void *ptr,char *name,DWORD stacksize);
+DWORD    createkthread_on_cpu(void *ptr,char *name,DWORD stacksize,int cpu);
 DWORD    createprocess(void *ptr,char *name,
                      DWORD *pagedir,process_mem *pmem,
                      void *stack,DWORD stacksize,

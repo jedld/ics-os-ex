@@ -858,8 +858,7 @@ void dex_init(){
     
    //create the foreground manager
    if (strcmp(kernel_cmdline, "selfhost-stage1") != 0) {
-      fg_pid = createkthread((void*)fg_updateinfo,"fg_mgr",20000);
-      ps_set_affinity(fg_pid, 0); /* console DDL / VGA — BSP only */
+      fg_pid = createkthread_on_cpu((void*)fg_updateinfo,"fg_mgr",20000,0);
    } else {
       printf("foreground manager deferred for self-host\n");
    }

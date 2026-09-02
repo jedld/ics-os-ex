@@ -206,11 +206,11 @@ static int pc_copy_out(int deviceid, u64 byte_off, u64 nbytes, char *dst)
       if ((u64)n > nbytes - done)
          n = (DWORD)(nbytes - done);
       p = pc_lookup(deviceid, index);
-      if (!p)
-         return 0;
-      memcpy(dst + (DWORD)done, p->data + poff, n);
-      p->age = ++pc_clock;
-      done += n;
+       if (!p)
+          return 0;
+       memcpy(dst + (DWORD)done, p->data + poff, n);
+       p->age = ++pc_clock;
+       done += n;
    }
    return 1;
 }
@@ -374,17 +374,20 @@ int blkcache_read(int deviceid, u64 sector, DWORD numblocks, void *buf)
    pg0 = start >> PC_SHIFT;
    pg1 = (end - 1) >> PC_SHIFT;
 
-   sync_entercrit(&pc_busy);
-   ok = pc_copy_out(deviceid, start, end - start, (char *)buf);
-   if (ok) {
-      pc_hits += numblocks;
-      sync_leavecrit(&pc_busy);
-      return 1;
-   }
-   pc_misses += numblocks;
-   sync_leavecrit(&pc_busy);
+  sync_entercrit(&pc_busy);
+    ok = pc_copy_out(deviceid, start, end - start, (char *)buf);
+    printf("pcache: read dev=%d sector=%llu nb=%d bsz=%u pg0=%llu pg1=%llu hit=%d\n",
+           deviceid, (unsigned long long)sector, (unsigned)numblocks,
+           (unsigned)bsz, (unsigned long long)pg0, (unsigned long long)pg1, ok);
+    if (ok) {
+       pc_hits += numblocks;
+       sync_leavecrit(&pc_busy);
+       return 1;
+    }
+    pc_misses += numblocks;
+    sync_leavecrit(&pc_busy);
 
-   if (!pc_fill_range(deviceid, pg0, pg1))
+    if (!pc_fill_range(deviceid, pg0, pg1))
       return pc_dev_rw(deviceid, 0, sector, numblocks, buf, 0);
 
    sync_entercrit(&pc_busy);

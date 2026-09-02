@@ -1494,7 +1494,7 @@ int console_new(){
    //create a new console         
    char consolename[255];
    sprintf(consolename,"console(%d)", console_first);    
-   return createkthread((void*)console, consolename, 200000);
+   return createkthread_on_cpu((void*)console, consolename, 200000,0);
 };
 
 void console_main(){

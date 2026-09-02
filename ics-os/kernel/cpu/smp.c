@@ -4,6 +4,8 @@
 #include "../cpu/context.h"
 
 extern int printf(const char *fmt, ...);
+extern int sprintf(char *str, const char *fmt, ...);
+extern void serial_puts(const char *s);
 extern void *memset(void *s, int c, unsigned long n);
 extern void *memcpy(void *d, const void *s, unsigned long n);
 extern char *strcpy(char *d, const char *s);
@@ -22,11 +24,14 @@ extern DWORD *pagedir1;
 cpu_local cpus[MAX_CPUS];
 int cpu_count = 1;
 spinlock_t sched_lock;
+u8 smp_fpu_scratch[MAX_CPUS][512] __attribute__((aligned(16)));
 
 static u8 ap_stacks[MAX_CPUS][65536] __attribute__((aligned(16)));
 static PCB386 ap_idle_pcb[MAX_CPUS];
 static u8 ap_idle_stacks[MAX_CPUS][8192] __attribute__((aligned(16)));
-static volatile int ap_started = 0;
+static volatile int ap_claimed = 0;
+static volatile int ap_boot_state = 0;
+static volatile int ap_boot_apic = -1;
 volatile int smp_sched_enabled = 0;
 
 int smp_cpu_id(void) {
@@ -73,32 +78,62 @@ void smp_reschedule_ipi(void) {
         schedule_from_timer();
 }
 
-static volatile int ap_work_done = 0;
+static volatile u32 ap_work_mask = 0;
 
 static void ap_work_smoke(void) {
-    printf("SMP: AP work-steal OK (cpu=%d)\n", smp_cpu_id());
-    ap_work_done = 1;
+    int cpu=smp_cpu_id();
+    if (cpu>0 && cpu<MAX_CPUS)
+        __sync_fetch_and_or(&ap_work_mask,1u<<cpu);
+    sched_block_process(current_process,0);
+    taskswitch();
     for (;;)
         __asm__ __volatile__("sti; hlt");
 }
 
 void smp_start_ap_work_smoke(void) {
-    extern DWORD createkthread(void *ptr, char *name, DWORD stacksize);
-    extern void ps_set_affinity(int pid, int cpu);
     DWORD wid;
-    volatile u32 t;
+    u32 expected;
+    int cpu,failed=0;
     if (cpu_count < 2)
         return;
-    ap_work_done = 0;
-    wid = createkthread((void *)ap_work_smoke, "ap_work", 8192);
-    if (!wid)
+    ap_work_mask = 0;
+    expected=(1u<<cpu_count)-2u;
+    for (cpu=1;cpu<cpu_count;cpu++) {
+        wid=createkthread_on_cpu((void *)ap_work_smoke,"ap_work",8192,cpu);
+        if (!wid) {
+            failed=1;
+            break;
+        }
+        {
+            int retry;
+            for (retry=0;retry<32 && !(ap_work_mask&(1u<<cpu));retry++) {
+                volatile u32 t;
+                lapic_send_ipi(cpus[cpu].apic_id,IPI_RESCHEDULE);
+                for (t=0;t<200000u && !(ap_work_mask&(1u<<cpu));t++)
+                    __asm__ __volatile__("pause");
+            }
+            if (!(ap_work_mask&(1u<<cpu))) {
+                printf("SMP: AP work-steal TIMEOUT cpu=%d mask=%x\n",
+                       cpu,ap_work_mask);
+                return;
+            }
+        }
+    }
+    if (failed) {
+        printf("SMP: AP work-steal CREATE FAIL cpu=%d\n",cpu);
         return;
-    ps_set_affinity((int)wid, 1);
-    smp_reschedule_others();
-    for (t = 0; t < 200000000u && !ap_work_done; t++)
-        __asm__ __volatile__("pause");
-    if (!ap_work_done)
-        printf("SMP: AP work-steal TIMEOUT\n");
+    }
+    if (ap_work_mask!=expected)
+        printf("SMP: AP work-steal TIMEOUT mask=%x expected=%x\n",
+               ap_work_mask,expected);
+    else {
+        char record[80];
+        sprintf(record,"\nSMP_RESULT work-steal=ok cpus=%d mask=%x\n",
+                cpu_count,ap_work_mask);
+        serial_puts(record);
+        printf("SMP: AP work-steal ALL OK cpus=%d mask=%x\n",
+               cpu_count,ap_work_mask);
+    }
 }
 
 void smp_ap_enable_timer(void) {
@@ -157,15 +192,27 @@ static void ap_prepare_idle(int id) {
 
 void ap_main(void) {
     int id;
+    int apic;
 
     /* Leave the trampoline GDT; IDT gates use kernel CS selectors. */
     ap_load_kernel_gdt();
     loadregisters(); /* same IDT as BSP */
 
-    id = __sync_fetch_and_add(&ap_started, 1);
+    apic=(int)lapic_get_id();
+    if (ap_boot_state!=1 || ap_boot_apic!=apic) {
+        for (;;)
+            __asm__ __volatile__("cli; hlt");
+    }
+    id = __sync_fetch_and_add(&ap_claimed, 1);
+    if (id<=0 || id>=MAX_CPUS) {
+        printf("SMP: rejected APIC %d; CPU limit %d\n",
+               lapic_get_id(),MAX_CPUS);
+        for (;;)
+            __asm__ __volatile__("cli; hlt");
+    }
     cpus[id].cpu_id = id;
-    cpus[id].apic_id = lapic_get_id();
-    cpus[id].online = 1;
+    cpus[id].apic_id = (u32)apic;
+    cpus[id].online = 0;
     cpus[id].kernel_stack = &ap_stacks[id][65536];
 
     /* Enable APIC software enable + spurious vector before parking. */
@@ -174,7 +221,19 @@ void ap_main(void) {
 
     ap_prepare_idle(id);
 
-    printf("SMP: CPU %d (APIC %d) online (parked)\n", id, cpus[id].apic_id);
+     /* Commit only after the per-CPU and idle scheduler state is complete. A
+         BSP timeout changes state 1 to rejected state 3, permanently parking a
+         late AP before it can enter scheduling or be mistaken for CPU 0. */
+     cpus[id].online=1;
+     __sync_synchronize();
+     if (!__sync_bool_compare_and_swap(&ap_boot_state,1,2)) {
+          cpus[id].online=0;
+          ps_dequeue(&ap_idle_pcb[id]);
+          for (;;)
+                __asm__ __volatile__("cli; hlt");
+     }
+
+     printf("SMP: CPU %d (APIC %d) online (parked)\n", id, cpus[id].apic_id);
 
     /* Wait until BSP enables multi-core scheduling. */
     while (!smp_sched_enabled)
@@ -200,7 +259,9 @@ void smp_init(void) {
         cpus[0].current = &sPCB;
     }
     cpu_count = 1;
-    ap_started = 1; /* BSP occupies slot 0 */
+    ap_claimed = 1; /* BSP occupies slot 0 */
+    ap_boot_state = 0;
+    ap_boot_apic = -1;
     printf("SMP: BSP APIC id=%d\n", cpus[0].apic_id);
 }
 
@@ -218,29 +279,65 @@ void smp_start_aps(void) {
     *(volatile u64 *)0x8F20 = ap_entry;
 
     for (i = 1; i < MAX_CPUS; i++) {
-        int before = ap_started;
+        int started=0;
+        ap_boot_apic=i;
+        ap_boot_state=1;
+        __sync_synchronize();
         ap_stack_top = (u64)(uintptr)&ap_stacks[i][65536];
         *(volatile u64 *)0x8F18 = ap_stack_top;
         cpus[i].kernel_stack = &ap_stacks[i][65536];
 
-        lapic_send_init((u32)i);
+        if (!lapic_send_init((u32)i)) {
+            printf("SMP: APIC command timeout target=%d phase=INIT\n",i);
+            ap_boot_state=3;
+            break;
+        }
         {
             volatile u32 t;
             for (t = 0; t < 1000000; t++)
                 __asm__ __volatile__("pause");
         }
-        lapic_send_sipi((u32)i, 0x08);
+        if (!lapic_send_sipi((u32)i,0x08)) {
+            printf("SMP: APIC command timeout target=%d phase=SIPI\n",i);
+            ap_boot_state=3;
+            break;
+        }
         {
             volatile u32 t;
-            for (t = 0; t < 8000000; t++)
+            for (t=0;t<2000000u && ap_boot_state==1;t++)
                 __asm__ __volatile__("pause");
         }
-        if (ap_started > before) {
+        /* Intel permits a second SIPI when the first did not produce a
+           startup acknowledgement. Keep waiting bounded per AP. */
+        if (ap_boot_state==1) {
+            if (!lapic_send_sipi((u32)i,0x08)) {
+                printf("SMP: APIC command timeout target=%d phase=SIPI2\n",i);
+                ap_boot_state=3;
+                break;
+            }
+            {
+                volatile u32 t;
+                for (t=0;t<16000000u && ap_boot_state==1;t++)
+                    __asm__ __volatile__("pause");
+            }
+        }
+        if (ap_boot_state==2) {
+            started=1;
             cpu_count++;
             printf("SMP: APIC %d started (cpu_count=%d)\n", i, cpu_count);
         } else {
+            (void)__sync_bool_compare_and_swap(&ap_boot_state,1,3);
             break;
         }
+        if (started) {
+            ap_boot_state=0;
+            ap_boot_apic=-1;
+        }
+    }
+    {
+        char record[48];
+        sprintf(record,"\nSMP_RESULT online=%d\n",cpu_count);
+        serial_puts(record);
     }
     printf("SMP: %d CPUs online\n", cpu_count);
     restoreflags(flags);

@@ -54,6 +54,13 @@ extern PCB386 *sched_gethead(void);
 #define URING_MAX 64
 #define URING_QUEUED  1
 #define URING_WAIT_TICKS 500
+
+static DWORD next_wait_deadline(void)
+{
+   DWORD deadline=ticks+1;
+   /* wait_for_completion_until reserves zero for an unbounded wait. */
+   return deadline ? deadline : 1;
+}
 #define VBLK_MAX_XFER 4096
 
 typedef struct ics_uring ics_uring;
@@ -382,6 +389,7 @@ static void uring_free(ics_uring *r)
 static void uring_put(ics_uring *r)
 {
    int release=0;
+   int wake=0;
    if (!r)
       return;
    spin_lock(&r->lock);
@@ -390,7 +398,11 @@ static void uring_put(ics_uring *r)
       if (r->closing && !r->close_waiting && !r->fd_refs &&
          !r->active_refs && !r->inflight)
       release=1;
+      if (r->closing)
+         wake=1;
    spin_unlock(&r->lock);
+      if (wake)
+         complete_all(&r->cq_event);
    if (release)
       uring_free(r);
 }
@@ -447,9 +459,15 @@ static int uring_close(ics_uring *r)
          uring_free(r);
          return 0;
       }
+      reinit_completion(&r->cq_event);
       spin_unlock(&r->lock);
       if (ticks - start > URING_WAIT_TICKS) {
          int release=0;
+         /* A close timeout must not leave a device-owned request retaining
+            this process's user address. Reset retires DMA first; harvesting
+            then performs this ring's EIO callbacks in the owner CR3. */
+         (void)virtio_blk_force_reset();
+         virtio_blk_harvest();
          spin_lock(&r->lock);
          r->close_waiting=0;
          if (!r->active_refs && !r->inflight)
@@ -459,7 +477,7 @@ static int uring_close(ics_uring *r)
             uring_free(r);
          return -EIO;
       }
-      cpu_idle();
+      wait_for_completion_until(&r->cq_event,next_wait_deadline());
    }
 }
 
@@ -1144,6 +1162,9 @@ void posix_fd_close_all(struct _PCB386 *process)
    void *ptr;
    if (!process)
       return;
+   /* Descriptor objects may be shared with another process, but pending DMA
+      copyback is owned by this address space and must never outlive it. */
+   virtio_blk_retire_owner((u64)(uintptr)process->pagedirloc);
    for (fd=3;fd<FD_MAX;fd++) {
       spin_lock(&process->fd_lock);
       type=process->fds[fd].type;
@@ -1264,7 +1285,7 @@ long sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
             spin_unlock(&r->lock);
             break;
          }
-         completion_init(&r->cq_event);
+         reinit_completion(&r->cq_event);
          spin_unlock(&r->lock);
          virtio_blk_harvest();
          if ((uring_load_acquire(&r->cq_tail) -
@@ -1272,8 +1293,9 @@ long sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
             break;
          if (ticks - start > URING_WAIT_TICKS)
             break;
-         if (!completion_done(&r->cq_event))
-            cpu_idle();
+         if (!completion_done(&r->cq_event) &&
+             !wait_for_completion_until(&r->cq_event,next_wait_deadline()))
+            continue;
       }
    }
    (void)flags;

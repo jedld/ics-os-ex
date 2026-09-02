@@ -29,6 +29,8 @@ Description: This module is the default round-robin scheduler that is
 extern PCB386 *sched_phead;
 extern int ps_schedid;
 extern devmgr_scheduler_extension ps_scheduler;
+void sched_block_process(PCB386 *process, DWORD deadline);
+void sched_wake_process(PCB386 *process);
 extern int sched_attach(devmgr_generic *cur);
 extern int sched_dequeue(PCB386 *ptr);
 extern void sched_enqueue(PCB386 *process);

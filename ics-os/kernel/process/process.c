@@ -24,7 +24,136 @@
  */
 
 #include "process.h"
+#include "scheduler.h"
+#include "completion.h"
 #include "../vfs/posixfd.h"
+
+extern unsigned int ticks;
+
+#define EVENT_WAIT_BUCKETS 32
+static wait_queue_t event_wait_queues[EVENT_WAIT_BUCKETS];
+
+static wait_queue_t *wait_event_queue(void *key)
+{
+   uintptr value=(uintptr)key;
+   return &event_wait_queues[(value>>4)&(EVENT_WAIT_BUCKETS-1)];
+}
+
+void wait_queue_prepare(wait_queue_t *queue,void *key,DWORD deadline)
+{
+   PCB386 *process=current_process;
+   spin_irq_flags_t flags;
+   if (!queue || !process)
+      return;
+   flags=spin_lock_irqsave(&queue->lock);
+   if (!process->wait_queued) {
+      process->wait_queue=queue;
+      process->wait_key=key;
+      process->wait_next=queue->head;
+      queue->head=process;
+      process->wait_queued=1;
+      sched_block_process(process,deadline);
+   }
+   spin_unlock_irqrestore(&queue->lock,flags);
+}
+
+static void wait_queue_remove_locked(wait_queue_t *queue,PCB386 *process)
+{
+   PCB386 **link=&queue->head;
+   while (*link && *link!=process)
+      link=&(*link)->wait_next;
+   if (*link==process)
+      *link=process->wait_next;
+   process->wait_queue=0;
+   process->wait_key=0;
+   process->wait_next=0;
+   process->wait_queued=0;
+}
+
+void wait_queue_finish(wait_queue_t *queue)
+{
+   PCB386 *process=current_process;
+   spin_irq_flags_t flags;
+   if (!queue || !process)
+      return;
+   flags=spin_lock_irqsave(&queue->lock);
+   if (process->wait_queued && process->wait_queue==queue)
+      wait_queue_remove_locked(queue,process);
+   sched_wake_process(process);
+   spin_unlock_irqrestore(&queue->lock,flags);
+}
+
+void wait_queue_cancel(PCB386 *process)
+{
+   wait_queue_t *queue;
+   spin_irq_flags_t flags;
+   if (!process || !process->wait_queued || !process->wait_queue)
+      return;
+   queue=process->wait_queue;
+   flags=spin_lock_irqsave(&queue->lock);
+   if (process->wait_queued && process->wait_queue==queue)
+      wait_queue_remove_locked(queue,process);
+   sched_wake_process(process);
+   spin_unlock_irqrestore(&queue->lock,flags);
+}
+
+void wait_queue_wake_all(wait_queue_t *queue)
+{
+   PCB386 *process,*next;
+   spin_irq_flags_t flags;
+   if (!queue)
+      return;
+   flags=spin_lock_irqsave(&queue->lock);
+   process=queue->head;
+   queue->head=0;
+   while (process) {
+      next=process->wait_next;
+      process->wait_queue=0;
+      process->wait_key=0;
+      process->wait_next=0;
+      process->wait_queued=0;
+      sched_wake_process(process);
+      process=next;
+   }
+   spin_unlock_irqrestore(&queue->lock,flags);
+}
+
+void wait_event_wake_all(void *key)
+{
+   wait_queue_t *queue=wait_event_queue(key);
+   PCB386 **link,*process;
+   spin_irq_flags_t flags=spin_lock_irqsave(&queue->lock);
+   link=&queue->head;
+   while (*link) {
+      process=*link;
+      if (process->wait_key!=key) {
+         link=&process->wait_next;
+         continue;
+      }
+      *link=process->wait_next;
+      process->wait_queue=0;
+      process->wait_key=0;
+      process->wait_next=0;
+      process->wait_queued=0;
+      sched_wake_process(process);
+   }
+   spin_unlock_irqrestore(&queue->lock,flags);
+}
+
+int wait_for_completion_until(completion_t *completion,DWORD deadline)
+{
+   if (!completion)
+      return 0;
+   while (!completion_done(completion)) {
+      if (deadline && (int)(ticks-deadline)>=0)
+         return 0;
+      wait_queue_prepare(wait_event_queue(completion),completion,deadline);
+      if (!completion_done(completion))
+         taskswitch();
+      wait_queue_finish(wait_event_queue(completion));
+   }
+   return 1;
+}
 
 /*
 int lock_var = 0; // actual lock global variable used to provide synchronization
@@ -679,12 +808,16 @@ int getmessage(DWORD *source, DWORD *mes, DWORD *data){
  * 
  *
 */
-DWORD createkthread(void *ptr,char *name,DWORD stacksize){
- 
-   PCB386 *temp=(PCB386*)malloc(sizeof(PCB386));
+DWORD createkthread_on_cpu(void *ptr,char *name,DWORD stacksize,int cpu){
+   PCB386 *temp;
    DWORD cpuflags;
    void *stackbase;
-    
+
+   if (cpu < -1 || cpu >= MAX_CPUS)
+      return 0;
+   temp=(PCB386*)malloc(sizeof(PCB386));
+   if (!temp)
+      return 0;
    memset(temp,0,sizeof(PCB386));
    temp->before=current_process;
    strcpy(temp->name,name);
@@ -737,7 +870,7 @@ DWORD createkthread(void *ptr,char *name,DWORD stacksize){
       temp->session = current_process->session;
       temp->pgrp = current_process->pgrp;
    }
-   temp->cpu_affinity = -1;
+   temp->cpu_affinity = cpu;
    temp->on_cpu = -1;
 
    sync_entercrit(&processmgr_busy);
@@ -748,6 +881,10 @@ DWORD createkthread(void *ptr,char *name,DWORD stacksize){
     
    return temp->processid;
 };
+
+DWORD createkthread(void *ptr,char *name,DWORD stacksize){
+   return createkthread_on_cpu(ptr,name,stacksize,-1);
+}
 
 //change the name of a process
 int ps_changename(const char *name, int pid){
@@ -805,7 +942,8 @@ DWORD dex32_killkthread(DWORD processid){
                 
          if (ptr->semhandle != 0)
             set_semaphore(ptr->semhandle,SIG_TERM);
-                
+
+         wait_queue_cancel(ptr);
          ps_dequeue(ptr);
 
          free(ptr);
@@ -927,6 +1065,7 @@ DWORD kill_process(DWORD processid){
          };
 
          //Tell the scheduler to remove this process from the queue
+         wait_queue_cancel(ptr);
          ps_dequeue(ptr);
 
          //deallocate the PCB for the process
@@ -959,6 +1098,7 @@ DWORD kill_thread(PCB386 *ptr){
       parent->childwait--;
     
    //Tell the scheduler to remove this thread from the ready queue
+   wait_queue_cancel(ptr);
    ps_dequeue(ptr);
 
    if (ptr->stackptr0!=0)
@@ -1435,22 +1575,22 @@ void ps_set_affinity(int pid, int cpu){
    `ret`) would otherwise re-enter ps_switchto via schedule_from_timer
    and clobber the in-flight task's saved ctx (live RIP/RSP overwrites
    the seeded entry point).  The guard is per-CPU so SMP is safe. */
-static volatile int ps_switchto_in_progress[4];
-static volatile int voluntary_switch;
+static volatile int ps_switchto_in_progress[MAX_CPUS];
+static volatile int voluntary_switch[MAX_CPUS];
+volatile int ctx_load_in_progress[MAX_CPUS];
 volatile int selfhost_cooperative_ready;
 
 
 void ps_switchto(PCB386 *process){
    PCB386 *prev = current_process;
    int me = smp_cpu_id();
-   extern void lapic_send_ipi(u32 apic_id, u32 vector);
-
-   if (ps_switchto_in_progress[me])
-      return; /* already switching — a nested call from IRQ would corrupt ctx */
-   ps_switchto_in_progress[me] = 1;
+   extern int lapic_send_ipi(u32 apic_id, u32 vector);
 
    if (!process)
       return;
+   if (ps_switchto_in_progress[me])
+      return; /* already switching — a nested call from IRQ would corrupt ctx */
+   ps_switchto_in_progress[me] = 1;
 
    /* Do not run a task still live on another CPU — wait for it to be released. */
    if (process != prev) {
@@ -1460,10 +1600,20 @@ void ps_switchto(PCB386 *process){
          if (other >= 0 && other < cpu_count && cpus[other].online)
             lapic_send_ipi(cpus[other].apic_id, IPI_RESCHEDULE);
          __asm__ __volatile__("pause");
-         if (++spins > 1000000)
-            break;
+         if (++spins > 1000000) {
+            ps_switchto_in_progress[me] = 0;
+            return;
+         }
       }
-      process->on_cpu = me;
+      if (process->on_cpu < 0 &&
+          !__sync_bool_compare_and_swap(&process->on_cpu,-1,me)) {
+         ps_switchto_in_progress[me] = 0;
+         return;
+      }
+      if (process->on_cpu != me) {
+         ps_switchto_in_progress[me] = 0;
+         return;
+      }
    }
 
    if (prev && prev != process) {
@@ -1531,8 +1681,9 @@ void ps_switchto(PCB386 *process){
 
 /*Calls the scheduler voluntarily*/
 inline void taskswitch(){
+   int me=smp_cpu_id();
    ps_notimeincrement = 1;
-   voluntary_switch = 1;
+   voluntary_switch[me] = 1;
    schedule_from_timer();
 };
 
@@ -1542,8 +1693,9 @@ void schedule_from_timer(void){
    PCB386 *readyprocess;
    devmgr_scheduler_extension *cursched;
    static PCB386 *zombie_free;
-   int voluntary = voluntary_switch;
-   voluntary_switch = 0;
+   int me=smp_cpu_id();
+   int voluntary = voluntary_switch[me];
+   voluntary_switch[me] = 0;
 
    /* Long GCC cc1 runs expose a legacy timer-context race.  Stage-1
       certification is intentionally uniprocessor and cooperatively
@@ -1561,8 +1713,7 @@ void schedule_from_timer(void){
       left set because context_load cannot clear it before `ret` without
       opening a race window.  Clear it here — the new task is already
       running, so it is safe to proceed with scheduling. */
-   extern volatile int ctx_load_in_progress;
-   if (ctx_load_in_progress)
+   if (ctx_load_in_progress[me])
       return;
 
    if (sigwait || !current_process)

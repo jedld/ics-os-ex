@@ -52,7 +52,7 @@
 
 /* inode i_flags */
 #define EXT4_INDEX_FL       0x1000  /* hashed (htree) directory */
-#define EXT4_EXTENTS_FL     0x0008  /* extents (also set by INCOMPAT) */
+#define EXT4_EXTENTS_FL     0x00080000  /* extents enabled on this inode (i_flags) */
 
 /* directory entry file types */
 #define EXT4_FT_UNKNOWN     0

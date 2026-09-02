@@ -125,9 +125,9 @@ DWORD iomgr_diskmgr()
    do
     {
 
-      /* Deferred virtio callbacks may lock rings and release memory, so they
-         are drained by this process-context worker rather than hard IRQ. */
-      virtio_blk_harvest();
+      /* User-buffer callbacks must run in the submitter's address space until
+         the DMA layer can pin and kernel-map arbitrary user pages. Hard IRQ
+         harvests descriptors; the waiting/closing submitter drains callbacks. */
 
       while (IOmgr_pause)
          sleep(1);

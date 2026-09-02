@@ -16,6 +16,28 @@ PCB386 *sched_phead;
 int ps_schedid;
 devmgr_scheduler_extension ps_scheduler;
 static spinlock_t ready_lock;
+extern unsigned int ticks;
+
+static int deadline_expired(DWORD now,DWORD deadline)
+{
+   return deadline && (int)(now-deadline)>=0;
+}
+
+void sched_block_process(PCB386 *process,DWORD deadline)
+{
+   spin_irq_flags_t flags=spin_lock_irqsave(&ready_lock);
+   process->wait_deadline=deadline;
+   process->status|=PS_ATTB_BLOCKED;
+   spin_unlock_irqrestore(&ready_lock,flags);
+}
+
+void sched_wake_process(PCB386 *process)
+{
+   spin_irq_flags_t flags=spin_lock_irqsave(&ready_lock);
+   process->wait_deadline=0;
+   process->status&=~PS_ATTB_BLOCKED;
+   spin_unlock_irqrestore(&ready_lock,flags);
+}
 
 static int sched_runnable_here(PCB386 *ptr) {
    int me = smp_cpu_id();
@@ -60,6 +82,11 @@ PCB386 *scheduler(PCB386 *lastprocess){
 
    /* Pass 1: find maximum priority among runnable tasks; tick down sleepers. */
    do {
+      if ((ptr->status&PS_ATTB_BLOCKED) &&
+          deadline_expired(ticks,ptr->wait_deadline)) {
+         ptr->wait_deadline=0;
+         ptr->status&=~PS_ATTB_BLOCKED;
+      }
       if (ptr->waiting) {
          ptr->waiting--;
       } else if (sched_runnable_here(ptr)) {

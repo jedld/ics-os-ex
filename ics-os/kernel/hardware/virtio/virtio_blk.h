@@ -10,6 +10,8 @@ int  virtio_blk_present(void);
 int  virtio_blk_readonly(void);
 u64  virtio_blk_sectors(void);
 void virtio_blk_harvest(void);
+int  virtio_blk_force_reset(void);
+void virtio_blk_retire_owner(u64 owner);
 
 /* Queue one DMA request. done(arg, bytes_or_-errno) runs from harvest
  * (IRQ or poll). Returns 0 if queued. Sync callers pass done=0 and

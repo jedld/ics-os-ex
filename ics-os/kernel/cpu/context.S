@@ -4,7 +4,9 @@
 .globl context_load
 .globl fpu_save
 .globl fpu_restore
-.globl ctx_load_in_progress
+.extern smp_cpu_id
+.extern smp_fpu_scratch
+.extern ctx_load_in_progress
 
 .set CTX_R15, 0
 .set CTX_R14, 8
@@ -73,7 +75,16 @@ context_load:
        A timer IRQ that fires from here until the flag is cleared
        will see ctx_load_in_progress==1 and bail out of
        schedule_from_timer without calling ps_switchto. */
-    movl $1, ctx_load_in_progress
+    /* Preserve the incoming context stack and align explicitly for SysV. */
+    movq %rsp, %r12
+    movq %rdi, %r13
+    andq $-16, %rsp
+    call smp_cpu_id
+    movq %r13, %rdi
+    movq %r12, %rsp
+    movl %eax, %r11d
+    leaq ctx_load_in_progress(%rip), %rax
+    movl $1, (%rax,%r11,4)
     movq CTX_R15(%rdi), %r15
     movq CTX_R14(%rdi), %r14
     movq CTX_R13(%rdi), %r13
@@ -92,47 +103,38 @@ context_load:
      2:
      /* Clear before ret; self-host stage 1 suppresses timer preemption, and
          regular scheduling retains the existing narrow-window guard. */
-    movl $0, ctx_load_in_progress
+    leaq ctx_load_in_progress(%rip), %rax
+    movl $0, (%rax,%r11,4)
      movq CTX_RIP(%rdi), %rax
      pushq %rax
      ret
 
 fpu_save:
-    /* rdi may be unaligned inside PCB — copy via aligned scratch */
+    /* rdi may be unaligned inside PCB; use this CPU's aligned scratch. */
     pushq %rdi
-    leaq fpu_scratch(%rip), %rdi
-    fxsave (%rdi)
+    call smp_cpu_id
+    movslq %eax, %rax
+    shlq $9, %rax
+    leaq smp_fpu_scratch(%rip), %rsi
+    addq %rax, %rsi
+    fxsave (%rsi)
     popq %rdi
-    pushq %rsi
     pushq %rdi
-    leaq fpu_scratch(%rip), %rsi
     movl $512, %ecx
     rep movsb
     popq %rdi
-    popq %rsi
     ret
 
 fpu_restore:
-    pushq %rsi
     pushq %rdi
-    movq %rdi, %rsi
-    leaq fpu_scratch(%rip), %rdi
+    call smp_cpu_id
+    movslq %eax, %rax
+    shlq $9, %rax
+    leaq smp_fpu_scratch(%rip), %rdi
+    addq %rax, %rdi
+    popq %rsi
     movl $512, %ecx
     rep movsb
-    leaq fpu_scratch(%rip), %rdi
+    subq $512, %rdi
     fxrstor (%rdi)
-    popq %rdi
-    popq %rsi
     ret
-
-.bss
-.align 16
-fpu_scratch:
-    .space 512
-
-/* Set while context_load is between "RSP switched" and "ret".
-   schedule_from_timer checks this and bails out to avoid a nested
-   ps_switchto that would clobber the in-flight task's saved ctx. */
-.align 4
-ctx_load_in_progress:
-    .long 0
