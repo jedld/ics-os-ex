@@ -1171,10 +1171,15 @@ int console_execute(const char *str){
            printf("FORK_OOM_RUN_FAIL\n");
         }else
      if (strcmp(u,"ext4test") == 0){
-        printf("ext4test: running /icsos/apps/ext4test.exe\n");
-        if (!user_execp("/icsos/apps/ext4test.exe", 0, "/icsos/apps/ext4test.exe"))
-           printf("EXT4_RUN_FAIL\n");
-     }else
+         printf("ext4test: running /icsos/apps/ext4test.exe\n");
+         if (!user_execp("/icsos/apps/ext4test.exe", 0, "/icsos/apps/ext4test.exe"))
+            printf("EXT4_RUN_FAIL\n");
+      }else
+      if (strcmp(u,"termtest") == 0){
+         printf("termtest: running /icsos/apps/termtest.exe\n");
+         if (!user_execp("/icsos/apps/termtest.exe", 0, "/icsos/apps/termtest.exe"))
+            printf("TERMTEST_RUN_FAIL\n");
+      }else
     if (strcmp(u,"cc1test") == 0){  //-- Run host-built GCC cc1 to compile a trivial file in-OS.
        char cmd[512];
        int ok = 1;

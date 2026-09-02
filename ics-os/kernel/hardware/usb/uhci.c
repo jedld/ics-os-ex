@@ -166,6 +166,14 @@ static BYTE usb_ep_out_burst = 0;
 static usb_drive_info usb_drive;
 static int usb_part_count = 0;
 static usb_part_info usb_parts[USB_MAX_PART];
+static spinlock_t usb_io_lock;
+static int usb_xhci_recovering;
+static int usb_xhci_recovery_count;
+static BYTE usb_recovery_before[512];
+static BYTE usb_recovery_after[512];
+
+static int usb_enumerate_msc(void);
+static int usb_xhci_recover(void);
 
 static DWORD pci_cfg_addr(BYTE bus, BYTE slot, BYTE func, BYTE off)
 {
@@ -467,7 +475,8 @@ static int usb_set_config(BYTE cfg)
     return usb_ctrl(&s, 0, 0);
 }
 
-static int usb_msc_bot(BYTE *cdb, int cdb_len, int in, BYTE *data, DWORD len)
+static int usb_msc_bot_once(BYTE *cdb, int cdb_len, int in, BYTE *data,
+                            DWORD len)
 {
     usb_cbw cbw;
     usb_csw csw;
@@ -504,6 +513,18 @@ static int usb_msc_bot(BYTE *cdb, int cdb_len, int in, BYTE *data, DWORD len)
     if (csw.sig != CSW_SIG || csw.status != 0)
         return 0;
     return 1;
+}
+
+static int usb_msc_bot(BYTE *cdb, int cdb_len, int in, BYTE *data, DWORD len)
+{
+    if (usb_msc_bot_once(cdb, cdb_len, in, data, len))
+        return 1;
+    if (usb_host != USB_HOST_XHCI || !xhci_recovery_needed ||
+        usb_xhci_recovering)
+        return 0;
+    if (!usb_xhci_recover())
+        return 0;
+    return usb_msc_bot_once(cdb, cdb_len, in, data, len);
 }
 
 static int usb_scsi_ready(void)
@@ -576,16 +597,22 @@ static int usb_scsi_rw(int write, DWORD lba, DWORD nblocks, char *buf)
 
 static int usb_read_block(u64 block, char *blockbuff, DWORD numblocks)
 {
-    if (!usb_drive.present)
-        return 0;
-    return usb_scsi_rw(0, (DWORD)block, numblocks, blockbuff);
+    int result;
+    spin_lock(&usb_io_lock);
+    result = usb_drive.present
+        ? usb_scsi_rw(0, (DWORD)block, numblocks, blockbuff) : 0;
+    spin_unlock(&usb_io_lock);
+    return result;
 }
 
 static int usb_write_block(u64 block, char *blockbuff, DWORD numblocks)
 {
-    if (!usb_drive.present)
-        return 0;
-    return usb_scsi_rw(1, (DWORD)block, numblocks, blockbuff);
+    int result;
+    spin_lock(&usb_io_lock);
+    result = usb_drive.present
+        ? usb_scsi_rw(1, (DWORD)block, numblocks, blockbuff) : 0;
+    spin_unlock(&usb_io_lock);
+    return result;
 }
 
 static int usb_total_blocks(void)
@@ -601,11 +628,17 @@ static int usb_get_block_size(void)
 static int usb_flush_device(void)
 {
     BYTE cdb[16];
-    if (!usb_drive.present)
+    int result;
+    spin_lock(&usb_io_lock);
+    if (!usb_drive.present) {
+        spin_unlock(&usb_io_lock);
         return -1;
+    }
     memset(cdb, 0, sizeof(cdb));
     cdb[0] = SCSI_SYNC_CACHE10;
-    if (!usb_msc_bot(cdb, 10, 0, 0, 0)) {
+    result = usb_msc_bot(cdb, 10, 0, 0, 0);
+    spin_unlock(&usb_io_lock);
+    if (!result) {
         printf("usb: SYNCHRONIZE CACHE failed\n");
         return -1;
     }
@@ -867,6 +900,65 @@ static int usb_enumerate_msc(void)
     return 1;
 }
 
+static int usb_xhci_recover(void)
+{
+    usb_xhci_recovering = 1;
+    xhci_stop_controller();
+    xhci_recovery_needed = 0;
+    if (!xhci_init_controller() || !usb_enumerate_msc()) {
+        printf("xhci: controller recovery failed\n");
+        xhci_stop_controller();
+        xhci_recovery_needed = 1;
+        usb_drive.present = 0;
+        usb_xhci_recovering = 0;
+        return 0;
+    }
+    usb_xhci_recovery_count++;
+    xhci_recovery_needed = 0;
+    usb_drive.present = 1;
+    usb_xhci_recovering = 0;
+    printf("xhci: controller recovery complete count=%d\n",
+           usb_xhci_recovery_count);
+    return 1;
+}
+
+static int usb_xhci_recovery_selftest(void)
+{
+    int before = usb_xhci_recovery_count;
+    int pass;
+    if (!usb_scsi_rw(0, 0, 1, (char *)usb_recovery_before))
+        goto fail;
+    xhci_fault_drop_next = 1;
+    if (!usb_scsi_rw(0, 0, 1, (char *)usb_recovery_after))
+        goto fail;
+    if (usb_xhci_recovery_count != before + 1 ||
+        memcmp(usb_recovery_before, usb_recovery_after, 512) != 0)
+        goto fail;
+    xhci_fault_drop_next = 1;
+    if (!usb_scsi_rw(0, 0, 1, (char *)usb_recovery_after) ||
+        usb_xhci_recovery_count != before + 2 ||
+        memcmp(usb_recovery_before, usb_recovery_after, 512) != 0)
+        goto fail;
+    usb_drive.present = 1;
+    xhci_fault_drop_next = 1;
+    xhci_fault_fail_init = 1;
+    pass = usb_scsi_rw(0, 0, 1, (char *)usb_recovery_after);
+    if (pass || usb_drive.present ||
+        usb_xhci_recovery_count != before + 2)
+        goto fail;
+    printf("XHCI_RECOVERY_INIT_FAILURE_OK\n");
+    if (!usb_xhci_recover() || !usb_drive.present ||
+        usb_xhci_recovery_count != before + 3 ||
+        !usb_scsi_rw(0, 0, 1, (char *)usb_recovery_after) ||
+        memcmp(usb_recovery_before, usb_recovery_after, 512) != 0)
+        goto fail;
+    printf("XHCI_RESET_RECOVERY_OK\n");
+    return 1;
+fail:
+    printf("XHCI_RESET_RECOVERY_FAIL\n");
+    return 0;
+}
+
 static int uhci_find_controller(BYTE *bus, BYTE *slot, BYTE *func)
 {
     BYTE b, s, f;
@@ -915,6 +1007,11 @@ int usb_init(void)
         }
         if (!usb_enumerate_msc()) {
             printf("usb: no xHCI mass-storage device\n");
+            xhci_stop_controller();
+            return -1;
+        }
+        if (strstr(kernel_cmdline, "xhci-recovery-test") &&
+            !usb_xhci_recovery_selftest()) {
             xhci_stop_controller();
             return -1;
         }
@@ -972,6 +1069,11 @@ int usb_init(void)
         }
         if (!usb_enumerate_msc()) {
             printf("usb: no xHCI mass-storage device\n");
+            xhci_stop_controller();
+            return -1;
+        }
+        if (strstr(kernel_cmdline, "xhci-recovery-test") &&
+            !usb_xhci_recovery_selftest()) {
             xhci_stop_controller();
             return -1;
         }

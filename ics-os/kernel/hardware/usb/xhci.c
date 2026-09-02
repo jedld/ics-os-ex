@@ -82,6 +82,10 @@ static xhci_ring xhci_ep_in_ring;
 static xhci_ring xhci_ep_out_ring;
 static void *xhci_scratchpad_array_alloc;
 static void *xhci_scratchpad_pages_alloc;
+static DWORD xhci_scratchpad_count;
+static volatile int xhci_recovery_needed;
+static volatile int xhci_fault_drop_next;
+static volatile int xhci_fault_fail_init;
 
 extern void *mmio_map(u64 phys, u64 len);
 extern void *malloc(unsigned int size);
@@ -298,11 +302,13 @@ static int xhci_command(u64 parameter, DWORD status, DWORD control,
     xhci_mb();
     if (!xhci_next_event(XHCI_TRB_COMMAND_EV, (u64)usb_phys(trb), &cc, slot)) {
         printf("xhci: command timeout type=%u\n", (control >> 10) & 0x3F);
+        xhci_recovery_needed = 1;
         return 0;
     }
     if (cc != XHCI_CC_SUCCESS) {
         printf("xhci: command failed type=%u cc=%u\n",
                (control >> 10) & 0x3F, cc);
+         xhci_recovery_needed = 1;
         return 0;
     }
     return 1;
@@ -352,10 +358,17 @@ static int xhci_setup_scratchpads(DWORD hcs2)
         printf("xhci: unsupported scratchpad count=%u\n", count);
         return 0;
     }
-    xhci_scratchpad_array_alloc = malloc(count * sizeof(u64) + 63);
-    xhci_scratchpad_pages_alloc = malloc(count * 4096 + 4095);
     if (!xhci_scratchpad_array_alloc || !xhci_scratchpad_pages_alloc) {
-        printf("xhci: scratchpad allocation failed count=%u\n", count);
+        xhci_scratchpad_array_alloc = malloc(count * sizeof(u64) + 63);
+        xhci_scratchpad_pages_alloc = malloc(count * 4096 + 4095);
+        if (!xhci_scratchpad_array_alloc || !xhci_scratchpad_pages_alloc) {
+            printf("xhci: scratchpad allocation failed count=%u\n", count);
+            return 0;
+        }
+        xhci_scratchpad_count = count;
+    } else if (count != xhci_scratchpad_count) {
+        printf("xhci: scratchpad count changed old=%u new=%u\n",
+               xhci_scratchpad_count, count);
         return 0;
     }
     array = (u64 *)(((unsigned long)xhci_scratchpad_array_alloc + 63) & ~63UL);
@@ -407,20 +420,28 @@ static int xhci_transfer(xhci_ring *ring, DWORD endpoint, BYTE *data,
                          DWORD len, DWORD control)
 {
     DWORD cc = 0;
+    int drop = xhci_fault_drop_next;
     xhci_trb *last = xhci_ring_buffer(ring, data, len, control,
                                       XHCI_TRB_IOC);
     if (!last)
         return 0;
     asm volatile ("wbinvd");
-    xhci_doorbell[xhci_slot] = endpoint;
-    xhci_mb();
+    if (drop) {
+        xhci_fault_drop_next = 0;
+        printf("xhci: test dropping bulk doorbell ep=%u\n", endpoint);
+    } else {
+        xhci_doorbell[xhci_slot] = endpoint;
+        xhci_mb();
+    }
     if (!xhci_next_event(XHCI_TRB_TRANSFER_EV, (u64)usb_phys(last), &cc, 0)) {
         printf("xhci: transfer timeout ep=%u len=%u\n", endpoint, len);
+        xhci_recovery_needed = 1;
         return 0;
     }
     asm volatile ("wbinvd");
     if (cc != XHCI_CC_SUCCESS && cc != XHCI_CC_SHORT_PACKET) {
         printf("xhci: transfer failed ep=%u cc=%u\n", endpoint, cc);
+        xhci_recovery_needed = 1;
         return 0;
     }
     return 1;
@@ -452,12 +473,14 @@ static int xhci_control(usb_setup *setup, void *data, int len)
         DWORD cc = 0;
         if (!xhci_next_event(XHCI_TRB_TRANSFER_EV, (u64)usb_phys(last), &cc, 0)) {
             printf("xhci: control timeout request=%u\n", setup->bRequest);
+            xhci_recovery_needed = 1;
             return 0;
         }
         asm volatile ("wbinvd");
         if (cc != XHCI_CC_SUCCESS && cc != XHCI_CC_SHORT_PACKET) {
             printf("xhci: control failed request=%u cc=%u\n",
                    setup->bRequest, cc);
+                 xhci_recovery_needed = 1;
             return 0;
         }
     }
@@ -557,6 +580,11 @@ static int xhci_init_controller(void)
     volatile BYTE *intr;
     if (!xhci_find_controller(&bus, &slot, &func)) {
         printf("xhci: no controller found\n");
+        return 0;
+    }
+    if (xhci_fault_fail_init) {
+        xhci_fault_fail_init = 0;
+        printf("xhci: test forcing recovery initialization failure\n");
         return 0;
     }
     if (!xhci_pci_bar(bus, slot, func, &bar, &bar_size) ||

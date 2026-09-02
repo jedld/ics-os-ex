@@ -55,6 +55,11 @@ long  sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
                          unsigned flags);
 void *sys_fd_file(int fd);
 
+struct _PCB386;
+struct _tty;
+struct _tty *posix_fd_tty(int fd);
+int posix_fd_selectable(int fd, int for_write);
+
 long sys_waitpid(int pid, int *status, int options);
 long sys_spawn(const char *path, const char *params);
 long sys_execve(const char *path, const char *params);

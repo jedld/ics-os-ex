@@ -11,6 +11,8 @@ extern void serial_putc(char c);
 extern unsigned char inportb(unsigned int port);
 extern int get_processlist(PCB386 **buf);
 extern int console_execute(const char *str);
+extern void vt_feed(tty_t *t, int c);
+extern void vt_init(vt_state_t *v);
 
 static int tty_in_put(tty_t *t, unsigned char c)
 {
@@ -34,10 +36,9 @@ static int tty_in_get(tty_t *t)
 
 static void tty_echo(tty_t *t, char c)
 {
-   if (t->flags & TTY_SERIAL)
-      serial_putc(c);
-   if (t->ddl)
-      Dex32PutC((DEX32_DDL_INFO *)t->ddl, c);
+   /* DDL-backed ttys route through the VT100/xterm interpreter so
+      full-screen apps work; serial ttys pass bytes through raw. */
+   vt_feed(t, c);
 }
 
 void tty_init(void)
@@ -55,11 +56,12 @@ tty_t *tty_alloc(struct _dex32_direct_device_hdl *ddl, int flags)
    if (tty_used >= TTY_MAX)
       return 0;
    t = &tty_pool[tty_used];
-   memset(t, 0, sizeof(*t));
-   t->id = tty_used;
-   t->ddl = ddl;
-   t->flags = flags ? flags : (TTY_ECHO | TTY_ICANON | TTY_ISIG);
-   tty_used++;
+    memset(t, 0, sizeof(*t));
+    t->id = tty_used;
+    t->ddl = ddl;
+    t->flags = flags ? flags : (TTY_ECHO | TTY_ICANON | TTY_ISIG);
+    vt_init(&t->vt);
+    tty_used++;
    if (!tty_foreground && !(t->flags & TTY_SERIAL))
       tty_foreground = t;
    if ((t->flags & TTY_SERIAL) && !tty_com1)
@@ -135,6 +137,46 @@ void tty_signal_int(tty_t *t)
       free(list);
 }
 
+int tty_inject(tty_t *t, int c)
+{
+   if (!t || c < 0)
+      return -1;
+   return tty_in_put(t, (unsigned char)c);
+}
+
+/* 1 if there is at least one byte (or a ready line) available to read. */
+int tty_input_ready(tty_t *t)
+{
+   if (!t)
+      return 0;
+   if (t->in_head != t->in_tail)
+      return 1;
+   if ((t->flags & TTY_ICANON) && t->line_ready)
+      return 1;
+   if (t->flags & TTY_SERIAL) {
+      if (serial_getc_poll() >= 0)
+         return 1;
+   }
+   return 0;
+}
+
+/* Discard pending input (raw ring + canonical line). Returns bytes dropped. */
+int tty_flush_input(tty_t *t)
+{
+   int n = 0;
+   if (!t)
+      return 0;
+   if (t->in_head != t->in_tail) {
+      n = (t->in_head - t->in_tail + TTY_IBUF) % TTY_IBUF;
+      t->in_head = t->in_tail;
+   }
+   n += t->canon_len;
+   t->canon_len = 0;
+   t->line_ready = 0;
+   t->canon_esc = 0;
+   return n;
+}
+
 void tty_input(tty_t *t, int c)
 {
    if (!t || c < 0)
@@ -144,6 +186,31 @@ void tty_input(tty_t *t, int c)
       return;
    }
    if (t->flags & TTY_ICANON) {
+      /* Swallow escape/CSI sequences so special keys (now delivered as
+         xterm escape codes) do not pollute the canonical line buffer.
+         canon_esc: 1 = bare ESC seen, 2 = inside a CSI. */
+      if (t->canon_esc == 2) {
+         if (c == 0x1B) {
+            t->canon_esc = 1;
+            return;
+         }
+         if (c >= 0x40 && c <= 0x7E) {
+            t->canon_esc = 0;
+            return;
+         }
+         return;
+      }
+      if (t->canon_esc == 1) {
+         if (c == '[') {
+            t->canon_esc = 2;
+            return;
+         }
+         /* bare ESC: drop it, process this byte normally */
+         t->canon_esc = 0;
+      } else if (c == 0x1B) {
+         t->canon_esc = 1;
+         return;
+      }
       if (c == '\b' || c == 127 || (unsigned char)c == 145) {
          if (t->canon_len > 0) {
             t->canon_len--;
@@ -156,14 +223,15 @@ void tty_input(tty_t *t, int c)
          return;
       }
       if (c == '\r' || c == '\n') {
-         if (t->canon_len < TTY_CANON_MAX - 1)
-            t->canon[t->canon_len++] = '\n';
-         t->canon[t->canon_len] = 0;
-         t->line_ready = 1;
-         if (t->flags & TTY_ECHO)
-            tty_echo(t, '\n');
-         return;
-      }
+          if (t->canon_len < TTY_CANON_MAX - 1)
+             t->canon[t->canon_len++] = '\n';
+          t->canon[t->canon_len] = 0;
+          t->line_ready = 1;
+          t->canon_esc = 0;
+          if (t->flags & TTY_ECHO)
+             tty_echo(t, '\n');
+          return;
+       }
       if (t->canon_len < TTY_CANON_MAX - 1) {
          t->canon[t->canon_len++] = (char)c;
          if (t->flags & TTY_ECHO)

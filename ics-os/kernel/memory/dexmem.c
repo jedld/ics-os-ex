@@ -1476,6 +1476,7 @@ void dex32copyblock(DWORD vdest,DWORD vsource,DWORD pages,DWORD *pagedir)
 #define MMIO_UC_MAX 16
 static u64 mmio_uc_base[MMIO_UC_MAX];
 static u64 mmio_uc_len[MMIO_UC_MAX];
+static int mmio_uc_state[MMIO_UC_MAX];
 static int mmio_uc_n;
 static spinlock_t mmio_uc_lock;
 #ifdef __x86_64__
@@ -1523,18 +1524,54 @@ static void mmio_apply_one(u64 phys, u64 len)
 int mmio_mark_uncacheable(u64 phys, u64 len)
 {
 #ifdef __x86_64__
-   spin_irq_flags_t flags = spin_lock_irqsave(&mmio_uc_lock);
-   if (len && mmio_uc_n < MMIO_UC_MAX) {
-      mmio_uc_base[mmio_uc_n] = phys;
-      mmio_uc_len[mmio_uc_n] = len;
-      mmio_uc_n++;
+   int i, entry = -1;
+   spin_irq_flags_t flags;
+retry:
+   flags = spin_lock_irqsave(&mmio_uc_lock);
+   if (!len || phys + len < phys) {
+      spin_unlock_irqrestore(&mmio_uc_lock, flags);
+      return 0;
    }
+   for (i = 0; i < mmio_uc_n; i++) {
+      if (phys >= mmio_uc_base[i] &&
+          phys + len <= mmio_uc_base[i] + mmio_uc_len[i]) {
+         if (!mmio_uc_state[i]) {
+            spin_unlock_irqrestore(&mmio_uc_lock, flags);
+            __asm__ __volatile__("pause");
+            goto retry;
+         }
+         if (mmio_uc_state[i] < 0) {
+            mmio_uc_state[i] = 0;
+            entry = i;
+            break;
+         }
+         spin_unlock_irqrestore(&mmio_uc_lock, flags);
+         return 1;
+      }
+      if (entry < 0 && mmio_uc_state[i] < 0)
+         entry = i;
+   }
+   if (entry < 0 && mmio_uc_n == MMIO_UC_MAX) {
+      spin_unlock_irqrestore(&mmio_uc_lock, flags);
+      return 0;
+   }
+   if (entry < 0)
+      entry = mmio_uc_n++;
+   mmio_uc_base[entry] = phys;
+   mmio_uc_len[entry] = len;
+   mmio_uc_state[entry] = 0;
    mmio_apply_one(phys, len);
    spin_unlock_irqrestore(&mmio_uc_lock, flags);
    if (!smp_tlb_shootdown_all()) {
       printf("mmio: TLB shootdown failed for low mapping\n");
+      flags = spin_lock_irqsave(&mmio_uc_lock);
+      mmio_uc_state[entry] = -1;
+      spin_unlock_irqrestore(&mmio_uc_lock, flags);
       return 0;
    }
+   flags = spin_lock_irqsave(&mmio_uc_lock);
+   mmio_uc_state[entry] = 1;
+   spin_unlock_irqrestore(&mmio_uc_lock, flags);
    return 1;
 #else
    (void)phys;
@@ -1659,8 +1696,12 @@ retry:
 void mmio_reapply_uncacheable(void)
 {
    int i;
-   for (i = 0; i < mmio_uc_n; i++)
-      mmio_apply_one(mmio_uc_base[i], mmio_uc_len[i]);
+   spin_irq_flags_t flags = spin_lock_irqsave(&mmio_uc_lock);
+   for (i = 0; i < mmio_uc_n; i++) {
+      if (mmio_uc_state[i] >= 0)
+         mmio_apply_one(mmio_uc_base[i], mmio_uc_len[i]);
+   }
+   spin_unlock_irqrestore(&mmio_uc_lock, flags);
 }
 
 void dex32_restore_identity_map(void)

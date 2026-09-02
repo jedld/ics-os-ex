@@ -154,6 +154,8 @@ extern int cpu_count;
 
 #include "console/dex_DDL.c"
 #include "console/tty.c"
+#include "console/tty_vt.c"
+#include "console/tty_tc.c"
 #include "hardware/dexapm.c"
 #include "hardware/chips/irqhandlers.c"
 #ifdef __x86_64__
@@ -866,9 +868,16 @@ void dex_init(){
    if (baremode) 
       console_first++;
    printf("dex32_startup(): Running console thread\n");
-    
-   //Create a new console instance
-   consolepid = console_new();
+
+    /* Advertise an xterm-compatible terminal so full-screen apps (vim)
+       select the right terminfo and emit the CSI sequences the kernel VT
+       interpreter understands. */
+    env_setenv("TERM", "xterm", 1);
+    env_setenv("COLUMNS", "80", 1);
+    env_setenv("LINES", "25", 1);
+
+    //Create a new console instance
+    consolepid = console_new();
    ps_set_affinity(consolepid, 0);
 
    /* After console exists, prove AP can run a pinned migratable kthread. */

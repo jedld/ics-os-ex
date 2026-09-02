@@ -204,8 +204,13 @@ void api_init(){
    api_addsystemcall(0xB4,sys_getdents,0,API_REQUIRE_INTS);
     api_addsystemcall(0xB5,console_puts,0,0);
    api_addsystemcall(0xB6,dex32_mmap,0,0);
-   api_addsystemcall(0xB7,dex32_munmap,0,0);
-};
+    api_addsystemcall(0xB7,dex32_munmap,0,0);
+    api_addsystemcall(0xC0,sys_tcgetattr,0,0);
+    api_addsystemcall(0xC1,sys_tcsetattr,0,0);
+    api_addsystemcall(0xC2,sys_tcflush,0,0);
+    api_addsystemcall(0xC3,sys_ttyioctl,0,API_REQUIRE_INTS);
+    api_addsystemcall(0xC4,sys_ttyselect,0,API_REQUIRE_INTS);
+ };
 
 
 api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,

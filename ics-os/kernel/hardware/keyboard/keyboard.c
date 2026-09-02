@@ -88,13 +88,48 @@ int signal_foreground()
 {
 if (fg_getkeyboardowner()!=0)
   {
-     sched_sysmes[0]=fg_getkeyboardowner();
-     sched_sysmes[1]=SIG_TERM;
-     sched_sysmes[2]=0;
-     return 1;
+      sched_sysmes[0]=fg_getkeyboardowner();
+      sched_sysmes[1]=SIG_TERM;
+      sched_sysmes[2]=0;
+      return 1;
   };
   return 0;
 ;};
+
+/*
+ * Map a non-ASCII special key (cursor/editing/function) to the xterm
+ * escape sequence that full-screen apps (vim, less, ...) expect. Returns
+ * NULL for keys that are not translated (the caller sends the raw value
+ * for legacy getchw() consumers).
+ */
+static const char *kbd_special_sequence(unsigned int c)
+{
+    switch (c) {
+    case KEY_UP:   return "\x1b[A";
+    case KEY_DN:   return "\x1b[B";
+    case KEY_RT:   return "\x1b[C";
+    case KEY_LFT:  return "\x1b[D";
+    case KEY_HOME: return "\x1b[H";
+    case KEY_END:  return "\x1b[F";
+    case KEY_PGUP: return "\x1b[5~";
+    case KEY_PGDN: return "\x1b[6~";
+    case KEY_INS:  return "\x1b[2~";
+    case KEY_DEL:  return "\x1b[3~";
+    case KEY_F1:   return "\x1bOP";
+    case KEY_F2:   return "\x1bOQ";
+    case KEY_F3:   return "\x1bOR";
+    case KEY_F4:   return "\x1bOS";
+    case KEY_F5:   return "\x1b[15~";
+    case KEY_F6:   return "\x1b[17~";
+    case KEY_F7:   return "\x1b[18~";
+    case KEY_F8:   return "\x1b[19~";
+    case KEY_F9:   return "\x1b[20~";
+    case KEY_F10:  return "\x1b[21~";
+    case KEY_F11:  return "\x1b[23~";
+    case KEY_F12:  return "\x1b[24~";
+    default:       return 0;
+    }
+}
 
 
 int kill_foreground()

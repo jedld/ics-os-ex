@@ -12,8 +12,25 @@
 
 #define SIGINT       2
 
+#define VT_COLS      80
+#define VT_ROWS      25
+
 struct _dex32_direct_device_hdl;
 struct _PCB386;
+
+/* Per-tty VT100/xterm parser state (see console/tty_vt.c). */
+typedef struct _vt_state {
+   int state;             /* 0 ground, 1 esc, 2 csi, 3 osc */
+   int csi_n;
+   char csi[24];
+   int sgr;               /* current VGA cell attribute */
+   int savx, savy;
+   int savsgr;
+   int stb_top, stb_bot;  /* DECSTBM region, 0-based inclusive */
+   int curhidden;
+   int alt;               /* alternate screen active */
+   unsigned char *altbuf; /* 80x25x2 shadow of the primary screen */
+} vt_state_t;
 
 typedef struct _tty {
    int id;
@@ -26,6 +43,8 @@ typedef struct _tty {
    int canon_len;
    char canon[TTY_CANON_MAX];
    volatile int line_ready;
+   int canon_esc;         /* canonical-mode CSI swallow: 1 saw ESC, 2 in CSI */
+   vt_state_t vt;
 } tty_t;
 
 void tty_init(void);
@@ -40,6 +59,15 @@ int tty_read(tty_t *t, char *buf, int n);
 int tty_write(tty_t *t, const char *buf, int n);
 void tty_signal_int(tty_t *t);
 tty_t *tty_serial(void);
+int tty_input_ready(tty_t *t);
+int tty_flush_input(tty_t *t);
+int tty_inject(tty_t *t, int c);
 int sys_kcmd(char *cmd);
+
+/* VT100/xterm screen interpreter, fed by tty output (console/tty_vt.c). */
+void vt_init(vt_state_t *v);
+void vt_feed(tty_t *t, int c);
+void vt_screen_clear(vt_state_t *v, struct _dex32_direct_device_hdl *ddl, int attr);
+void vt_cursor_set_visible(struct _dex32_direct_device_hdl *ddl, int visible);
 
 #endif

@@ -225,6 +225,34 @@ static tty_t *fd_istty(int fd)
    return 0;
 }
 
+tty_t *posix_fd_tty(int fd)
+{
+   return fd_istty(fd);
+}
+
+/* select() readiness probe: no refcounts, no blocking. Regular files and
+   block devices report ready once open (same as Linux); ttys report
+   readable only when input is pending. */
+int posix_fd_selectable(int fd, int for_write)
+{
+   if (!current_process || fd < 0 || fd >= FD_MAX)
+      return 0;
+   {
+      tty_t *t = fd_istty(fd);
+      if (t)
+         return for_write ? 1 : tty_input_ready(t);
+   }
+   {
+      int type;
+      spin_lock(&current_process->fd_lock);
+      type = current_process->fds[fd].type;
+      spin_unlock(&current_process->fd_lock);
+      if (type == FD_VFS || type == FD_BLK)
+         return 1;
+   }
+   return 0;
+}
+
 static int path_is_vblk(const char *p)
 {
    return p && (strcmp(p, "/dev/vblk") == 0 || strcmp(p, "vblk") == 0);
