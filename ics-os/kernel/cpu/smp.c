@@ -33,8 +33,28 @@ static volatile int ap_claimed = 0;
 static volatile int ap_boot_state = 0;
 static volatile int ap_boot_apic = -1;
 volatile int smp_sched_enabled = 0;
-static volatile u64 tlb_shootdown_cr3;
-static volatile u32 tlb_shootdown_ack;
+static volatile u64 tlb_shootdown_cr3[MAX_CPUS];
+static volatile u32 tlb_shootdown_targets[MAX_CPUS];
+static volatile u32 tlb_shootdown_ack[MAX_CPUS];
+
+static void smp_tlb_process_requests(int cpu)
+{
+    unsigned long cr3;
+    int sender;
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
+    for (sender = 0; sender < MAX_CPUS; sender++) {
+        u32 bit = 1u << cpu;
+        u64 requested_cr3;
+        if (!(tlb_shootdown_targets[sender] & bit) ||
+            (tlb_shootdown_ack[sender] & bit))
+            continue;
+        requested_cr3 = tlb_shootdown_cr3[sender];
+        if (!requested_cr3 ||
+            (cr3 & ~0xFFFUL) == (requested_cr3 & ~0xFFFULL))
+            __asm__ __volatile__("movq %0, %%cr3" :: "r"(cr3) : "memory");
+        __sync_fetch_and_or(&tlb_shootdown_ack[sender], bit);
+    }
+}
 
 int smp_cpu_id(void) {
     u32 id;
@@ -82,13 +102,7 @@ void smp_reschedule_ipi(void) {
 
 void smp_tlb_shootdown_ipi(void)
 {
-    unsigned long cr3;
-    int cpu = smp_cpu_id();
-
-    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
-    if ((cr3 & ~0xFFFUL) == (tlb_shootdown_cr3 & ~0xFFFULL))
-        __asm__ __volatile__("movq %0, %%cr3" :: "r"(cr3) : "memory");
-    __sync_fetch_and_or(&tlb_shootdown_ack, 1u << cpu);
+    smp_tlb_process_requests(smp_cpu_id());
     lapic_eoi();
 }
 
@@ -100,34 +114,52 @@ int smp_tlb_shootdown(u64 cr3)
     volatile u32 spins;
 
     __asm__ __volatile__("movq %%cr3, %0" : "=r"(local_cr3));
-    if ((local_cr3 & ~0xFFFUL) == (cr3 & ~0xFFFULL))
+    if (!cr3 || (local_cr3 & ~0xFFFUL) == (cr3 & ~0xFFFULL))
         __asm__ __volatile__("movq %0, %%cr3" :: "r"(local_cr3) : "memory");
-    if (!lapic_mmio || cpu_count < 2)
+    if (!lapic_mmio || cpu_count < 2 || (!cr3 && !smp_sched_enabled))
         return 1;
-
-    tlb_shootdown_cr3 = cr3;
-    tlb_shootdown_ack = 1u << me;
-    __sync_synchronize();
+    if (tlb_shootdown_targets[me])
+        return 0;
     for (cpu = 0; cpu < cpu_count; cpu++) {
         PCB386 *running;
         if (cpu == me || !cpus[cpu].online)
             continue;
         running = cpus[cpu].current;
-        if (!running || running->on_cpu != cpu
-            || (u64)(uintptr)running->pagedirloc != cr3)
+        if (cr3 && (!running || running->on_cpu != cpu ||
+            (u64)(uintptr)running->pagedirloc != cr3))
             continue;
         targets |= 1u << cpu;
-        if (!lapic_send_ipi(cpus[cpu].apic_id, IPI_TLB_SHOOTDOWN))
+    }
+    tlb_shootdown_cr3[me] = cr3;
+    tlb_shootdown_ack[me] = 1u << me;
+    __sync_synchronize();
+    tlb_shootdown_targets[me] = targets;
+    __sync_synchronize();
+    for (cpu = 0; cpu < cpu_count; cpu++) {
+        if (!(targets & (1u << cpu)))
+            continue;
+        if (!lapic_send_ipi(cpus[cpu].apic_id, IPI_TLB_SHOOTDOWN)) {
+            tlb_shootdown_targets[me] = 0;
             return 0;
+        }
     }
     for (spins = 0; spins < 10000000u; spins++) {
-        if ((tlb_shootdown_ack & targets) == targets)
+        if ((tlb_shootdown_ack[me] & targets) == targets) {
+            tlb_shootdown_targets[me] = 0;
             return 1;
+        }
+        smp_tlb_process_requests(me);
         __asm__ __volatile__("pause");
     }
     printf("SMP: TLB shootdown timeout target=%x ack=%x cr3=%llx\n",
-           targets, tlb_shootdown_ack, (unsigned long long)cr3);
+            targets, tlb_shootdown_ack[me], (unsigned long long)cr3);
+        tlb_shootdown_targets[me] = 0;
     return 0;
+}
+
+int smp_tlb_shootdown_all(void)
+{
+    return smp_tlb_shootdown(0);
 }
 
 static volatile u32 ap_work_mask = 0;

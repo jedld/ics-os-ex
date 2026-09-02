@@ -17,7 +17,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-no-device
+.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-high-bar test-usb-storage-xhci-no-device
 
 test-io-unit:
 	@mkdir -p /tmp/icsos-tests
@@ -182,6 +182,12 @@ test-usb-storage: vmdex ics-os-usb.img
 test-usb-storage-xhci: vmdex ics-os-usb.img
 	@chmod +x scripts/test-qemu-uhci-storage.sh
 	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-high-bar: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE=xhci-high-bar-test QEMU_SMP=4 \
 		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
 
 test-usb-storage-xhci-no-device: vmdex
@@ -563,6 +569,15 @@ test-ext4: kernel/Kernel64.bin apps/ext4test.exe
 	@! grep -aq "EXT4_WRITE_FAIL" /tmp/icsos-ext4.log
 	@! grep -aq "EXT4_DIR_FAIL" /tmp/icsos-ext4.log
 	@! grep -aq "EXT4_RUN_FAIL" /tmp/icsos-ext4.log
+	@echo "Validating post-test ext4 image with host e2fsck/debugfs..."
+	@e2fsck -fn /tmp/icsos-ext4-work.img > /tmp/icsos-ext4-e2fsck.log 2>&1
+	@! grep -aq "WARNING: Filesystem still has errors" /tmp/icsos-ext4-e2fsck.log
+	@! grep -aq "does not match checksum" /tmp/icsos-ext4-e2fsck.log
+	@! grep -aq "Padding at end" /tmp/icsos-ext4-e2fsck.log
+	@debugfs -R "ls /" /tmp/icsos-ext4-work.img > /tmp/icsos-ext4-debugfs.log 2>&1
+	@grep -aq "seed.txt" /tmp/icsos-ext4-debugfs.log
+	@grep -aq "ext4test.txt" /tmp/icsos-ext4-debugfs.log
+	@grep -aq "sub" /tmp/icsos-ext4-debugfs.log
 	@echo "test-ext4 PASS"
 
 # Artifacts for test-bintools (file rules so the target works standalone).

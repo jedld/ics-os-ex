@@ -44,6 +44,7 @@ Useful individual targets (from `ics-os/`):
 | `test-usb-storage-xhci-no-device` | q35 xHCI no-device path reaches console without registering USB storage |
 | `test-posixio` | POSIX fds + preadv/pwritev/fsync + io_uring; ramdisk `POSIXIO_PASS`/`URING_PASS`; virtio `/dev/vblk` `URING_VBLK_PASS` |
 | `test-virtio` | QEMU virtio-blk DMA; MSI-X completions; `VIRTIO_BLK_OK` + `VIRTIO_IRQ_OK` |
+| `test-ext4` | ext4 virtio-blk read/create/write; guest marker plus host `e2fsck`/`debugfs` validation of the post-test image |
 | `test-spawn` | `posix_spawn` + `waitpid` of `hello.exe` (`SPAWN_PASS`); FAT `/work` on virtio (`WORK_DISK_PASS`) |
 | `test-fork` | COW fork ABI/isolation, fast path, text protection, OOM, inherited fd, exit/wait, and delayed reaping |
 | `test-fork-matrix` | COW fork pressure gate on `-smp 1/2/4/8` |

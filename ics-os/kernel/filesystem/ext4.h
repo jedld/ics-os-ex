@@ -179,6 +179,7 @@ typedef struct {
     u32 first_data_block;
     u32 desc_size;
     u64 blocks_count;
+    u32 inodes_count;
     u64 free_blocks;
     u32 free_inodes;
     u32 feature_compat;

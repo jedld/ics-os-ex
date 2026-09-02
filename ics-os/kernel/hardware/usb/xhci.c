@@ -83,8 +83,9 @@ static xhci_ring xhci_ep_out_ring;
 static void *xhci_scratchpad_array_alloc;
 static void *xhci_scratchpad_pages_alloc;
 
-extern void mmio_mark_uncacheable(u64 phys, u64 len);
+extern void *mmio_map(u64 phys, u64 len);
 extern void *malloc(unsigned int size);
+extern char kernel_cmdline[];
 
 static void xhci_mb(void)
 {
@@ -178,6 +179,25 @@ static int xhci_pci_bar(BYTE bus, BYTE slot, BYTE func,
         *size = (~mask) + 1;
     } else {
         *size = (u64)((~(mask_lo & ~0xFu)) + 1);
+    }
+    if (strstr(kernel_cmdline, "xhci-high-bar-test")) {
+        DWORD id = pci_read32(bus, slot, func, 0x00);
+        if (!is_64 || id != 0x000D1B36u) {
+            printf("xhci: high BAR test requires QEMU qemu-xhci\n");
+            return 0;
+        }
+        pci_write16(bus, slot, func, 0x04, command & (WORD)~0x06);
+        pci_write32(bus, slot, func, 0x10, lo & 0xFu);
+        pci_write32(bus, slot, func, 0x14, 1);
+        pci_write16(bus, slot, func, 0x04, command);
+        *base = ((u64)pci_read32(bus, slot, func, 0x14) << 32) |
+                (pci_read32(bus, slot, func, 0x10) & ~0xFu);
+        if (*base != 0x100000000ULL) {
+            printf("xhci: high BAR test relocation failed base=0x%llx\n",
+                   (unsigned long long)*base);
+            return 0;
+        }
+        printf("xhci: test BAR relocated above 4 GiB\n");
     }
     return *base != 0 && *size != 0;
 }
@@ -540,14 +560,18 @@ static int xhci_init_controller(void)
         return 0;
     }
     if (!xhci_pci_bar(bus, slot, func, &bar, &bar_size) ||
-        bar >= 0x100000000ULL || bar + bar_size > 0x100000000ULL) {
+        bar + bar_size < bar) {
         printf("xhci: unsupported BAR 0x%llx\n", (unsigned long long)bar);
         return 0;
     }
     pci_write16(bus, slot, func, 0x04,
                 pci_read16(bus, slot, func, 0x04) | 0x06);
-    mmio_mark_uncacheable(bar, bar_size);
-    xhci_mmio = (volatile BYTE *)(unsigned long)bar;
+    xhci_mmio = (volatile BYTE *)mmio_map(bar, bar_size);
+    if (!xhci_mmio) {
+        printf("xhci: cannot map BAR 0x%llx size=%llu\n",
+               (unsigned long long)bar, (unsigned long long)bar_size);
+        return 0;
+    }
     caplen = *(volatile BYTE *)xhci_mmio;
     hcs1 = xhci_r32(xhci_mmio, 0x04);
     hcs2 = xhci_r32(xhci_mmio, 0x08);

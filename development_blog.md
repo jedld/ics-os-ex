@@ -2,6 +2,44 @@
 
 ## 2026-09-02 (Manila, UTC+8)
 
+### 16:35 — xHCI BAR mapping above 4 GiB
+
+**Current problem:** the xHCI backend rejects controller BARs above the low
+4 GiB identity map, a common firmware resource placement on modern laptops.
+
+**Activity completed:** added a bounded kernel-only MMIO window at
+`KMMIO_BASE`, shared by the kernel mapping and available to process page
+tables, and routed xHCI BAR access through `mmio_map()`. Low MMIO continues to
+use the identity-map UC path, while high MMIO uses a locked, TLB-shootdown
+protected kernel mapping. A q35 test relocates QEMU's xHCI BAR above 4 GiB
+before enumeration and then requires the normal USB-root, cache-sync, guest
+copy, and host byte-comparison oracle to pass.
+
+**QA delivered:** `make test-usb-storage-xhci`,
+`make test-usb-storage-xhci-high-bar`, and `make test-usb-storage` pass.
+The high-BAR test asserts the relocated BAR and rejects TLB-shootdown failures.
+
+### 16:30 — ext4 host e2fsck validation
+**Current problem:** `make test-ext4` passed in QEMU, but host `e2fsck` still
+reported block/inode bitmap padding errors and ignored bitmap checksum
+mismatches on the post-test image.
+
+**Activity completed:** compared the post-test image with a fresh `mkfs.ext4`
+image and traced e2fsprogs 1.47 bitmap handling in `rw_bitmaps.c`, `csum.c`, and
+`pass5.c`. The bitmap checksum is stored only in the group descriptor; the
+bitmap block tail, including the final four bytes, must remain `0xff` padding.
+The GDT block-bitmap checksum is CRC32C over the full block bitmap using the
+UUID seed, and the GDT inode-bitmap checksum is CRC32C over only
+`inodes_per_group / 8` bytes, with no group-number prefix. Fixed the ext4
+driver's block/inode set/free paths to stop writing a CRC into the bitmap tail
+and to compute the GDT checksums using e2fsprogs' exact ranges. Removed the
+temporary ext4/virtio/pcache debug prints.
+
+**QA delivered:** `make test-ext4` now runs the QEMU guest test and then
+mandates host `e2fsck -fn` plus `debugfs` validation of the post-test image.
+The updated target passes. `make test-virtio` and `make test-integration` also
+pass after the `virtio_blk`/`blkcache` cleanup.
+
 ### 16:08 — xHCI correctness hardening
 
 **Current problem:** QEMU's direct-attached storage path passed, but review

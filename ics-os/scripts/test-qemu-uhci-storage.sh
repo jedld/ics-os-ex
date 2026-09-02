@@ -10,6 +10,8 @@ CONTROLLER="${QEMU_USB_HCD:-uhci}"
 TIMEOUT_SECONDS="${QEMU_USB_STORAGE_TIMEOUT_SECONDS:-${QEMU_UHCI_TIMEOUT_SECONDS:-90}}"
 QEMU_BIN="${QEMU_X64:-qemu-system-x86_64}"
 QEMU_MACHINE="${QEMU_MACHINE:-}"
+QEMU_KERNEL_CMDLINE="${QEMU_KERNEL_CMDLINE:-}"
+QEMU_SMP="${QEMU_SMP:-1}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ARTIFACT_DIR="${QEMU_USB_STORAGE_ARTIFACT_DIR:-/tmp/icsos-tests/$CONTROLLER-usb-$RUN_ID}"
 WORK_DIR="$ARTIFACT_DIR/work"
@@ -77,7 +79,7 @@ touch "$SERIAL_LOG"
 cp "$SOURCE_IMAGE" "$RAW_IMAGE"
 cp kernel/Kernel64.bin "$ISO_ROOT/vmdex"
 printf '%s\n' 'set timeout=0' \
-    'menuentry "ics" { multiboot2 /vmdex; boot }' \
+    "menuentry \"ics\" { multiboot2 /vmdex $QEMU_KERNEL_CMDLINE; boot }" \
     > "$ISO_ROOT/boot/grub/grub.cfg"
 grub-mkrescue -o "$BOOT_ISO" "$ISO_ROOT" >/dev/null 2>&1
 
@@ -99,7 +101,7 @@ mcopy -o -i "${RAW_IMAGE}@@${OFFSET}" "$AUTOEXEC" ::autoexec.bat
 mcopy -o -i "${RAW_IMAGE}@@${OFFSET}" apps/cp.exe ::apps/cp-posix.exe
 mdel -i "${RAW_IMAGE}@@${OFFSET}" ::work/UHCIRES.TXT >/dev/null 2>&1 || true
 
-"$QEMU_BIN" "${MACHINE_ARGS[@]}" -nographic -no-reboot -m 128M \
+"$QEMU_BIN" "${MACHINE_ARGS[@]}" -smp "$QEMU_SMP" -nographic -no-reboot -m 128M \
     -cdrom "$BOOT_ISO" -boot d \
     -drive if=none,id=stick,format=raw,file="$RAW_IMAGE" \
     "${CONTROLLER_ARGS[@]}" \
@@ -126,6 +128,9 @@ else
     grep -a -q 'usb: no UHCI controller found; probing xHCI' "$SERIAL_LOG"
     grep -a -q 'xhci: controller at PCI' "$SERIAL_LOG"
     grep -a -q 'xhci: configured bulk endpoints' "$SERIAL_LOG"
+    if [[ "$QEMU_KERNEL_CMDLINE" == *xhci-high-bar-test* ]]; then
+        grep -a -q 'xhci: test BAR relocated above 4 GiB' "$SERIAL_LOG"
+    fi
 fi
 grep -a -q 'usb: registered usb0p0' "$SERIAL_LOG"
 grep -a -q 'Root filesystem is the USB mass-storage device.' "$SERIAL_LOG"
@@ -134,6 +139,7 @@ grep -a -q 'usb: cache synchronized' "$SERIAL_LOG"
 grep -a -q 'cp: copied /icsos/work/UHCISRC.TXT -> /icsos/work/UHCIRES.TXT' \
     "$SERIAL_LOG"
 ! grep -a -q 'General Protection fault\|Page fault\|Double fault\|Divide by zero' "$SERIAL_LOG"
+! grep -a -q 'TLB shootdown timeout\|mmio: TLB shootdown failed' "$SERIAL_LOG"
 
 echo "test-qemu-usb-storage PASS hcd=$CONTROLLER"
 echo "Artifacts: $ARTIFACT_DIR"

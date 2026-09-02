@@ -244,7 +244,8 @@ DWORD xmaplineartophysical(const DWORD linearmemory,const DWORD physicalmemory,
    DWORD *pagedir,const DWORD attb);
 void mem_init();
 void dex32_restore_identity_map(void);
-void mmio_mark_uncacheable(u64 phys, u64 len);
+int mmio_mark_uncacheable(u64 phys, u64 len);
+void *mmio_map(u64 phys, u64 len);
 void mmio_reapply_uncacheable(void);
 #ifdef __x86_64__
 /* Per-process user page directory (see dexmem.c). */

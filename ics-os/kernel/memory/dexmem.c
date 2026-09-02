@@ -1477,6 +1477,22 @@ void dex32copyblock(DWORD vdest,DWORD vsource,DWORD pages,DWORD *pagedir)
 static u64 mmio_uc_base[MMIO_UC_MAX];
 static u64 mmio_uc_len[MMIO_UC_MAX];
 static int mmio_uc_n;
+static spinlock_t mmio_uc_lock;
+#ifdef __x86_64__
+static u64 mmio_high_pd[512] __attribute__((aligned(4096)));
+static u64 mmio_high_pt[512] __attribute__((aligned(4096)));
+static u8 mmio_high_used[512];
+static int mmio_high_initialized;
+static spinlock_t mmio_high_lock;
+typedef struct {
+   u64 phys;
+   u64 end;
+   unsigned first;
+   int state;
+} mmio_high_mapping;
+static mmio_high_mapping mmio_high_maps[16];
+static unsigned mmio_high_map_count;
+#endif
 
 static void mmio_apply_one(u64 phys, u64 len)
 {
@@ -1504,20 +1520,139 @@ static void mmio_apply_one(u64 phys, u64 len)
 #endif
 }
 
-void mmio_mark_uncacheable(u64 phys, u64 len)
+int mmio_mark_uncacheable(u64 phys, u64 len)
 {
 #ifdef __x86_64__
-   extern u64 boot_pml4[];
+   spin_irq_flags_t flags = spin_lock_irqsave(&mmio_uc_lock);
    if (len && mmio_uc_n < MMIO_UC_MAX) {
       mmio_uc_base[mmio_uc_n] = phys;
       mmio_uc_len[mmio_uc_n] = len;
       mmio_uc_n++;
    }
    mmio_apply_one(phys, len);
-   __asm__ volatile ("mov %0, %%cr3" :: "r"((unsigned long)(uintptr)boot_pml4) : "memory");
+   spin_unlock_irqrestore(&mmio_uc_lock, flags);
+   if (!smp_tlb_shootdown_all()) {
+      printf("mmio: TLB shootdown failed for low mapping\n");
+      return 0;
+   }
+   return 1;
 #else
    (void)phys;
    (void)len;
+   return 0;
+#endif
+}
+
+void *mmio_map(u64 phys, u64 len)
+{
+#ifdef __x86_64__
+   extern u64 boot_pdpt_high[];
+   u64 aligned, end, page_count;
+   unsigned offset, pages, first, map_index, i, phys_bits = 36;
+   spin_irq_flags_t flags;
+   u32 eax, ebx, ecx, edx;
+   if (!len || phys + len < phys)
+      return 0;
+   if (phys + len <= 0x100000000ULL) {
+      if (!mmio_mark_uncacheable(phys, len))
+         return 0;
+      return (void *)(uintptr)phys;
+   }
+   aligned = phys & ~0xFFFULL;
+   offset = (unsigned)(phys - aligned);
+   end = phys + len;
+   page_count = (end - aligned + 0xFFFULL) >> 12;
+   eax = 0x80000000u;
+   __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+   if (eax >= 0x80000008u) {
+      eax = 0x80000008u;
+      __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+      phys_bits = eax & 0xFF;
+   }
+   if (!page_count || page_count > KMMIO_SIZE / 0x1000 ||
+       !phys_bits || phys_bits > 63 || ((end - 1) >> phys_bits))
+      return 0;
+   pages = (unsigned)page_count;
+retry:
+   flags = spin_lock_irqsave(&mmio_high_lock);
+   for (i = 0; i < mmio_high_map_count; i++) {
+      if (aligned >= mmio_high_maps[i].phys &&
+          end <= mmio_high_maps[i].end) {
+         if (!mmio_high_maps[i].state) {
+            spin_unlock_irqrestore(&mmio_high_lock, flags);
+            __asm__ __volatile__("pause");
+            goto retry;
+         }
+         if (mmio_high_maps[i].state < 0)
+            continue;
+         void *mapped = (void *)(uintptr)(KMMIO_BASE +
+            ((u64)mmio_high_maps[i].first << 12) +
+            (phys - mmio_high_maps[i].phys));
+         spin_unlock_irqrestore(&mmio_high_lock, flags);
+         return mapped;
+      }
+   }
+   map_index = mmio_high_map_count;
+   for (i = 0; i < mmio_high_map_count; i++) {
+      if (mmio_high_maps[i].state < 0) {
+         map_index = i;
+         break;
+      }
+   }
+   if (map_index == sizeof(mmio_high_maps) /
+                    sizeof(mmio_high_maps[0])) {
+      spin_unlock_irqrestore(&mmio_high_lock, flags);
+      return 0;
+   }
+   for (first = 0; first + pages <= 512; first++) {
+      for (i = 0; i < pages && !mmio_high_used[first + i]; i++);
+      if (i == pages)
+         break;
+      first += i;
+   }
+   if (first + pages > 512) {
+      spin_unlock_irqrestore(&mmio_high_lock, flags);
+      return 0;
+   }
+   if (!mmio_high_initialized) {
+      memset(mmio_high_pd, 0, sizeof(mmio_high_pd));
+      memset(mmio_high_pt, 0, sizeof(mmio_high_pt));
+      boot_pdpt_high[4] = (u64)(uintptr)mmio_high_pd | PG_PRESENT | PG_WR;
+      mmio_high_pd[0] = (u64)(uintptr)mmio_high_pt | PG_PRESENT | PG_WR;
+      mmio_high_initialized = 1;
+   }
+   for (i = 0; i < pages; i++) {
+      mmio_high_used[first + i] = 1;
+      mmio_high_pt[first + i] = (aligned + ((u64)i << 12)) |
+         PG_PRESENT | PG_WR | PG_WRITETHROUGH | PG_PCD;
+   }
+   mmio_high_maps[map_index].phys = aligned;
+   mmio_high_maps[map_index].end = aligned + ((u64)pages << 12);
+   mmio_high_maps[map_index].first = first;
+   mmio_high_maps[map_index].state = 0;
+   if (map_index == mmio_high_map_count)
+      mmio_high_map_count++;
+   spin_unlock_irqrestore(&mmio_high_lock, flags);
+   if (!smp_tlb_shootdown_all()) {
+      printf("mmio: TLB shootdown failed for high mapping\n");
+      flags = spin_lock_irqsave(&mmio_high_lock);
+      for (i = 0; i < pages; i++) {
+         mmio_high_pt[first + i] = 0;
+         mmio_high_used[first + i] = 0;
+      }
+      mmio_high_maps[map_index].state = -1;
+      spin_unlock_irqrestore(&mmio_high_lock, flags);
+      smp_tlb_shootdown_all();
+      return 0;
+   }
+   flags = spin_lock_irqsave(&mmio_high_lock);
+   mmio_high_maps[map_index].state = 1;
+   spin_unlock_irqrestore(&mmio_high_lock, flags);
+   return (void *)(uintptr)(KMMIO_BASE + ((u64)first << 12) + offset);
+#else
+   (void)phys;
+   (void)len;
+   return 0;
 #endif
 }
 

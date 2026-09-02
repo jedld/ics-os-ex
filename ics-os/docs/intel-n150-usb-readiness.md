@@ -48,7 +48,7 @@ the kernel can operate the laptop's physical USB controller.
 
 Intel N150-class laptops expose modern USB ports through an xHCI controller.
 ICS-OS now has a polling xHCI bring-up backend that passes on QEMU q35. It
-performs PCI class discovery, low-MMIO BAR sizing and register-range validation,
+performs PCI class discovery, MMIO BAR sizing and register-range validation,
 BIOS ownership handoff, controller/port reset, command and event rings,
 32/64-byte contexts, scratchpad allocation, slot/address/configuration commands,
 control and bulk transfers, BOT mass storage, FAT root I/O, and SCSI cache
@@ -57,9 +57,7 @@ synchronization.
 This is not yet a production xHCI stack or proof of N150 compatibility. The
 remaining blockers are:
 
-1. Map controller BARs placed above 4 GiB; the current kernel can dereference
-   only MMIO in its low 4 GiB identity map.
-2. Replace global polling state and direct pointer DMA with HCD-owned objects,
+1. Replace global polling state and direct pointer DMA with HCD-owned objects,
    the shared DMA API, interrupts (prefer MSI/MSI-X), and IOMMU isolation.
 3. Add hubs, multiple devices, USB 2/3 protocol and endpoint-companion coverage,
    hotplug, disconnect cancellation, and surprise-removal safety.
@@ -69,6 +67,10 @@ remaining blockers are:
 5. Qualify 64-byte contexts, nonzero scratchpad counts, firmware handoff, the
    exact N150 controller, every intended port, and the target thumb drive on
    physical hardware.
+
+Controller BARs above 4 GiB are mapped through the bounded `KMMIO_BASE`
+kernel window and are exercised by `make test-usb-storage-xhci-high-bar`.
+That QEMU gate does not replace physical N150 BAR-placement qualification.
 
 QEMU now provides passing UHCI and q35 xHCI persistence lanes. Emulation is
 useful for driver development but does not replace testing the exact laptop

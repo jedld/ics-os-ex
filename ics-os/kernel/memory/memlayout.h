@@ -59,6 +59,8 @@
    CR3 points at a user PML4 whose low identity mappings are privatized. */
 #define KDIRECT_BASE           0xFFFF800000000000ULL
 #define KDIRECT(phys)          ((void *)(KDIRECT_BASE | ((phys) & 0xFFFFFFFFULL)))
+#define KMMIO_BASE             0xFFFF800100000000ULL
+#define KMMIO_SIZE             0x00200000UL
 
 #define MEM_LOW_END            0x00100000UL
 #define MEM_GDT                0x00001000UL

@@ -389,9 +389,6 @@ int blkcache_read(int deviceid, u64 sector, DWORD numblocks, void *buf)
 
   sync_entercrit(&pc_busy);
     ok = pc_copy_out(deviceid, start, end - start, (char *)buf);
-    printf("pcache: read dev=%d sector=%llu nb=%d bsz=%u pg0=%llu pg1=%llu hit=%d\n",
-           deviceid, (unsigned long long)sector, (unsigned)numblocks,
-           (unsigned)bsz, (unsigned long long)pg0, (unsigned long long)pg1, ok);
     if (ok) {
        pc_hits += numblocks;
        sync_leavecrit(&pc_busy);

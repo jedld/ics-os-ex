@@ -106,11 +106,9 @@ static int ext4_read_blocks(ext4_dev *d, int id, u64 block, u32 count, void *buf
      u32 spb = (u32)(d->sb.blocksize / 512);
      u64 lba = block * (u64)spb;
      DWORD h = dex32_requestIO(id, IO_READ, lba, (DWORD)(count * spb), buf);
-     ext4_wait(h);
-     dex32_closeIO(h);
-     printf("ext4: read_blocks block=%llu buf0=%x buf4=%x buf8=%x\n",
-            (unsigned long long)block, ((u8 *)buf)[0], ((u8 *)buf)[4], ((u8 *)buf)[8]);
-     return 0;
+    ext4_wait(h);
+      dex32_closeIO(h);
+      return 0;
  }
 
 static int ext4_write_blocks(ext4_dev *d, int id, u64 block, u32 count, void *buf)
@@ -151,6 +149,7 @@ static int ext4_load_super(ext4_dev *d, int id)
     if (s->inode_size < 128 || s->inode_size > 256) s->inode_size = 128;
     s->desc_size = rd16(sb + 0xfe);
     if (s->desc_size == 0) s->desc_size = 32;
+    s->inodes_count = rd32(sb + 0x00);
     s->blocks_count = rd32(sb + 0x04);
     if (rd32(sb + 0x60) & EXT4_FEATURE_INCOMPAT_64BIT)
         s->blocks_count |= (u64)rd32(sb + 0x150) << 32;
@@ -318,11 +317,8 @@ static int ext4_read_ino(ext4_dev *d, int id, u32 ino, u8 *raw)
        inode_size != blocksize, so read the containing block and copy */
     u32 blkno = blk / d->sb.blocksize;
     (void)off;
-    printf("ext4: read_ino ENTER ino=%u blk=%u blkno=%u\n", (unsigned)ino, (unsigned)blk, (unsigned)blkno);
     if (ext4_read_blocks(d, id, blkno, 1, buf) != 0) return -1;
-    printf("ext4: read_ino READ OK ino=%u blkno=%u\n", (unsigned)ino, (unsigned)blkno);
     memcpy(raw, buf + (blk % d->sb.blocksize), d->sb.inode_size);
-    printf("ext4: read_ino DONE ino=%u size_lo=%u\n", (unsigned)ino, (unsigned)rd32(raw + 0x04));
     return 0;
 }
 
@@ -356,9 +352,6 @@ static int ext4_write_ino(ext4_dev *d, int id, u32 ino, u32 gen, u8 *raw)
     u32 blkno = blk / d->sb.blocksize;
     if (ext4_read_blocks(d, id, blkno, 1, buf) != 0) return -1;
     memcpy(buf + (blk % d->sb.blocksize), raw, d->sb.inode_size);
-    printf("ext4: write_ino ino=%u blkno=%u off=%u raw28=%x buf28=%x\n",
-           (unsigned)ino, (unsigned)blkno, (unsigned)(blk % d->sb.blocksize),
-           (unsigned)rd32(raw + 0x28), (unsigned)rd32(buf + (blk % d->sb.blocksize) + 0x28));
     if (ext4_write_blocks(d, id, blkno, 1, buf) != 0) return -1;
     return 0;
 }
@@ -506,9 +499,6 @@ static int ext4_write_extents(ext4_dev *d, int id, ext4_ino *c)
     per_leaf = (s->blocksize - 12) / 12;
     if (per_leaf < 1) per_leaf = 1;
 
-    printf("ext4: wextents ino=%u nruns=%d raw28=%x\n",
-           (unsigned)c->ino, (unsigned)nruns, (unsigned)rd32(raw + 0x28));
-
     /* release old external nodes before rebuilding */
     if (c->nleaf)
     {
@@ -541,9 +531,6 @@ static int ext4_write_extents(ext4_dev *d, int id, ext4_ino *c)
             ext->ee_start_hi = (u16)(physb >> 32);
             ext->ee_start_lo = (u32)(physb & 0xFFFFFFFF);
         }
-        printf("ext4: wextents set ino=%u nruns=%d raw28_after=%x raw2c_after=%x\n",
-               (unsigned)c->ino, (unsigned)nruns,
-               (unsigned)rd32(raw + 0x28), (unsigned)rd32(raw + 0x2c));
         return 0;
     }
 
@@ -586,6 +573,44 @@ static int ext4_write_extents(ext4_dev *d, int id, ext4_ino *c)
 /* block + inode allocation                                            */
 /* ------------------------------------------------------------------ */
 
+static void ext4_pad_block_bitmap(ext4_dev *d, u8 *bitmap, u32 g)
+{
+    ext4_sb *s = &d->sb;
+    u32 total = s->blocks_per_group;
+    if (g == s->num_groups - 1)
+    {
+        u64 last = s->blocks_count - (u64)g * s->blocks_per_group;
+        if (last < total) total = (u32)last;
+    }
+    {
+        u32 full = total / 8;
+        u32 rem = total % 8;
+        u32 i;
+        if (rem) bitmap[full] |= (u8)(0xFF << rem);
+        for (i = full + (rem ? 1 : 0); i < s->blocksize; i++)
+            bitmap[i] = 0xFF;
+    }
+}
+
+static void ext4_pad_inode_bitmap(ext4_dev *d, u8 *bitmap, u32 g)
+{
+    ext4_sb *s = &d->sb;
+    u32 total = s->inodes_per_group;
+    if (g == s->num_groups - 1)
+    {
+        u32 last = s->inodes_count - g * s->inodes_per_group;
+        if (last < total) total = last;
+    }
+    {
+        u32 full = total / 8;
+        u32 rem = total % 8;
+        u32 i;
+        if (rem) bitmap[full] |= (u8)(0xFF << rem);
+        for (i = full + (rem ? 1 : 0); i < s->blocksize; i++)
+            bitmap[i] = 0xFF;
+    }
+}
+
 /* mark a block used in its group bitmap and persist the bitmap block */
 static void ext4_set_block_used(ext4_dev *d, int id, u32 block)
 {
@@ -599,17 +624,9 @@ static void ext4_set_block_used(ext4_dev *d, int id, u32 block)
     if (bb == 0) return;
     if (ext4_read_blocks(d, id, bb, 1, bitmap) != 0) return;
     bitmap[bit / 8] |= (u8)(1 << (bit % 8));
+    ext4_pad_block_bitmap(d, bitmap, g);
     if (s->has_csum)
-    {
-        u8 gno[4];
-        u32 c;
-        le32buf(gno, g);
-        c = ext4_crc32c(gno, s->csum_seed, 4);
-        c = ext4_crc32c(bitmap, c, s->blocksize - 4);
-        /* stored little-endian on disk */
-        wr32(bitmap + s->blocksize - 4, c);
-        bcsum = c;
-    }
+        bcsum = ext4_crc32c(bitmap, s->csum_seed, s->blocksize);
     ext4_write_blocks(d, id, bb, 1, bitmap);
     gd->bg_free_blocks = (u16)(gd->bg_free_blocks - 1);
     /* update raw descriptor */
@@ -644,16 +661,9 @@ static void ext4_free_block_raw(ext4_dev *d, int id, u32 block)
     if (bb == 0) return;
     if (ext4_read_blocks(d, id, bb, 1, bitmap) != 0) return;
     bitmap[bit / 8] &= (u8)~(1 << (bit % 8));
+    ext4_pad_block_bitmap(d, bitmap, g);
     if (s->has_csum)
-    {
-        u8 gno[4];
-        u32 c;
-        le32buf(gno, g);
-        c = ext4_crc32c(gno, s->csum_seed, 4);
-        c = ext4_crc32c(bitmap, c, s->blocksize - 4);
-        wr32(bitmap + s->blocksize - 4, c);
-        bcsum = c;
-    }
+        bcsum = ext4_crc32c(bitmap, s->csum_seed, s->blocksize);
     ext4_write_blocks(d, id, bb, 1, bitmap);
     gd->bg_free_blocks = (u16)(gd->bg_free_blocks + 1);
     {
@@ -735,16 +745,9 @@ static void ext4_set_ino_used(ext4_dev *d, int id, u32 ino)
     if (ib == 0) return;
     if (ext4_read_blocks(d, id, ib, 1, bitmap) != 0) return;
     bitmap[bit / 8] |= (u8)(1 << (bit % 8));
+    ext4_pad_inode_bitmap(d, bitmap, g);
     if (s->has_csum)
-    {
-        u8 gno[4];
-        u32 c;
-        le32buf(gno, g);
-        c = ext4_crc32c(gno, s->csum_seed, 4);
-        c = ext4_crc32c(bitmap, c, s->blocksize - 4);
-        wr32(bitmap + s->blocksize - 4, c);
-        icsum = c;
-    }
+        icsum = ext4_crc32c(bitmap, s->csum_seed, (s->inodes_per_group + 7) / 8);
     ext4_write_blocks(d, id, ib, 1, bitmap);
     gd->bg_free_inodes = (u16)(gd->bg_free_inodes - 1);
     gd->bg_itable_unused = (u16)(gd->bg_itable_unused - 1);
@@ -830,16 +833,9 @@ static int ext4_free_ino_raw(ext4_dev *d, int id, u32 ino)
     {
         if (ext4_read_blocks(d, id, ib, 1, bitmap) != 0) return -1;
         bitmap[bit / 8] &= (u8)~(1 << (bit % 8));
+        ext4_pad_inode_bitmap(d, bitmap, g);
         if (s->has_csum)
-        {
-            u8 gno[4];
-            u32 c;
-            le32buf(gno, g);
-            c = ext4_crc32c(gno, s->csum_seed, 4);
-            c = ext4_crc32c(bitmap, c, s->blocksize - 4);
-            wr32(bitmap + s->blocksize - 4, c);
-            icsum = c;
-        }
+            icsum = ext4_crc32c(bitmap, s->csum_seed, (s->inodes_per_group + 7) / 8);
         ext4_write_blocks(d, id, ib, 1, bitmap);
     }
     gd->bg_free_inodes = (u16)(gd->bg_free_inodes + 1);
@@ -882,11 +878,8 @@ static int ext4_load_dirimage(ext4_dev *d, int id, u32 ino, u8 **out,
     u32 nblocks = 0;
     u8 *img;
     u64 size;
-    printf("ext4: ldimg ENTER ino=%u\n", (unsigned)ino);
     if (ext4_read_ino(d, id, ino, raw) < 0) return -1;
-    printf("ext4: ldimg returned ino=%u\n", (unsigned)ino);
     size = ((u64)rd32(raw + 0x0c) << 32) | rd32(raw + 0x04);
-    printf("ext4: ldimg read_ino ok ino=%u size=%u\n", (unsigned)ino, (unsigned)size);
     if (size == 0)
     {
         *out = 0; *out_bytes = 0; *out_nblocks = 0;
@@ -895,11 +888,6 @@ static int ext4_load_dirimage(ext4_dev *d, int id, u32 ino, u8 **out,
     if (ext4_build_runs(d, id, raw, runs, &nruns) < 0) return -1;
     for (i = 0; i < nruns; i++)
         nblocks += runs[i].len;
-    printf("ext4: ldimg build_runs ok ino=%u nruns=%u nblocks=%u run0(log=%u len=%u phys=%u)\n",
-           (unsigned)ino, (unsigned)nruns, (unsigned)nblocks,
-           nruns ? (unsigned)runs[0].log_block : 0,
-           nruns ? (unsigned)runs[0].len : 0,
-           nruns ? (unsigned)runs[0].phys_lo : 0);
     if (nblocks == 0)
     {
         *out = 0; *out_bytes = 0; *out_nblocks = 0;
@@ -916,13 +904,11 @@ static int ext4_load_dirimage(ext4_dev *d, int id, u32 ino, u8 **out,
         if (phys == 0 && runs[i].phys_hi == 0) continue; /* hole */
         for (j = 0; j < runs[i].len; j++)
         {
-            printf("ext4: ldimg reading blk=%u -> dst=%x\n", (unsigned)(phys + j), (unsigned)(dst + j * d->sb.blocksize));
             if (ext4_read_blocks(d, id, (u64)(phys + j), 1, dst + j * d->sb.blocksize) < 0)
             {
                 free(img);
                 return -1;
             }
-            printf("ext4: ldimg read ok blk=%u\n", (unsigned)(phys + j));
         }
     }
     *out = img;
@@ -1189,8 +1175,6 @@ static int ext4_flush_ino(ext4_dev *d, int id, ext4_ino *c)
 {
     u8 *raw = c->inode_raw;
     if (!c->inode_loaded) return -1;
-    printf("ext4: flush_ino ino=%u raw28=%x nruns=%d\n",
-           (unsigned)c->ino, (unsigned)rd32(raw + 0x28), (unsigned)c->nruns);
     if (d->sb.has_csum)
         ext4_ino_set_csum(d, c->ino, c->generation, raw);
     if (ext4_write_ino(d, id, c->ino, c->generation, raw) < 0) return -1;
@@ -1259,19 +1243,13 @@ static int ext4_mountroot(vfs_node *f, int id)
     {
         if (ext4_mount_device_common(d, id) < 0)
         {
-            printf("ext4: mount_device_common failed id=%d\n", id);
             return -1;
         }
-        printf("ext4: super ok bsize=%u inosize=%u ipg=%u ngroups=%u csum=%d\n",
-               (unsigned)d->sb.blocksize, (unsigned)d->sb.inode_size,
-               (unsigned)d->sb.inodes_per_group, (unsigned)d->sb.num_groups,
-               (int)d->sb.has_csum);
     }
 
     /* root inode is 2 */
     if (ext4_read_ino(d, id, rootino, raw) < 0)
     {
-        printf("ext4: read_ino(root) failed id=%d\n", id);
         return -1;
     }
 
@@ -1293,16 +1271,12 @@ static int ext4_mountroot(vfs_node *f, int id)
         c->generation = rd32(raw + 0x64);
         if (ext4_build_runs(d, id, raw, c->runs, &c->nruns) < 0)
         {
-            printf("ext4: build_runs(root) failed id=%d\n", id);
             free(c);
             return -1;
         }
         c->runs_loaded = 1;
         f->misc = (void *)c;
         f->miscsize = sizeof(ext4_ino);
-        printf("ext4: root mode=0x%x nblocks=%u nruns=%u size=%u\n",
-               (unsigned)c->mode, (unsigned)c->nblocks, (unsigned)c->nruns,
-               (unsigned)c->size_lo);
     }
 
     f->size = 0;
@@ -1313,10 +1287,8 @@ static int ext4_mountroot(vfs_node *f, int id)
     /* load root dir image */
     if (ext4_load_dirimage(d, id, rootino, &img, &bytes, &nblocks) < 0)
     {
-        printf("ext4: load_dirimage(root) failed id=%d\n", id);
         return -1;
     }
-    printf("ext4: root dirimage bytes=%u nblocks=%u\n", (unsigned)bytes, (unsigned)nblocks);
     if (bytes)
     {
         f->misc2 = (void *)img;
@@ -1526,8 +1498,6 @@ static int ext4_addsectors(vfs_node *f, int nblocks, int id)
     }
     c->runs_loaded = 1;
 
-    printf("ext4: addsectors ino=%u nblocks=%d nruns=%d\n",
-           (unsigned)c->ino, nblocks, (unsigned)c->nruns);
     /* persist extent tree + inode */
     if (ext4_write_extents(d, id, c) < 0) return -1;
     c->nblocks = rd32(c->inode_raw + 0x1c) + (u32)nblocks * (bs / 512);
@@ -1590,8 +1560,6 @@ static int ext4_createfile(vfs_node *f, int id)
             u8 dirblk[4096];
             ext4_dirent *de;
             u32 pino = pc->ino;
-            printf("ext4: createfile dir newino=%u parentino=%u is_dir=%d\n",
-                   (unsigned)ino, (unsigned)pino, is_dir);
             memset(dirblk, 0, d->sb.blocksize);
             de = (ext4_dirent *)dirblk;
             de->inode = ino;

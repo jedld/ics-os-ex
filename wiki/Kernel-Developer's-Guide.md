@@ -186,6 +186,35 @@ and injected-failure cases. GCC remains the canonical supported compiler; newer
 GCC/Clang sanitizer and analysis builds are separate QA configurations and do not
 replace self-host certification.
 
+## 3.5 ext4 driver and host validation
+
+The ext4 driver lives in `ics-os/kernel/filesystem/ext4.{c,h}` and is exercised
+by `make test-ext4`. The target boots a virtio-blk ext4 image, reads a seeded
+file, creates a directory and file, writes through the VFS, requires the guest
+test marker, and then validates the post-test image with host `e2fsck -fn`
+and `debugfs`. A passing guest marker alone is not sufficient.
+
+When changing ext4 allocation or metadata, preserve these on-disk invariants:
+
+- Unused tail bytes in block and inode bitmaps must be `0xff` through the end
+  of the bitmap block, including the final four bytes.
+- Block and inode bitmap checksums are stored in the group descriptor, not in
+  the bitmap block tail.
+- With `metadata_csum`, the GDT block-bitmap checksum is CRC32C over the full
+  block bitmap using the filesystem UUID seed; the inode-bitmap checksum is
+  CRC32C over only the first `inodes_per_group / 8` bytes. Neither bitmap
+  checksum includes a group-number prefix.
+- The group descriptor checksum is CRC32C over the little-endian group number
+  followed by the descriptor with `bg_checksum` zeroed; store the low 16 bits.
+- Inode checksums use the inode number and generation seed and must cover the
+  inode fields selected by `i_extra_isize`.
+- Directory blocks with `metadata_csum` need the 12-byte directory tail entry.
+
+The target writes `/tmp/icsos-ext4-e2fsck.log` and
+`/tmp/icsos-ext4-debugfs.log` for inspection. Update the guest test or host
+validation when the driver gains new allocation, journaling, multi-group, or
+filesystem-feature support.
+
 # 4. Source Code Directory Structure
 Top level directories.
 
@@ -209,7 +238,7 @@ Kernel source directories.
 |`devmgr/`      |Sources for the device and extension manager|
 |`dexapi/`      |Sources for setting up the system call table|
 |`docs/`        |Documentation files for kernel|
-|`filesystem/`  |Sources for filesystem support (fat12 and iso9660)|
+|`filesystem/`  |Sources for filesystem support (fat12, iso9660, and ext4)|
 |`grub/`        |Files needed by grub|
 |`hardware/`    |Sources for hardware device drivers (ATA PIO, UHCI, virtio-blk, …)|
 |`iomgr/`       |I/O manager (bio, per-device blk-mq lock, 4KiB page cache)|

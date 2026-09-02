@@ -22,7 +22,7 @@ extern int memcmp(const void *s1, const void *s2, unsigned int n);
 extern char *strcpy(char *d, const char *s);
 extern int printf(const char *fmt, ...);
 extern void *memcpy(void *d, const void *s, unsigned int n);
-extern void mmio_mark_uncacheable(u64 phys, u64 len);
+extern void *mmio_map(u64 phys, u64 len);
 extern void storeflags(DWORD *flags);
 extern void restoreflags(DWORD flags);
 extern void stopints(void);
@@ -253,8 +253,8 @@ static volatile u8 *map_cap(u8 bus, u8 dev, u8 fn, u8 bar, u32 offset, u32 lengt
    base = pci_read_bar(bus, dev, fn, bar);
    if (base < 0x100000ULL)
       return 0;
-   mmio_mark_uncacheable(base + offset, length ? length : 0x1000);
-   return (volatile u8 *)(uintptr)(base + offset);
+   return (volatile u8 *)mmio_map(base + offset,
+                                  length ? length : 0x1000);
 }
 
 static int virtio_parse_caps(struct vblk_dev *d)
@@ -314,8 +314,9 @@ static int virtio_setup_msix(struct vblk_dev *d)
          (void)pba_bir;
          table_base = pci_read_bar(d->bus, d->dev, d->fn, (u8)(table_bir & 7));
          table_base += (table_bir & ~7u);
-         mmio_mark_uncacheable(table_base, 0x1000);
-         entry = (volatile u32 *)(uintptr)table_base;
+         entry = (volatile u32 *)mmio_map(table_base, 0x1000);
+         if (!entry)
+            return 0;
          apic_id = lapic_get_id();
          entry[0] = 0xFEE00000u | (apic_id << 12);
          entry[1] = 0;
@@ -554,12 +555,9 @@ static void vblk_harvest_locked(struct vblk_dev *d)
       u16 head, si;
       struct vblk_slot *s;
 
- e = &d->used->ring[d->last_used % d->qsize];
+       e = &d->used->ring[d->last_used % d->qsize];
        head = (u16)e->id;
        si = (u16)(head / VBLK_DESCS_PER_REQ);
-       printf("vblk: HARVEST usedidx=%u last=%u id=%u len=%u\n",
-              (unsigned)used_idx, (unsigned)d->last_used,
-              (unsigned)e->id, (unsigned)e->len);
        d->last_used++;
       if (si >= d->nslots)
          continue;
@@ -695,9 +693,6 @@ int virtio_blk_submit(u32 type, u64 sector, void *buf, u32 bytes,
    d->avail->idx = d->avail_idx;
     virt_mb();
     virtio_notify(d);
-    printf("vblk: SUBMIT slot=%d head=%u sector=%llu bytes=%u avail=%u\n",
-           si, (unsigned)head, (unsigned long long)sector,
-           (unsigned)bytes, (unsigned)d->avail_idx);
     spin_unlock_irqrestore(&d->qlock, flags);
 
     if (slot_out)
@@ -740,10 +735,6 @@ int virtio_blk_wait(int slot)
    }
   flags = spin_lock_irqsave(&d->qlock);
     res = s->res;
-    printf("vblk: WAIT slot=%d res=%d ubuf=%x bnc0=%x bnc1=%x\n",
-           slot, res, (unsigned)(uintptr)s->user_buf,
-           (unsigned)d->bounce[(unsigned)slot * VBLK_BOUNCE + 0],
-           (unsigned)d->bounce[(unsigned)slot * VBLK_BOUNCE + 4]);
     if (s->copy_back && s->user_buf && res > 0)
        memcpy(s->user_buf, d->bounce + (unsigned)slot * VBLK_BOUNCE,
               (unsigned)res);

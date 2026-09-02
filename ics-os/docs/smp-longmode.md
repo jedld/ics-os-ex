@@ -206,8 +206,10 @@ the remote shootdown path is infrastructure for later process migration.
 modern virtio-pci caps, one request queue with a 3-descriptor slot pool,
 MSI-X vector **0x42**, 512-byte LBAs, registered as block device `vblk` and
 as `/dev/vblk`. Completions harvest the used ring in the IRQ (hlt wait, not
-pause-spin). ATA PIO remains the bare-metal fallback. PCI MMIO BARs are
-marked uncacheable (PCD|PWT on the shared `boot_pd3` 2MiB pages).
+pause-spin). ATA PIO remains the bare-metal fallback. PCI MMIO BARs are mapped
+through `mmio_map()`: low 4 GiB BARs use the identity-map UC path, while BARs
+above 4 GiB use the bounded `KMMIO_BASE` kernel window with PCD|PWT and SMP
+TLB shootdown.
 `make test-virtio` greps `VIRTIO_BLK_OK` and `VIRTIO_IRQ_OK`.
 If sector 0 looks like FAT, the kernel mounts `vblk` at `/work` and prints
 `work: mounted` (skipped on a zeroed disk).
@@ -217,7 +219,8 @@ If sector 0 looks like FAT, the kernel mounts `vblk` at `/work` and prints
 Identity-mapped low 4GiB. **Source of truth:** `kernel/memory/memlayout.h`.
 The page allocator skips that reserved-range table; the linker
 `ASSERT`s `bssEnd <= 0x3C0000` so the kernel cannot grow into TinyCC's
-4MiB ELF window. Kernel stacks are `.bss` arrays. Kernel heap is a
+4MiB ELF window. `KMMIO_BASE` reserves a 2 MiB kernel-only MMIO window for
+device BARs above 4 GiB. Kernel stacks are `.bss` arrays. Kernel heap is a
 closed 32MiB interval; `sbrk` must not `mempop`. Add new regions to
 the header first.
 
