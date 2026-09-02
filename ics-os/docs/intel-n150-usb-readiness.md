@@ -25,9 +25,18 @@ Run these gates before flashing:
 ```bash
 cd ics-os
 make usb
+make test-usb-storage
+make test-usb-storage-xhci-gap
 make test-vbox-usb-image
 make test-vbox-usb-image-efi
 ```
+
+The QEMU UHCI gate boots the kernel from a separate CD, attaches a disposable
+copy of the image only through `piix3-usb-uhci`, requires `usb0p0` to become the
+root, performs a guest write and `fsync`, and compares the persisted bytes on
+the host. The xHCI expected-gap lane attaches the same image through
+`qemu-xhci` and requires the kernel to leave it undiscovered while using the CD
+root. A CD fallback can therefore never be mistaken for USB success.
 
 VirtualBox IDE validates firmware discovery, GRUB, kernel boot, FAT32 mounting,
 allocation, block-cache writeback, and persistence. It does not validate that
@@ -58,10 +67,11 @@ as the root and working disk. Required work includes:
 6. Stable topology and transfer diagnostics plus QEMU xHCI and physical-device
    qualification tests.
 
-QEMU can provide the first automated xHCI lane with an emulated NEC xHCI
-controller and USB storage. It is useful for driver development but does not
-replace testing the exact laptop controller, firmware, ports, and thumb drive.
-VirtualBox does not provide a useful UHCI compatibility lane for this image.
+QEMU now provides a passing UHCI qualification lane and an xHCI expected-gap
+lane. The latter should become a persistence PASS gate as xHCI is implemented.
+Emulation is useful for driver development but does not replace testing the
+exact laptop controller, firmware, ports, and thumb drive. VirtualBox does not
+provide a useful UHCI compatibility lane for this image.
 
 ## Other laptop gaps
 

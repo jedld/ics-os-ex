@@ -11,7 +11,8 @@
 
 #include "usb.h"
 
-#define USB_MAX_TD          32
+#define USB_BULK_MAX        (32 * 1024)
+#define USB_MAX_TD          (USB_BULK_MAX / 64)
 #define USB_MAX_PART        8
 #define USB_TIMEOUT         2000000
 
@@ -142,7 +143,7 @@ typedef struct {
 static volatile DWORD uhci_framelist[1024] __attribute__((aligned(4096)));
 static uhci_qh uhci_qh_ctl  __attribute__((aligned(16)));
 static uhci_td uhci_tds[USB_MAX_TD] __attribute__((aligned(16)));
-static BYTE usb_dma_buf[2048] __attribute__((aligned(16)));
+static BYTE usb_dma_buf[USB_BULK_MAX] __attribute__((aligned(16)));
 static BYTE usb_setup_buf[8] __attribute__((aligned(16)));
 static BYTE usb_cbw_buf[32] __attribute__((aligned(16)));
 static BYTE usb_csw_buf[16] __attribute__((aligned(16)));
@@ -359,6 +360,9 @@ static int usb_bulk(BYTE endp, int in, BYTE *data, int len, BYTE *toggle)
     int remaining = len;
     BYTE *ptr = data;
     BYTE pid = in ? TD_PID_IN : TD_PID_OUT;
+
+    if (len < 0 || len > USB_BULK_MAX)
+        return 0;
 
     if (len == 0) {
         uhci_tds[0].link = TD_LINK_TERM;

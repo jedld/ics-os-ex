@@ -35,11 +35,13 @@ functional test suite**, not as a mature unit-testing or production QA
 framework. Its end-to-end tests should be retained and placed at the top of a
 new test pyramid rather than replaced.
 
-The USB image also has disposable VirtualBox BIOS and UEFI gates. They require
-FAT32 root mount, guest create/write/`fsync`, VM poweroff, disk conversion, and
-byte-for-byte host readback. These qualify firmware and IDE-backed persistence,
-not physical USB controller compatibility; modern xHCI hardware still requires
-its own emulated and physical qualification lanes.
+The USB image has disposable VirtualBox BIOS and UEFI gates plus a QEMU UHCI
+controller gate. They require FAT32 root mount, guest create/write/`fsync`, VM
+termination, and byte-for-byte host readback. The QEMU gate boots from a
+separate CD and asserts UHCI enumeration and `usb0p0` root selection. An xHCI
+expected-gap lane proves the same image remains undiscovered behind xHCI and
+cannot pass through CD fallback. Modern xHCI hardware still requires a passing
+emulated lane and physical qualification.
 
 The first incremental host-unit foothold now exists: `make test-io-unit` emits
 TAP 13 for block-cache generation decisions. `test-posixio` runs twice under
@@ -116,7 +118,7 @@ timeouts, crashes, skips, and artifacts.
 | Process and ABI | `test-exec`, `test-spawn` | ELF64 load/execute, `posix_spawn()`, `waitpid()`, writable work disk | Smoke cases only; spawn test does not assert decoded child status or abnormal exits |
 | Fork | `test-fork`, `test-fork-matrix` | COW return ABI and isolation, one-owner fast path, immutable text, injected COW OOM, inherited fd, wait/exit semantics, and ten-child delayed reap on 1/2/4/8 vCPUs | Active CPL0 user/syscall stacks are eager-copied; no shootdown-loss, DMA-pin, unmap-race, multithread rejection, or in-flight io_uring rejection case yet |
 | Storage and async I/O | `test-iobench`, `test-virtio`, `test-posixio` | CD/page-cache behavior, virtio-blk DMA/MSI-X, selected POSIX and io_uring operations | Mostly one vCPU; no saturation, cancellation, reset, ENOSPC, corruption, or durability matrix |
-| Device experiments | `test-usb`, `test-usb-amd64`, `test-usb-storage` | Manual launch configurations for USB paths | They have no automated assertions and are omitted from `.PHONY`; these are launch helpers, not reliable tests |
+| USB devices | `test-usb-storage`, `test-usb-storage-xhci-gap`; `test-usb`, `test-usb-amd64` launch helpers | UHCI enumeration, USB-root selection, durable FAT write/readback; deterministic xHCI unsupported boundary | xHCI remains an expected gap; launch helpers still have no assertions; no hot-unplug, reset, contention, or physical-hardware lane |
 | User toolchain | `test-bintools`, `test-buildtools`, `test-make` | In-OS assembler, archiver, linker, utilities, GNU Make, and generated program execution | Expensive whole-guest tests with ad hoc probes and marker contracts |
 | GCC path | `test-cc1`, `test-gcc`, `test-gccdriver`, `test-gcc-kbuild`, `test-kbuild` | Frontend, driver, toolchain, kernel generation, kexec, and capability checks | KVM/host-CPU dependence for most jobs; long feedback cycle |
 | Strict closure | `test-selfhost-cert` | Intended GCC rebuild, rebuilt Make, provenance, kernel rebuild, kexec, and capability loop | Eight-hour timeout, one vCPU, hard-coded object count, and strict closure not yet a consistently green release gate |
@@ -341,10 +343,11 @@ coverage independently by layer and subsystem.
 
 ### 3.12 P2: test metadata and aggregate names are incomplete
 
-`test-integration` currently means only boot, SMP, and exec. USB launch targets
-are not phony and are not automated. KVM requirements, estimated durations,
-CPU/memory/storage needs, destructive behavior, and test ownership are encoded
-only in recipes or comments.
+`test-integration` currently means only boot, SMP, and exec. The asserted USB
+storage targets are phony and automated, but the older USB boot targets remain
+manual launch helpers. KVM requirements, estimated durations, CPU/memory/storage
+needs, destructive behavior, and test ownership are encoded only in recipes or
+comments.
 
 Move test descriptions to a manifest consumed by a runner. Keep Make targets as
 stable developer entry points. Define honest suites such as `test-pr`,

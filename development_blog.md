@@ -2,6 +2,27 @@
 
 ## 2026-09-02 (Manila, UTC+8)
 
+### 15:48 — QEMU USB-controller qualification
+
+**Current problem:** qualify the image through an actual emulated USB host
+controller, without allowing firmware boot or CD fallback to masquerade as USB
+root support, and make the N150 xHCI gap executable.
+
+**Activity completed:** the first separate-CD UHCI probe enumerated `usb0p0`
+but returned a zero FAT BPB and divided by zero during mount. The UHCI BOT path
+advertised 32 KiB SCSI commands while its DMA buffer and 32 transfer descriptors
+could carry only 2 KiB. Expanded both capacities to the intended 32 KiB and
+added an explicit bulk-transfer bound. Added isolated QEMU UHCI persistence and
+xHCI expected-gap runners with unique artifacts, explicit timeouts, positive
+controller/root assertions, fatal-fault checks, and negative fallback checks.
+
+**QA delivered:** `make test-usb-storage` boots from CD, enumerates the image
+only through UHCI, mounts USB root, performs guest copy plus `fsync`, and passes
+host byte comparison. `make test-usb-storage-xhci-gap` reports
+`EXPECTED_GAP xHCI unsupported`, mounts the CD root, and confirms no `usb0`
+registration. This does not change N150 readiness: a passing xHCI persistence
+lane and physical laptop qualification remain required.
+
 ### 15:35 — BIOS/UEFI USB image persistence and Intel N150 readiness
 
 **Current problem:** produce a safely flashable image that boots from a thumb

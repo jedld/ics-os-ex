@@ -150,6 +150,12 @@ and wait for object/module references. Never cast a CPU pointer to a DMA address
 free a timed-out descriptor still owned by hardware, invoke driver callbacks under
 a global registry lock, or force-unload active in-kernel driver text.
 
+For USB storage changes, run `make test-usb-storage`. It boots from a separate
+CD and requires the image attached through QEMU UHCI to enumerate as `usb0p0`,
+mount as root, and survive guest `fsync` plus host byte readback. Also run
+`make test-usb-storage-xhci-gap`; until xHCI exists this must report
+`EXPECTED_GAP`, use the CD root, and never register `usb0`.
+
 The first implementation target is a virtual bus/device and sample async driver,
 followed by the IRQ and DMA foundations and a complete virtio-blk lifecycle. Do not
 attempt all hardware classes in parallel before those correctness gates pass.
