@@ -350,6 +350,9 @@ static int ext4_write_ino(ext4_dev *d, int id, u32 ino, u32 gen, u8 *raw)
     u32 blkno = blk / d->sb.blocksize;
     if (ext4_read_blocks(d, id, blkno, 1, buf) != 0) return -1;
     memcpy(buf + (blk % d->sb.blocksize), raw, d->sb.inode_size);
+    printf("ext4: write_ino ino=%u blkno=%u off=%u raw28=%x buf28=%x\n",
+           (unsigned)ino, (unsigned)blkno, (unsigned)(blk % d->sb.blocksize),
+           (unsigned)rd32(raw + 0x28), (unsigned)rd32(buf + (blk % d->sb.blocksize) + 0x28));
     if (ext4_write_blocks(d, id, blkno, 1, buf) != 0) return -1;
     return 0;
 }
@@ -496,6 +499,9 @@ static int ext4_write_extents(ext4_dev *d, int id, ext4_ino *c)
     per_leaf = (s->blocksize - 12) / 12;
     if (per_leaf < 1) per_leaf = 1;
 
+    printf("ext4: wextents ino=%u nruns=%d raw28=%x\n",
+           (unsigned)c->ino, (unsigned)nruns, (unsigned)rd32(raw + 0x28));
+
     /* release old external nodes before rebuilding */
     if (c->nleaf)
     {
@@ -528,6 +534,9 @@ static int ext4_write_extents(ext4_dev *d, int id, ext4_ino *c)
             ext->ee_start_hi = (u16)(physb >> 32);
             ext->ee_start_lo = (u32)(physb & 0xFFFFFFFF);
         }
+        printf("ext4: wextents set ino=%u nruns=%d raw28_after=%x raw2c_after=%x\n",
+               (unsigned)c->ino, (unsigned)nruns,
+               (unsigned)rd32(raw + 0x28), (unsigned)rd32(raw + 0x2c));
         return 0;
     }
 
@@ -1156,6 +1165,8 @@ static int ext4_flush_ino(ext4_dev *d, int id, ext4_ino *c)
 {
     u8 *raw = c->inode_raw;
     if (!c->inode_loaded) return -1;
+    printf("ext4: flush_ino ino=%u raw28=%x nruns=%d\n",
+           (unsigned)c->ino, (unsigned)rd32(raw + 0x28), (unsigned)c->nruns);
     if (d->sb.has_csum)
         ext4_ino_set_csum(d, c->ino, c->generation, raw);
     if (ext4_write_ino(d, id, c->ino, c->generation, raw) < 0) return -1;
@@ -1491,6 +1502,8 @@ static int ext4_addsectors(vfs_node *f, int nblocks, int id)
     }
     c->runs_loaded = 1;
 
+    printf("ext4: addsectors ino=%u nblocks=%d nruns=%d\n",
+           (unsigned)c->ino, nblocks, (unsigned)c->nruns);
     /* persist extent tree + inode */
     if (ext4_write_extents(d, id, c) < 0) return -1;
     c->nblocks = rd32(c->inode_raw + 0x1c) + (u32)nblocks * (bs / 512);
@@ -1551,6 +1564,8 @@ static int ext4_createfile(vfs_node *f, int id)
             u8 dirblk[4096];
             ext4_dirent *de;
             u32 pino = pc->ino;
+            printf("ext4: createfile dir newino=%u parentino=%u is_dir=%d\n",
+                   (unsigned)ino, (unsigned)pino, is_dir);
             memset(dirblk, 0, d->sb.blocksize);
             de = (ext4_dirent *)dirblk;
             de->inode = ino;

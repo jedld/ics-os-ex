@@ -113,8 +113,12 @@ typedef struct __attribute__((packed)) {
 /* driver internal state                                              */
 /* ------------------------------------------------------------------ */
 
-/* a flattened run of contiguous logical->physical blocks */
-#define EXT4_MAX_RUNS   4096
+/* a flattened run of contiguous logical->physical blocks.
+   Kept small enough that the on-stack runs[] arrays in the
+   dir-image helpers fit within the 64KiB kernel stack frame
+   (16 bytes/run). Directory extent trees rarely exceed a few
+   hundred runs; build paths return -1 if a run list overflows. */
+#define EXT4_MAX_RUNS   256
 #define EXT4_MAX_LEAVES 512
 
 typedef struct {
