@@ -234,9 +234,14 @@ int user_execp(char *fname, DWORD mode, char *params){
          }
          printf("execp: started pid=%d, waiting\n", (int)id);
          fg_setmykeyboard(id);
+         int child_status = 0;
          dex32_child_faulted = 0;
-         //wait for the child process to finish
-         dex32_waitpid(id,0);
+         /* Consume the direct child's retained status. A process-global fault
+            flag can be set by a faulting grandchild and must not classify its
+            healthy parent as failed. */
+         if (sys_waitpid((int)id,&child_status,0)!=(long)id)
+            child_status = 1;
+         dex32_child_faulted = child_status != 0;
 
          fg_setmykeyboard(getprocessid());
          if (!from_cache){
@@ -1153,6 +1158,18 @@ int console_execute(const char *str){
         if (!user_execp("/icsos/apps/spawn.exe", 0, "/icsos/apps/spawn.exe"))
            printf("SPAWN_FAIL\n");
      }else
+   if (strcmp(u,"forktest") == 0){
+        printf("forktest: running /icsos/apps/forktest.exe\n");
+        if (!user_execp("/icsos/apps/forktest.exe", 0, "/icsos/apps/forktest.exe"))
+           printf("FORK_RUN_FAIL\n");
+     }else
+      if (strcmp(u,"forkoomtest") == 0){
+        printf("forkoomtest: injecting one COW allocation failure\n");
+        userpd_cow_fail_next();
+        if (!user_execp("/icsos/apps/forktest.exe", 0,
+               "/icsos/apps/forktest.exe --oom"))
+           printf("FORK_OOM_RUN_FAIL\n");
+        }else
      if (strcmp(u,"ext4test") == 0){
         printf("ext4test: running /icsos/apps/ext4test.exe\n");
         if (!user_execp("/icsos/apps/ext4test.exe", 0, "/icsos/apps/ext4test.exe"))

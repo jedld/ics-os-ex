@@ -32,6 +32,7 @@
 
 context_switch:
     /* rdi=old, rsi=new, rdx=&old->on_cpu (or NULL) — save then release claim */
+    cli
     movq %r15, CTX_R15(%rdi)
     movq %r14, CTX_R14(%rdi)
     movq %r13, CTX_R13(%rdi)
@@ -64,6 +65,9 @@ context_switch:
    ret to kernel CS; user processes record USER_CODE in PCB.usercs. */
 /* Ring-3: CTX_CS/SS saved for a future iretq. Today we `ret` in kernel CS. */
 context_load:
+     /* CR3, RSP, and GPR restoration is not interruptible.  The destination
+         RFLAGS below re-enables interrupts after ctx_load_in_progress is set. */
+     cli
     movq CTX_CR3(%rdi), %rax
     testq %rax, %rax
     jz 1f

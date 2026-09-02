@@ -8,6 +8,7 @@
  */
 
 #include "../cpu/spinlock.h"
+#include "../cpu/smp.h"
 
 /* Stop Interrupts */
 inline void stopints(){
@@ -106,11 +107,21 @@ static u64 frame_total;         /* total frames seeded from E820            */
 static u64 frame_free;          /* frames currently in the free list        */
 static int frame_ready;
 static spinlock_t frame_lock;
+static spinlock_t userpd_lock;
+static u64 cow_faults;
+static u64 cow_copies;
+static u64 cow_fastpaths;
+static u64 cow_shootdowns;
+static u64 cow_oom;
+static unsigned cow_trace_count;
+static unsigned cow_fault_trace_count;
+static volatile int cow_fail_next;
 
 /* Allocation tracker for double-free / double-alloc diagnostics.
    Bit N is set iff frame N (physical addr N<<12) is currently allocated.
    Phase 1 frames are < 4GiB, so this is 4GiB/4KiB/8 = 128KiB of BSS. */
 static u8 frame_allocmap[0x100000000ull / 0x1000 / 8];
+static u8 frame_refs[0x100000000ull / 0x1000];
 static int frame_dbg;           /* enable alloc/free anomaly reporting      */
 
 static void frame_report(const char *tag, u64 phys)
@@ -144,14 +155,61 @@ u64 frame_alloc(void)
          frame_report("DBL-ALLOC", head);
       }
       frame_allocmap[idx >> 3] |= (1u << (idx & 7));
+      frame_refs[idx] = 1;
    }
    spin_unlock(&frame_lock);
-   startints();
    restoreflags(flags);
    return head;
 }
 
-/* Return one frame to the pool.  No-op for 0 / reserved / not-ready. */
+/* Acquire another mapping reference. Returns 0 for invalid/free frames or
+   when the bounded reference count would overflow. */
+int frame_retain(u64 phys)
+{
+   u64 idx;
+   DWORD flags;
+   int retained = 0;
+
+   if (!frame_ready || phys == 0 || (phys & 0xFFFULL))
+      return 0;
+   idx = phys >> 12;
+   if (idx >= sizeof(frame_refs))
+      return 0;
+   storeflags(&flags);
+   stopints();
+   spin_lock(&frame_lock);
+   if ((frame_allocmap[idx >> 3] & (1u << (idx & 7)))
+       && frame_refs[idx] != 0 && frame_refs[idx] != 0xFF) {
+      frame_refs[idx]++;
+      retained = 1;
+   } else {
+      frame_report(frame_refs[idx] == 0xFF ? "REF-OVERFLOW" : "RETAIN-FREE",
+                   phys);
+   }
+   spin_unlock(&frame_lock);
+   restoreflags(flags);
+   return retained;
+}
+
+unsigned frame_refcount(u64 phys)
+{
+   u64 idx = phys >> 12;
+   DWORD flags;
+   unsigned refs = 0;
+
+   if (!frame_ready || phys == 0 || (phys & 0xFFFULL)
+       || idx >= sizeof(frame_refs))
+      return 0;
+   storeflags(&flags);
+   stopints();
+   spin_lock(&frame_lock);
+   refs = frame_refs[idx];
+   spin_unlock(&frame_lock);
+   restoreflags(flags);
+   return refs;
+}
+
+/* Drop one frame reference and return it to the pool after the last owner. */
 void frame_release(u64 phys)
 {
    DWORD flags;
@@ -164,17 +222,26 @@ void frame_release(u64 phys)
    spin_lock(&frame_lock);
    {
       u64 idx = phys >> 12;
-      if (!(frame_allocmap[idx >> 3] & (1u << (idx & 7)))) {
+      if (!(frame_allocmap[idx >> 3] & (1u << (idx & 7)))
+          || frame_refs[idx] == 0) {
          if (!frame_dbg) { frame_dbg = 1; }
          frame_report("DBL-FREE", phys);
+         spin_unlock(&frame_lock);
+         restoreflags(flags);
+         return;
       }
-  frame_allocmap[idx >> 3] &= ~(1u << (idx & 7));
+      frame_refs[idx]--;
+      if (frame_refs[idx] != 0) {
+         spin_unlock(&frame_lock);
+         restoreflags(flags);
+         return;
+      }
+      frame_allocmap[idx >> 3] &= ~(1u << (idx & 7));
     }
     *(volatile u64 *)KDIRECT(phys) = frame_head;
     frame_head = phys;
    frame_free++;
    spin_unlock(&frame_lock);
-   startints();
    restoreflags(flags);
 }
 
@@ -189,7 +256,14 @@ static void frame_init(mmap *map, int size)
    frame_total = 0;
    frame_free = 0;
    frame_dbg = 0;
+   memset(frame_refs, 0, sizeof(frame_refs));
    spin_init(&frame_lock);
+   spin_init(&userpd_lock);
+   cow_faults = cow_copies = cow_fastpaths = 0;
+   cow_shootdowns = cow_oom = 0;
+   cow_trace_count = 0;
+   cow_fault_trace_count = 0;
+   cow_fail_next = 0;
   frame_ready = 0;
    if (map == 0 || size <= 0)
         return;
@@ -1693,6 +1767,33 @@ int userpd_unmap_page(u64 *pml4, unsigned long long vaddr)
     return 1;
  }
 
+void *userpd_resolve(u64 *pml4, unsigned long long vaddr)
+{
+   const u64 phys_mask = 0x000FFFFFFFFF000ULL;
+   u64 *pml4v, *pdpt, *pd, *pte;
+   u64 entry;
+
+   if (!userpd_is_private(pml4) || vaddr >= 0x40000000ULL)
+      return 0;
+   pml4v = (u64 *)KDIRECT((u64)(uintptr)pml4 & phys_mask);
+   entry = pml4v[(vaddr >> 39) & 0x1FF];
+   if (!(entry & PG_PRESENT) || (entry & 0x80ULL))
+      return 0;
+   pdpt = (u64 *)KDIRECT(entry & phys_mask);
+   entry = pdpt[(vaddr >> 30) & 0x1FF];
+   if (!(entry & PG_PRESENT) || (entry & 0x80ULL))
+      return 0;
+   pd = (u64 *)KDIRECT(entry & phys_mask);
+   entry = pd[(vaddr >> 21) & 0x1FF];
+   if (!(entry & PG_PRESENT) || (entry & 0x80ULL))
+      return 0;
+   pte = (u64 *)KDIRECT(entry & phys_mask);
+   entry = pte[(vaddr >> 12) & 0x1FF];
+   if (!(entry & PG_PRESENT))
+      return 0;
+   return (void *)((uintptr)KDIRECT(entry & phys_mask) + (vaddr & 0xFFFULL));
+}
+
 /* Allocate a private PML4 mirroring the kernel's hierarchy (startup.S):
    PML4[0]->PDPT ; PDPT[0]->PD0 (private copy) ; PDPT[1..3]->boot_pd1..3.
    The private PD0 is a copy of boot_pd0 (512 x 2MiB identity pages) so the
@@ -1756,6 +1857,302 @@ int userpd_map_region(u64 *pml4, unsigned long long base, unsigned long long siz
       if (!userpd_map_page(pml4, va, attb))
          return 0;
    return 1;
+}
+
+/* Clone private 4KiB leaves in PDPT[0]. Shared 2MiB identity mappings belong
+   to the kernel and are supplied by userpd_create(). */
+u64 *userpd_clone_eager(const u64 *parent)
+{
+   const u64 phys_mask = 0x000FFFFFFFFF000ULL;
+   u64 *child;
+   u64 *parent_pml4, *parent_pdpt, *parent_pd, *parent_pte;
+   int bi, gi;
+
+   if (!userpd_is_private(parent))
+      return 0;
+
+   child = userpd_create();
+   if (!child)
+      return 0;
+
+   parent_pml4 = (u64 *)KDIRECT((u64)(uintptr)parent & phys_mask);
+   if (!(parent_pml4[0] & PG_PRESENT) || (parent_pml4[0] & 0x80ULL))
+      goto fail;
+   parent_pdpt = (u64 *)KDIRECT(parent_pml4[0] & phys_mask);
+   if (!(parent_pdpt[0] & PG_PRESENT) || (parent_pdpt[0] & 0x80ULL))
+      goto fail;
+   parent_pd = (u64 *)KDIRECT(parent_pdpt[0] & phys_mask);
+
+   for (bi = 0; bi < 512; bi++) {
+      u64 pde = parent_pd[bi];
+      if (!(pde & PG_PRESENT) || (pde & 0x80ULL))
+         continue;
+      parent_pte = (u64 *)KDIRECT(pde & phys_mask);
+      for (gi = 0; gi < 512; gi++) {
+         u64 entry = parent_pte[gi];
+         u64 *child_frame;
+         unsigned long long va;
+         unsigned long leaf_flags;
+
+         if (!(entry & PG_PRESENT))
+            continue;
+         va = ((unsigned long long)bi << 21)
+            | ((unsigned long long)gi << 12);
+         leaf_flags = (unsigned long)(entry & ~phys_mask);
+         child_frame = userpd_map_page(child, va,
+                                       leaf_flags & ~PG_PRESENT);
+         if (!child_frame)
+            goto fail;
+         memcpy(KDIRECT((u64)(uintptr)child_frame),
+                KDIRECT(entry & phys_mask), 0x1000);
+      }
+   }
+   return child;
+
+fail:
+   userpd_free(child);
+   return 0;
+}
+
+/* Share writable user leaves read-only between parent and child. Parent PTEs
+   are changed only after every child table and frame reference is secured. */
+u64 *userpd_clone_cow(u64 *parent, unsigned long long private_vaddr)
+{
+   const u64 phys_mask = 0x000FFFFFFFFF000ULL;
+   const u64 cow_new = 0x800ULL;
+   u64 *child, *parent_pml4, *parent_pdpt, *parent_pd;
+   u64 *child_pml4, *child_pdpt, *child_pd;
+   DWORD flags;
+   int bi, gi;
+
+   if (!userpd_is_private(parent))
+      return 0;
+   if (cow_trace_count < 4)
+      printf("COW_TRACE clone-begin cr3=%llx\n",
+             (unsigned long long)(uintptr)parent);
+   child = userpd_create();
+   if (!child)
+      return 0;
+
+   storeflags(&flags);
+   stopints();
+   spin_lock(&userpd_lock);
+   parent_pml4 = (u64 *)KDIRECT((u64)(uintptr)parent & phys_mask);
+   child_pml4 = (u64 *)KDIRECT((u64)(uintptr)child & phys_mask);
+   if (!(parent_pml4[0] & PG_PRESENT) || !(child_pml4[0] & PG_PRESENT))
+      goto fail;
+   parent_pdpt = (u64 *)KDIRECT(parent_pml4[0] & phys_mask);
+   child_pdpt = (u64 *)KDIRECT(child_pml4[0] & phys_mask);
+   if (!(parent_pdpt[0] & PG_PRESENT) || !(child_pdpt[0] & PG_PRESENT))
+      goto fail;
+   parent_pd = (u64 *)KDIRECT(parent_pdpt[0] & phys_mask);
+   child_pd = (u64 *)KDIRECT(child_pdpt[0] & phys_mask);
+
+   for (bi = 0; bi < 512; bi++) {
+      u64 pde = parent_pd[bi];
+      u64 *parent_pte, *child_pte, *table;
+      if (!(pde & PG_PRESENT) || (pde & PG_PAGESIZE))
+         continue;
+      table = upop();
+      if (!table)
+         goto fail;
+      child_pte = (u64 *)KDIRECT((u64)(uintptr)table);
+      memset(child_pte, 0, 0x1000);
+      child_pd[bi] = (u64)(uintptr)table | (pde & ~phys_mask);
+      parent_pte = (u64 *)KDIRECT(pde & phys_mask);
+      for (gi = 0; gi < 512; gi++) {
+         u64 entry = parent_pte[gi];
+         unsigned long long va;
+         if (!(entry & PG_PRESENT))
+            continue;
+         va = ((unsigned long long)bi << 21)
+            | ((unsigned long long)gi << 12);
+          if ((va & ~0xFFFULL) == (private_vaddr & ~0xFFFULL)
+             || (va >= MEM_USER_STACK - 0x100000ULL
+                && va < MEM_USER_STACK)
+             || (va >= MEM_SYSCALL_STACK
+                && va < MEM_SYSCALL_STACK + 0x80000ULL)) {
+            u64 private_phys = frame_alloc();
+            if (!private_phys)
+               goto fail;
+            memcpy(KDIRECT(private_phys), KDIRECT(entry & phys_mask), 0x1000);
+            child_pte[gi] = private_phys | (entry & ~phys_mask);
+            continue;
+         }
+         if (!frame_retain(entry & phys_mask))
+            goto fail;
+         child_pte[gi] = entry;
+      }
+   }
+
+   if (cow_trace_count < 4)
+      printf("COW_TRACE clone-shared child=%llx\n",
+             (unsigned long long)(uintptr)child);
+
+   for (bi = 0; bi < 512; bi++) {
+      u64 pde = child_pd[bi];
+      u64 *parent_pte, *child_pte;
+      if (!(pde & PG_PRESENT) || (pde & PG_PAGESIZE))
+         continue;
+      parent_pte = (u64 *)KDIRECT(parent_pd[bi] & phys_mask);
+      child_pte = (u64 *)KDIRECT(pde & phys_mask);
+      for (gi = 0; gi < 512; gi++) {
+         u64 entry = child_pte[gi];
+          unsigned long long va = ((unsigned long long)bi << 21)
+                           | ((unsigned long long)gi << 12);
+          if ((va & ~0xFFFULL) == (private_vaddr & ~0xFFFULL)
+             || (va >= MEM_USER_STACK - 0x100000ULL
+                && va < MEM_USER_STACK)
+             || (va >= MEM_SYSCALL_STACK
+                && va < MEM_SYSCALL_STACK + 0x80000ULL))
+            continue;
+         if ((entry & (PG_PRESENT | PG_WR)) == (PG_PRESENT | PG_WR)) {
+            entry = (entry & ~PG_WR) | PG_COPYWRITE;
+            parent_pte[gi] = entry;
+            child_pte[gi] = entry | cow_new;
+         }
+      }
+   }
+   if (cow_trace_count < 4)
+      printf("COW_TRACE clone-protected\n");
+   if (!smp_tlb_shootdown((u64)(uintptr)parent)) {
+      for (bi = 0; bi < 512; bi++) {
+         u64 pde = child_pd[bi];
+         u64 *parent_pte, *child_pte;
+         if (!(pde & PG_PRESENT) || (pde & PG_PAGESIZE))
+            continue;
+         parent_pte = (u64 *)KDIRECT(parent_pd[bi] & phys_mask);
+         child_pte = (u64 *)KDIRECT(pde & phys_mask);
+         for (gi = 0; gi < 512; gi++) {
+            if (child_pte[gi] & cow_new)
+               parent_pte[gi] = (parent_pte[gi] | PG_WR) & ~PG_COPYWRITE;
+         }
+      }
+      smp_tlb_shootdown((u64)(uintptr)parent);
+      goto fail;
+   }
+   cow_shootdowns++;
+   for (bi = 0; bi < 512; bi++) {
+      u64 pde = child_pd[bi];
+      u64 *child_pte;
+      if (!(pde & PG_PRESENT) || (pde & PG_PAGESIZE))
+         continue;
+      child_pte = (u64 *)KDIRECT(pde & phys_mask);
+      for (gi = 0; gi < 512; gi++)
+         child_pte[gi] &= ~cow_new;
+   }
+   spin_unlock(&userpd_lock);
+   restoreflags(flags);
+   if (cow_trace_count < 4) {
+      printf("COW_TRACE clone-done\n");
+      cow_trace_count++;
+   }
+   return child;
+
+fail:
+   spin_unlock(&userpd_lock);
+   restoreflags(flags);
+   userpd_free(child);
+   return 0;
+}
+
+/* Resolve a present write-protection fault on a software-COW user leaf.
+   Returns 1 when handled, 0 when the fault is not COW, and -1 on OOM. */
+int userpd_handle_cow(u64 *pml4, unsigned long long vaddr, unsigned fault_info)
+{
+   const u64 phys_mask = 0x000FFFFFFFFF000ULL;
+   u64 *pml4v, *pdpt, *pd, *pte, entry, oldphys, newphys;
+   DWORD flags;
+   unsigned refs;
+   int result = 0;
+   int trace_action = 0;
+
+   if (!userpd_is_private(pml4) || vaddr >= 0x40000000ULL
+       || (fault_info & 3) != 3)
+      return 0;
+   storeflags(&flags);
+   stopints();
+   spin_lock(&userpd_lock);
+   pml4v = (u64 *)KDIRECT((u64)(uintptr)pml4 & phys_mask);
+   entry = pml4v[(vaddr >> 39) & 0x1FF];
+   if (!(entry & PG_PRESENT) || (entry & PG_PAGESIZE))
+      goto out;
+   pdpt = (u64 *)KDIRECT(entry & phys_mask);
+   entry = pdpt[(vaddr >> 30) & 0x1FF];
+   if (!(entry & PG_PRESENT) || (entry & PG_PAGESIZE))
+      goto out;
+   pd = (u64 *)KDIRECT(entry & phys_mask);
+   entry = pd[(vaddr >> 21) & 0x1FF];
+   if (!(entry & PG_PRESENT) || (entry & PG_PAGESIZE))
+      goto out;
+   pte = (u64 *)KDIRECT(entry & phys_mask);
+   pte += (vaddr >> 12) & 0x1FF;
+   entry = *pte;
+   if (!(entry & PG_PRESENT) || !(entry & PG_COPYWRITE) || (entry & PG_WR))
+      goto out;
+
+   cow_faults++;
+   oldphys = entry & phys_mask;
+   refs = frame_refcount(oldphys);
+   if (refs == 1) {
+      *pte = (entry | PG_WR) & ~PG_COPYWRITE;
+      cow_fastpaths++;
+      trace_action = 1;
+      result = 1;
+      goto flush;
+   }
+   if (refs < 2)
+      goto out;
+   if (__sync_bool_compare_and_swap(&cow_fail_next,1,0)) {
+      cow_oom++;
+      serial_puts("COW_FAULT oom-injected\n");
+      result = -1;
+      goto out;
+   }
+   newphys = frame_alloc();
+   if (!newphys) {
+      cow_oom++;
+      result = -1;
+      goto out;
+   }
+   memcpy(KDIRECT(newphys), KDIRECT(oldphys), 0x1000);
+   *pte = newphys | ((entry | PG_WR) & ~(phys_mask | PG_COPYWRITE));
+   cow_copies++;
+   trace_action = 2;
+   result = 1;
+
+flush:
+   if (!smp_tlb_shootdown((u64)(uintptr)pml4))
+      result = -1;
+   else {
+      if (trace_action == 2)
+         frame_release(oldphys);
+      cow_shootdowns++;
+      if (cow_fault_trace_count < 16) {
+         serial_puts(trace_action == 1 ? "COW_FAULT fast\n"
+                                      : "COW_FAULT copy\n");
+         cow_fault_trace_count++;
+      }
+   }
+out:
+   spin_unlock(&userpd_lock);
+   restoreflags(flags);
+   return result;
+}
+
+void userpd_cow_fail_next(void)
+{
+   cow_fail_next = 1;
+}
+
+void userpd_cow_stats(u64 *faults, u64 *copies, u64 *fastpaths,
+                      u64 *shootdowns, u64 *oom)
+{
+   if (faults) *faults = cow_faults;
+   if (copies) *copies = cow_copies;
+   if (fastpaths) *fastpaths = cow_fastpaths;
+   if (shootdowns) *shootdowns = cow_shootdowns;
+   if (oom) *oom = cow_oom;
 }
 
 #ifdef __x86_64__

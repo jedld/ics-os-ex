@@ -6,6 +6,7 @@
 
 #define MAX_CPUS 8
 #define IPI_RESCHEDULE 0xFC
+#define IPI_TLB_SHOOTDOWN 0xFB
 
 struct _PCB386;
 
@@ -29,6 +30,8 @@ int  smp_cpu_id(void);
 cpu_local *smp_this_cpu(void);
 void smp_cpu_idle(void);
 void smp_reschedule_others(void);
+int smp_tlb_shootdown(u64 cr3);
+void smp_tlb_shootdown_ipi(void);
 void smp_ap_enable_timer(void);
 void smp_enable_scheduling(void);
 void smp_start_ap_work_smoke(void);

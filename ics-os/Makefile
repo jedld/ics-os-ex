@@ -6,6 +6,10 @@
 QEMU_I386=qemu-system-i386
 QEMU_X64=qemu-system-x86_64
 QEMU_MEM=128M
+SMP_CPUS?=4
+SMP_MATRIX?=1 2 4 8
+FORK_CPUS?=2
+FORK_MATRIX?=1 2 4 8
 QEMU_NET=-net nic,model=rtl8139 -net none
 # QEMU can load the 32-bit multiboot kernel the same way GRUB does.
 QEMU_KERNEL=-kernel kernel/Kernel64.bin
@@ -13,7 +17,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-boot test-integration test-posixio test-spawn test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit
+.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit
 
 test-io-unit:
 	@mkdir -p /tmp/icsos-tests
@@ -74,6 +78,8 @@ apps:
 	-$(MAKE) -C contrib/posixio install
 	-$(MAKE) -C contrib/spawntest
 	-$(MAKE) -C contrib/spawntest install
+	-$(MAKE) -C contrib/forktest
+	-$(MAKE) -C contrib/forktest install
 	-$(MAKE) -C contrib/ext4test
 	-$(MAKE) -C contrib/ext4test install
 	-$(MAKE) -C contrib/sh
@@ -173,17 +179,31 @@ test-smp: vmdex
 	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
 		> /tmp/icsos-smp-iso/boot/grub/grub.cfg
 	@grub-mkrescue -o /tmp/icsos-smp.iso /tmp/icsos-smp-iso >/dev/null 2>&1
-	@echo "Running SMP dual-core smoke test..."
-	@-timeout 45 $(QEMU_X64) -smp 2 -nographic -no-reboot -m $(QEMU_MEM) \
-		-cdrom /tmp/icsos-smp.iso -boot d < /dev/null > /tmp/icsos-smp.log 2>&1
-	@grep -q "SMP: .*CPUs online" /tmp/icsos-smp.log
-	@grep -q "SMP: CPU 1" /tmp/icsos-smp.log
-	@grep -aq "Root mount \[OK\]" /tmp/icsos-smp.log
-	@grep -aq "AP scheduling enabled" /tmp/icsos-smp.log
-	@grep -aqE "Running console thread|dex32_startup" /tmp/icsos-smp.log
-	@grep -aq "AP work-steal OK" /tmp/icsos-smp.log
-	@! grep -aq "General Protection fault" /tmp/icsos-smp.log
-	@echo "test-smp PASS"
+	@test $(SMP_CPUS) -ge 1 && test $(SMP_CPUS) -le 8
+	@echo "Running SMP $(SMP_CPUS)-CPU smoke test..."
+	@status=0; timeout 60 $(QEMU_X64) -smp $(SMP_CPUS) -nographic -no-reboot -m $(QEMU_MEM) \
+		-cdrom /tmp/icsos-smp.iso -boot d < /dev/null > /tmp/icsos-smp-$(SMP_CPUS).log 2>&1 || status=$$?; \
+		if test $$status -ne 124; then \
+			cat /tmp/icsos-smp-$(SMP_CPUS).log; exit $$status; \
+		fi
+	@tr -d '\r' < /tmp/icsos-smp-$(SMP_CPUS).log | \
+		grep -aEq '^SMP_RESULT online=$(SMP_CPUS)$$'
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-smp-$(SMP_CPUS).log
+	@grep -aqE "Running console thread|dex32_startup" /tmp/icsos-smp-$(SMP_CPUS).log
+	@if test $(SMP_CPUS) -gt 1; then \
+		expected_mask=$$(printf '%x' $$(( (1 << $(SMP_CPUS)) - 2 ))); \
+		grep -aq "AP scheduling enabled" /tmp/icsos-smp-$(SMP_CPUS).log && \
+		tr -d '\r' < /tmp/icsos-smp-$(SMP_CPUS).log | \
+		grep -aEq "^SMP_RESULT work-steal=ok cpus=$(SMP_CPUS) mask=$${expected_mask}$$"; \
+	fi
+	@! grep -aqE "General Protection fault|SMP: AP work-steal (TIMEOUT|CREATE FAIL)" /tmp/icsos-smp-$(SMP_CPUS).log
+	@echo "test-smp SMP_CPUS=$(SMP_CPUS) PASS"
+
+test-smp-matrix: vmdex
+	@set -e; for cpus in $(SMP_MATRIX); do \
+		$(MAKE) --no-print-directory test-smp SMP_CPUS=$$cpus; \
+	done
+	@echo "test-smp-matrix ($(SMP_MATRIX)) PASS"
 
 # Boot, compile min.c/hello.c with in-OS TinyCC (ELF64), run them, reboot.
 test-selfhost: apps vmdex
@@ -443,6 +463,54 @@ test-spawn: kernel/Kernel64.bin apps/spawn.exe apps/hello.exe
 	@! grep -aq "FD_INHERIT_FAIL" /tmp/icsos-spawn.log
 	@! grep -aq "WORK_DISK_FAIL" /tmp/icsos-spawn.log
 	@echo "test-spawn PASS"
+
+apps/forktest.exe: contrib/forktest/forktest.c contrib/forktest/Makefile
+	$(MAKE) -C contrib/forktest install
+
+# COW fork: return values, shared-page writes, fd inheritance, exit/wait.
+test-fork: kernel/Kernel64.bin apps/forktest.exe
+	@$(MAKE) -C kernel all
+	@echo "Building Multiboot2 ISO for fork test..."
+	@rm -rf /tmp/icsos-fork-iso
+	@mkdir -p /tmp/icsos-fork-iso/boot/grub /tmp/icsos-fork-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-fork-iso/vmdex
+	@cp apps/forktest.exe /tmp/icsos-fork-iso/apps/forktest.exe
+	@printf '%s\n' 'forktest' 'forkoomtest' 'reboot' > /tmp/icsos-fork-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-fork-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-fork.iso /tmp/icsos-fork-iso >/dev/null 2>&1
+	@truncate -s 64M /tmp/icsos-fork-work.img
+	@mkfs.vfat -F 16 /tmp/icsos-fork-work.img >/dev/null
+	@test $(FORK_CPUS) -ge 1 && test $(FORK_CPUS) -le 8
+	@echo "Running COW fork test (TCG, $(FORK_CPUS) vCPUs)..."
+	@status=0; timeout 70 $(QEMU_X64) -smp $(FORK_CPUS) -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-fork.iso -boot d \
+		-drive file=/tmp/icsos-fork-work.img,if=none,id=vd0,format=raw \
+		-device virtio-blk-pci,drive=vd0,disable-legacy=on \
+		< /dev/null > /tmp/icsos-fork.log 2>&1 || status=$$?; \
+		if test $$status -ne 0; then cat /tmp/icsos-fork.log; exit $$status; fi
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-fork.log
+	@grep -aq "work: mounted" /tmp/icsos-fork.log
+	@grep -aq "FORK_CHILD_PASS" /tmp/icsos-fork.log
+	@grep -aq "FORK_PARENT_PASS" /tmp/icsos-fork.log
+	@grep -aq "FORK_COW_PASS" /tmp/icsos-fork.log
+	@grep -aq "FORK_TEXT_FAULT_PASS" /tmp/icsos-fork.log
+	@grep -aq "FORK_COW_OOM_PASS" /tmp/icsos-fork.log
+	@grep -aq "COW_FAULT copy" /tmp/icsos-fork.log
+	@grep -aq "COW_FAULT fast" /tmp/icsos-fork.log
+	@grep -aq "COW_FAULT oom-injected" /tmp/icsos-fork.log
+	@grep -aq "FORK_STRESS_PASS count=10" /tmp/icsos-fork.log
+	@grep -aq "FORK_PASS" /tmp/icsos-fork.log
+	@! grep -aq "FORK_FAIL\|FORK_RUN_FAIL" /tmp/icsos-fork.log
+	@! grep -aq "General Protection Fault\|DOUBLE FAULT" /tmp/icsos-fork.log
+	@test $$(grep -ac "Page fault (" /tmp/icsos-fork.log) -eq 1
+	@echo "test-fork FORK_CPUS=$(FORK_CPUS) PASS"
+
+test-fork-matrix: kernel/Kernel64.bin apps/forktest.exe
+	@set -e; for cpus in $(FORK_MATRIX); do \
+		$(MAKE) --no-print-directory test-fork FORK_CPUS=$$cpus; \
+	done
+	@echo "test-fork-matrix ($(FORK_MATRIX)) PASS"
 
 apps/ext4test.exe:
 	$(MAKE) -C contrib/ext4test install

@@ -51,6 +51,134 @@ $sudo make install
 $qemu-system-i386 -fda ics-os-floppy.img -boot a
 ```
 
+## 3.1 x86-64 self-host validation
+
+The supported kernel compiler is GCC 4.7.4 with GNU binutils. From the
+`ics-os/` directory, run `make test-kbuild`; ICS-OS runs host-seeded GCC,
+cc1, GAS, and GNU ld executables in-OS, then kexecs the generated kernel. A
+successful run reports `GKBUILD_TEST_PASS` and `KEXEC_BOOT_OK`. This does not
+certify full self-hosting until GCC is rebuilt in-OS, the rebuilt compiler
+builds the kernel, and the resulting kernel passes capability regressions.
+
+TinyCC is an optional bootstrap compiler. `make test-selfhost` compiles small
+programs, `make test-tccboot` rebuilds TinyCC, and `make test-tcc-kbuild` is an
+experimental TinyCC kernel build. Failure of the TinyCC kernel experiment does
+not invalidate the supported GCC self-host path.
+
+## 3.2 VFS, devices, and asynchronous I/O
+
+The first P0 slice now provides atomic process-context critical sections,
+IRQ-safe virtio queue locking, generation-safe cache writeback, serialized VFS
+lifetime transitions, per-volume FAT metadata locking, and drained io_uring
+close. This is not yet the complete scalable production contract. Before changing
+VFS, filesystem, device-manager, block-cache, virtio-blk, scheduler-wait, or
+io_uring code, read `ics-os/docs/io-subsystem-modernization-plan.md`. It records
+the verified lifetime and synchronization defects, target object model, lock
+order, phased migration, and mandatory stress/fault tests.
+
+In particular, do not use `sync_sharedvar` in IRQ context, do not
+release a timed-out DMA descriptor until the device has completed it or the
+queue has been reset, and do not publish shared ring indices without the
+documented acquire/release ordering. Use `devmgr_getdevice_ref()` and
+`devmgr_putdevice()` around operation-table callbacks; raw
+`devmgr_getdevice()` is compatibility-only. Mounted VFS roots retain both
+device references through unmount. IRQ-to-process notification must use
+`completion_t`, not a raw `PCB386 *`; virtio reset retires every outstanding
+chain before queue reuse. Completion waits use scheduler-backed hashed event
+queues. Successful asynchronous read copyback must execute under the submitting
+address space; process teardown retires owner requests before freeing page
+tables. Do not move user-buffer callback drain to a generic worker until those
+pages are pinned and kernel-mapped. Run `make test-io-unit`, `make
+test-posixio`, and `make test-virtio`; the guest tests use two virtual CPUs and
+remain focused regression/functional tests rather than exhaustive stress.
+
+POSIX fd lookup must hold the process `fd_lock` until it has acquired a typed
+reference on the VFS, block, or io_uring open description. `sys_close()` first
+detaches the slot under that lock and then drops descriptor ownership; final
+release waits for transient operations and async callbacks. Process creation
+uses `posix_fd_clone()` and must never shallow-copy `fds[]` or inherit
+`FD_RESERVED`. Shared file offsets and buffered VFS state are serialized per
+open description. Direct legacy `FILE *` and POSIX descriptor references are
+separate; SDK `fdopen()` tracks its originating descriptor and `fclose()` closes
+that descriptor after flushing. fdopen-backed stdio operations route through
+the POSIX descriptor syscalls, not raw VFS calls. Positioned block operations,
+async submissions, and flush submission share the block description's I/O gate
+so virtqueue submission order is preserved. `make test-spawn` verifies that a
+child can use an inherited VFS descriptor after the parent closes its copy.
+
+On x86-64, syscall `0x90` implements synchronous COW `fork()` directly from the
+saved interrupt frame; do not route it through `pdispatch`. Use
+`userpd_clone_cow()`, build a zeroed PCB, acquire resources transactionally,
+and enqueue only after the child is complete. Ordinary writable ELF mappings
+are shared read-only with frame references; ELF text stays read-only. The
+active user and syscall stacks are eagerly copied because user code currently
+runs at CPL0. COW faults serialize page-table changes, use a one-owner writable
+fast path, and synchronously invalidate matching CR3s through IPI vector
+`0xFB`. Fork rejects multithreaded callers, shared page directories, in-flight
+io_uring, and parents whose retained child-status capacity is exhausted.
+`vfork()` is not implemented. Run `make test-fork-matrix` for the
+1/2/4/8-vCPU gate.
+
+SMP supports up to eight contiguous legacy xAPIC CPUs. `make test-smp` defaults
+to four CPUs, and `make test-smp-matrix` validates 1/2/4/8. AP startup state is
+published only after per-CPU and idle-task initialization, and LAPIC ICR writes
+must wait for delivery-idle. Use `createkthread_on_cpu()` when affinity is known:
+setting affinity after ready-queue insertion races AP scheduling. Per-CPU arrays
+must use `MAX_CPUS`, never a literal topology size. Context-load/voluntary guards
+and FPU save/restore scratch storage must remain per CPU. The aggregate AP work mask is
+the scheduler test oracle. COM1 output is protected by an IRQ-safe SMP lock;
+machine-consumed tests must emit one atomic `SMP_RESULT` record with
+`serial_puts()` instead of parsing concurrent `printf()` prose. Sparse APIC IDs,
+MADT/x2APIC discovery, NUMA, and CPU hotplug are not implemented and must not be
+claimed.
+
+## 3.3 Device-driver architecture and lifecycle
+
+Before adding a physical driver, changing PCI/USB discovery, introducing driver
+modules, or implementing runtime hotplug/reset, read
+`ics-os/docs/device-driver-subsystem-architecture.md`. It defines the target typed
+device/bus/driver/class object model, managed resources, no-reboot lifecycle, IRQ
+and DMA/IOMMU APIs, asynchronous queues, fault recovery, user-mode isolation,
+power management, observability, class frameworks, staged rollout, and required
+qualification tests.
+
+New drivers must not register raw copied `devmgr_generic` operation tables. During
+migration they should bind through the typed core or its explicit legacy adapter.
+Device removal must first reject new operations, then drain/cancel requests,
+synchronize IRQ/work/timer callbacks, stop and revoke DMA, release managed resources,
+and wait for object/module references. Never cast a CPU pointer to a DMA address,
+free a timed-out descriptor still owned by hardware, invoke driver callbacks under
+a global registry lock, or force-unload active in-kernel driver text.
+
+The first implementation target is a virtual bus/device and sample async driver,
+followed by the IRQ and DMA foundations and a complete virtio-blk lifecycle. Do not
+attempt all hardware classes in parallel before those correctness gates pass.
+
+## 3.4 Testing and quality assurance
+
+Before adding test targets, changing assertion behavior, introducing CI, or making
+production-readiness claims, read
+`ics-os/docs/testing-and-qa-modernization-plan.md`. The current suite has strong
+Multiboot2/QEMU vertical coverage of boot, SMP, execution, I/O, build tools, GCC,
+and kexec, but it is primarily a serial-marker functional suite rather than a
+complete unit and QA framework.
+
+New tests should use the lowest practical layer: host-native units for pure logic,
+in-kernel KTAP suites for target-dependent components, guest TAP selftests for the
+public SDK/syscall ABI, and supervised QEMU or physical-hardware tests for system
+behavior. Every test needs a stable ID, explicit timeout and capability metadata,
+structured PASS/FAIL/SKIP results, isolated artifacts, and deterministic replay
+data for randomized or fault-injected runs. A launch command without assertions is
+not an automated test.
+
+Do not silently ignore required build or emulator failures. Do not infer success
+from one marker without also proving plan completion, an allowed VM termination,
+and absence of panic/crash events. Concurrency-sensitive VFS, driver, IRQ, DMA,
+and io_uring changes require multi-vCPU contention plus teardown, timeout, reset,
+and injected-failure cases. GCC remains the canonical supported compiler; newer
+GCC/Clang sanitizer and analysis builds are separate QA configurations and do not
+replace self-host certification.
+
 # 4. Source Code Directory Structure
 Top level directories.
 
@@ -276,3 +404,13 @@ The task switcher calls the `dex_init()` function which is essentially the first
   1. Run foreground manager thread
   1. Create a new instance of console
   1. Start the process dispatcher
+
+# 8. User virtual memory (x86-64)
+
+User processes have a private PML4.  Within the first GiB of VA:
+
+- **sbrk / malloc** grow up from `0x0A000000` (`MEM_USER_HEAP`) toward `mmap_brk`.
+- **Anonymous mmap** (`int 0x30` function `0xB6`) grows down from `MEM_USER_HEAP_LIMIT` (`0x3FD00000`).  `munmap` is `0xB7` and unmaps 4KiB private frames.
+- The two regions must not meet.  This keeps GCC's zone collector pages (mmap) out of the malloc arena so GGC's 4KiB page-table lookup cannot collide with large `xmalloc` objects.
+
+File-backed `mmap` remains SDK malloc-backed until a kernel file map exists.

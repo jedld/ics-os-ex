@@ -46,6 +46,7 @@ extern PCB386 *sched_gethead(void);
 #define ENOEXEC 8
 #define EBADF   9
 #define ECHILD  10
+#define EAGAIN  11
 #define ENOMEM  12
 #define EINVAL  22
 #define EMFILE  24
@@ -1117,13 +1118,13 @@ static int uring_try_vblk(ics_uring *r, io_uring_sqe *sqe)
    return 0;
 }
 
-static int uring_inherit(ics_uring *r)
+static int uring_inherit(ics_uring *r, int for_fork)
 {
    int ok=0;
    if (!r)
       return 0;
    spin_lock(&r->lock);
-   if (!r->closing && r->fd_refs) {
+   if (!r->closing && r->fd_refs && (!for_fork || !r->inflight)) {
       r->fd_refs++;
       ok=1;
    }
@@ -1131,9 +1132,10 @@ static int uring_inherit(ics_uring *r)
    return ok;
 }
 
-int posix_fd_clone(struct _PCB386 *dst, struct _PCB386 *src)
+static int posix_fd_clone_mode(struct _PCB386 *dst, struct _PCB386 *src,
+                               int for_fork)
 {
-   int fd,type;
+   int fd,type,result=0;
    void *ptr;
    if (!dst || !src)
       return -EINVAL;
@@ -1143,17 +1145,62 @@ int posix_fd_clone(struct _PCB386 *dst, struct _PCB386 *src)
       ptr=src->fds[fd].ptr;
       if (type==FD_RESERVED)
          continue;
-      if (type==FD_VFS && !vfs_file_inherit((file_PCB *)ptr))
-         continue;
-      if (type==FD_BLK && !fd_blk_inherit((fd_blk_t *)ptr))
-         continue;
-      if (type==FD_URING && !uring_inherit((ics_uring *)ptr))
-         continue;
+      if (type==FD_VFS && !vfs_file_inherit((file_PCB *)ptr)) {
+         result=-EAGAIN;
+         break;
+      }
+      if (type==FD_BLK && !fd_blk_inherit((fd_blk_t *)ptr)) {
+         result=-EAGAIN;
+         break;
+      }
+      if (type==FD_URING && !uring_inherit((ics_uring *)ptr,for_fork)) {
+         result=-EAGAIN;
+         break;
+      }
       dst->fds[fd].type=type;
       dst->fds[fd].ptr=ptr;
    }
    spin_unlock(&src->fd_lock);
-   return 0;
+   if (result)
+      posix_fd_close_all(dst);
+   return result;
+}
+
+int posix_fd_fork_ready(struct _PCB386 *src)
+{
+   int fd,result=0;
+
+   if (!src)
+      return -EINVAL;
+   spin_lock(&src->fd_lock);
+   for (fd=0;fd<FD_MAX;fd++) {
+      ics_uring *ring;
+      if (src->fds[fd].type!=FD_URING)
+         continue;
+      ring=(ics_uring *)src->fds[fd].ptr;
+      if (!ring) {
+         result=-EAGAIN;
+         break;
+      }
+      spin_lock(&ring->lock);
+      if (ring->closing || ring->inflight)
+         result=-EAGAIN;
+      spin_unlock(&ring->lock);
+      if (result)
+         break;
+   }
+   spin_unlock(&src->fd_lock);
+   return result;
+}
+
+int posix_fd_clone(struct _PCB386 *dst, struct _PCB386 *src)
+{
+   return posix_fd_clone_mode(dst,src,0);
+}
+
+int posix_fd_clone_fork(struct _PCB386 *dst, struct _PCB386 *src)
+{
+   return posix_fd_clone_mode(dst,src,1);
 }
 
 void posix_fd_close_all(struct _PCB386 *process)
@@ -1165,7 +1212,7 @@ void posix_fd_close_all(struct _PCB386 *process)
    /* Descriptor objects may be shared with another process, but pending DMA
       copyback is owned by this address space and must never outlive it. */
    virtio_blk_retire_owner((u64)(uintptr)process->pagedirloc);
-   for (fd=3;fd<FD_MAX;fd++) {
+   for (fd=0;fd<FD_MAX;fd++) {
       spin_lock(&process->fd_lock);
       type=process->fds[fd].type;
       ptr=process->fds[fd].ptr;
@@ -1398,7 +1445,8 @@ long sys_waitpid(int pid, int *status, int options)
          return -EINVAL;
       if (pid > 0) {
          PCB386 *p = ps_findprocess((DWORD)pid);
-         if (p == (PCB386 *)-1) {
+         if (p == (PCB386 *)-1 || p->owner != me->processid
+             || (p->status & PS_ATTB_THREAD)) {
             if (options & WNOHANG)
                return -ECHILD;
             return -ECHILD;

@@ -169,13 +169,21 @@ functional test is **in-OS** (the `test-bintools` target, now green):
 `as mini.s -o mini.o`, `ar r test.a mini.o`, `ld mini.o -o mini.exe` (default
 script), then exec `mini.exe` and check its output on serial.
 
-## Why TinyCC-kbuild is deferred
+## GCC is the supported kernel self-host compiler
 
-`test-kbuild` / `test-fullhost` asked in-OS TinyCC to compile the kernel.
-That is the wrong compiler for `kernel32.c`. Keep TinyCC for:
+> **Certification status:** `test-kbuild` currently starts from a host-built
+> `cc1.exe`, GCC driver, GAS, and GNU ld. It proves those tools can run inside
+> ICS-OS, generate a kernel, and boot it, but it does **not** yet prove compiler
+> closure or post-kexec feature parity. Do not describe ICS-OS as fully
+> self-host capable until an in-OS-built GCC rebuilds the kernel and the
+> generated kernel passes the capability regression gate.
+
+`test-kbuild` invokes the in-OS GCC kernel build. The older TinyCC kernel path
+is retained only as `test-tcc-kbuild` / `test-tcc-fullhost`; it is not part of
+the supported self-host completion criteria. Keep TinyCC for:
 
 - `test-selfhost` / `test-tccboot` (bootstrap C)
-- later: compiling GNU make, then a C-only GCC 4.7.4
+- compiling GNU make and bootstrapping the C-only GCC 4.7.4 toolchain
 
 ## POSIX gaps (this round)
 
@@ -196,7 +204,7 @@ Historic DEX `user_execp` always **waits** (spawn+join). Console and
 | `wait` | SDK `int wait(int*)` → `waitpid(-1, status, 0)`; needed by GNU make's blocking job path (legacy DEX `0xC` spin-wait never yielded to the child) |
 | `posix_spawn` | DEX syscall `0xB2` (`sys_spawn`): load ELF, return child pid, no wait |
 | `execv` / `execvp` | DEX syscall `0xB3` (`sys_execve`): same-pid image replace (steal pid, switch) |
-| `fork` / `forkprocess` | Still 32-bit paging (`disablepaging` / `dex32_copy_pg`). Unsafe on x86_64. Do not use. |
+| `fork` | x86-64 COW fork is available for single-threaded private-PML4 processes without in-flight io_uring; active CPL0 user/syscall stacks are eagerly copied. GCC still uses `posix_spawn`; `vfork` is unavailable. |
 | `user_execp` (`0x5B`) | Unchanged: still waits |
 
 The ISO 9660 root is 8.3 unless Joliet is selected; Rock Ridge `NNM`
@@ -244,7 +252,11 @@ FS issue.
       cc1/as/ld), so a single `gcc x.c -o x` compiles, assembles, links and
       the driver execs the result entirely on ICS-OS (`GCC_DRIVER_OK` +
       `GCC_DRV_OK` + `GCC_DRV_RUN_OK`).
-3. That GCC compiles ICS-OS; kexec as today.
+3. **host-seeded in-OS kernel build** — **done**: `test-kbuild` uses the in-OS GCC driver,
+   cc1, GAS, and GNU ld to compile/link ICS-OS, then kexecs the resulting
+   kernel (`GKBUILD_TEST_PASS` + `KEXEC_BOOT_OK`).
+4. **compiler closure** — **pending**: rebuild GCC/cc1 inside ICS-OS, rebuild
+  the kernel with that compiler, and run post-kexec capability regressions.
 
 ## Tests
 
@@ -256,6 +268,8 @@ make test-bintools       # AS_PASS + AR_PASS + LD_PASS + BINTOOLS_PASS
 make test-cc1            # CC1_TEST_PASS (in-OS cc1: C -> assembly)
 make test-gcc            # GCC_E2E_OK + GCC_E2E_RUN_OK (cc1 -> as -> ld -> exec)
 make test-gccdriver      # GCC_DRIVER_OK (in-OS gcc driver: x.c -> x -> exec)
+make test-kbuild         # supported GCC kernel self-host + kexec
+make test-tcc-kbuild     # optional TinyCC kernel experiment
 make test-spawn          # SPAWN_PASS + WORK_DISK_PASS
 make test-posixio        # still green (unformatted vblk → no /work)
 make test-virtio

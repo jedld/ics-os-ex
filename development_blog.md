@@ -1,5 +1,667 @@
 # Development blog
 
+## 2026-09-02 (Manila, UTC+8)
+
+### Current — intermittent post-fork return corruption
+
+**Current problem:** two-vCPU fork testing intermittently corrupted either the
+child's copied syscall return or the console's return after the fork test had
+exited. The latter jumped to `ps_dequeue` at `0x12c1f1` while retaining the
+departed fork test's CR3, directly implicating a partial context transition.
+
+**Activity completed:** traced fork return, wait/reap, self-exit, scheduler
+claims, and per-CPU current state. The decisive failure freed the fork test's
+PML4 and then faulted in `virtio_blk_retire_owner()` under that same stale CR3.
+`ps_switchto()` published the destination as `current_process` while RSP and
+CR3 still belonged to the previous process; a timer in that handoff could save
+the mixed live state into the destination context. Context save/load also had
+narrow preemption windows. The handoff now disables interrupts before current
+publication, and the assembly paths disable them before context manipulation;
+the destination RFLAGS restore re-enables interrupts.
+
+**QA delivered:** one focused `make -C ics-os test-fork FORK_CPUS=2` passed,
+followed by five consecutive isolated passes. Every run completed the normal,
+text-fault, COW fast/copy, injected-OOM, inherited-fd, wait, and delayed-reap
+checks without GPF, double fault, `CTXBAD`, or stale-CR3 return corruption.
+
+### 13:05 — x86-64 copy-on-write fork Phase 2
+
+**Current problem:** Phase 1 cloned every private user page eagerly. Phase 2
+needed reference-counted frames, writable-origin PTE metadata, write-protection
+fault handling, SMP-safe invalidation, correct executable permissions, and
+deterministic failure coverage. User ELFs still run at CPL0, making their active
+user/syscall stack unsafe to share read-only while kernel frames use it.
+
+**Activity completed:** added low-4-GiB frame references and COW-aware teardown;
+`userpd_clone_cow()` now shares ordinary writable ELF pages, preserves text as
+read-only, and eagerly copies the active user/syscall stacks. Enabled `CR0.WP`
+on BSP and AP startup. COW write faults serialize PTE mutation, copy shared
+frames or use a one-owner writable fast path, and synchronously invalidate CPUs
+running the matching CR3 through IPI vector `0xFB`. Added per-CPU page-fault
+recursion state, bounded COW counters/traces, and one-shot allocation-failure
+injection. Synchronous exec now consumes direct-child `waitpid` status so an
+expected fault in a grandchild cannot poison a healthy parent.
+
+An attempted expansion of the VM lock into every public map/unmap/free call
+deadlocked the second fork during teardown and caused trap-frame corruption
+under SMP. It was removed after reproducing the regression; clone snapshot and
+COW fault mutation retain the lock, while fork continues to reject concurrent
+threads and in-flight user-buffer I/O. General shared-address-space mutation is
+not yet exposed by this process model.
+
+**QA delivered:** the guest test verifies parent/child COW writes, isolation,
+one-owner writes after child teardown, immutable text, injected COW OOM recovery,
+inherited descriptors, wait ownership/status, and delayed ten-child reaping.
+`make test-fork FORK_CPUS=2`, `make test-fork-matrix` (1/2/4/8 vCPUs), `make
+test-integration`, and `make test-spawn` all passed. Remaining expansion gates
+are dedicated unmap/exit races, shootdown delay/loss injection, DMA-pinned pages,
+and remote shootdown exercise after user-process CPU migration is supported.
+
+### Current — x86-64 eager-copy fork Phase 1
+
+**Current problem:** SDK `fork()` exposes syscall `0x90`, but its kernel path
+shallow-copies the PCB and invokes the legacy two-level 32-bit page copier. It
+truncates PML4/CR3 addresses, disables paging globally, does not establish the
+child CR3, and has no transactional rollback. Dispatcher mediation is also
+pointer-truncating and SMP-racy. Child accounting, targeted-wait ownership,
+durable zombie status, orphan handling, multithread snapshot semantics, and
+async user-buffer I/O policy are incomplete. The nominal COW fault path lacks
+long-mode page walking, frame references, PTE locking, TLB shootdown, and safe
+OOM handling. No fork-specific tests exist.
+
+**Activity completed:** audited the syscall, dispatcher, PCB lifecycle,
+long-mode and legacy VM paths, trap-frame ABI, descriptor inheritance,
+wait/exit behavior, SDK wrappers, and available tests. Confirmed that typed fd
+references and `userpd_create()`/`userpd_map_region()`/`userpd_free()` are useful
+foundations, but the current fork path is unsafe and nonfunctional on x86-64.
+Added `ics-os/docs/fork-modernization-plan.md`: Phase 0 safely returns `-ENOSYS`
+and closes adjacent isolation/wait gaps; Phase 1 implements a synchronous,
+trap-frame-defined, transactional eager-copy fork; Phase 2 adds COW only after
+frame reference counts, address-space locking, software PTE metadata, and SMP
+TLB shootdown exist.
+
+**Phase 1 completed:** syscall `0x90` now bypasses the unsafe dispatcher and
+uses a copied interrupt frame with explicit child `rax=0`. The kernel eagerly
+clones private four-level user mappings with rollback, builds a fresh PCB,
+duplicates memory metadata and parameters, inherits typed descriptors as one
+transaction, and publishes PID/accounting/scheduler state last. Fork rejects
+multithreaded callers, shared page directories, in-flight io_uring, and exhausted
+child-status capacity. Targeted `waitpid` now rejects non-children, descriptor
+rollback covers slots 0-2, and accepted forks cannot silently lose status.
+
+**QA delivered:** `make test-fork` validates return values, private data/stack,
+shared inherited file state, non-child wait rejection, `_exit` status, and ten
+children retained before delayed reaping. QEMU exit status is mandatory rather
+than ignored. `make test-fork-matrix` passed under 1/2/4/8 vCPUs with no page,
+general-protection, or double fault. Deterministic allocator-failure injection,
+explicit multithread/io_uring rejection tests, orphan policy, and COW remain.
+GCC continues to use `posix_spawn()`; `vfork()` remains `ENOSYS`.
+
+### Current — SMP scaling from two to eight CPUs
+
+**Current problem:** the kernel could start four QEMU CPUs, but the supported
+gate covered only two, the context-switch reentrancy guard had four fixed
+entries, AP online publication occurred before per-CPU initialization finished,
+IPI writes did not wait for xAPIC delivery, and `createkthread()` followed by
+`ps_set_affinity()` allowed a new thread to run on the wrong CPU. Concurrent AP
+diagnostic output also corrupted or stalled the legacy serial path at eight CPUs.
+
+**Activity completed:** retained the existing `MAX_CPUS=8` boundary and made it
+real: AP slot claim and online publication are separate, initialization is
+release-published before the BSP continues, startup uses bounded acknowledgement
+with one SIPI retry, and every xAPIC ICR command waits for delivery-idle. Added
+`createkthread_on_cpu()` so affinity is installed before ready-queue insertion;
+migrated foreground-manager, console, and SMP-test workers to it. Sized the
+context-switch guard with `MAX_CPUS`. The SMP proof now runs one targeted pinned
+worker at a time on every AP with bounded reschedule retries and publishes one
+BSP aggregate CPU mask instead of unsafe concurrent AP prints. COM1 output now
+uses an IRQ-safe SMP lock, and `serial_puts()` holds it across a complete record.
+The test oracle consumes dedicated atomic `SMP_RESULT` online and work-steal
+records rather than interleavable console prose. `test-smp` defaults to four
+CPUs and accepts `SMP_CPUS=1..8`; `test-smp-matrix` covers 1/2/4/8.
+Context-load and voluntary-switch guards are now indexed per CPU. FPU
+save/restore uses one aligned 512-byte scratch area per CPU instead of a global
+buffer that concurrent context switches could corrupt.
+
+**QA delivered with the feature:** GCC kernel builds succeeded. The complete
+1/2/4/8 QEMU matrix passed exact online-count, root-mount, AP-scheduling,
+per-AP execution-mask, and no-GPF gates. The canonical `test-integration` suite
+then passed boot, default four-CPU SMP, and ELF64 execution. Three additional
+eight-CPU context-switch stress runs passed after the per-CPU FPU conversion,
+followed by another complete matrix and integration run. QEMU SMP and boot
+processes are intentionally stopped by timeout after required markers; timeout
+124 is ignored by those recipes and is not an emulator clean-exit claim.
+
+**Residual work:** current firmware discovery assumes contiguous xAPIC IDs.
+ACPI MADT and x2APIC enumeration, sparse IDs, NUMA-aware scheduling, CPU hotplug,
+per-CPU structured logging, larger dynamic CPU masks, and repeated long-duration
+I/O/filesystem contention matrices remain required for production-scale SMP.
+
+### Current — scheduler waits and address-space-safe async retirement
+
+**Current problem:** io_uring CQ and close waits still polled with `cpu_idle()`,
+while a proposed global callback worker exposed a more serious constraint:
+virtio read completion copied bounce data through the submitter's user virtual
+address under the worker's unrelated CR3. Ring-close timeout and inherited-ring
+process exit could also release page tables while a late copyback remained.
+
+**Activity completed:** added scheduler-backed hashed event wait queues keyed by
+completion address, preserving the fixed 64-byte virtio slot while providing
+prepare/recheck/block/finish and IRQ-safe wake-all semantics. io_uring now blocks
+for bounded one-tick intervals between owner-context harvests, with a nonzero
+deadline helper so tick wrap cannot become the zero/unbounded sentinel. Virtio
+slots record the submitting address-space token outside the compact slot;
+successful read copyback is drained only under that address space, while error
+callbacks remain address-independent. Close timeout stops DMA with device reset
+before callback retirement. Every process fd teardown unconditionally retires
+that address space's requests, including completed-but-undrained reads, before
+page tables may be released. A global I/O-manager callback drain remains
+disabled until user pages can be pinned and kernel-mapped.
+
+**QA delivered with the feature:** host `test-io-unit` remains 12/12. A GCC
+kernel rebuild, two-process/two-vCPU `test-posixio`, and the deterministic
+two-vCPU virtio reset marker gate completed successfully. The virtio runner's
+expected timeout 124 occurs only after required markers and is ignored by the
+Make recipe. Focused code review approved the address-space filtering,
+completed-request sanitization, inherited-ring process teardown, deadline wrap,
+and reset initialization changes with no remaining finding.
+
+**Residual work:** add deterministic foreign-CR3, inherited-ring owner-exit,
+completed-read cancellation, and tick-rollover fault tests. A true autonomous
+bottom half requires DMA pinning/kernel mappings or a referenced address-space
+object; broader legacy `waiting`/poll-loop migration is still pending.
+
+### Current — typed fd references and inheritance
+
+**Current problem:** ring descriptors now survive concurrent close, but VFS and
+block fd slots still expose raw pointers, descriptor inheritance copies those
+pointers without ownership transfer, and close can race active read/write/stat
+operations or free one inherited object more than once.
+
+**Activity completed:** introduced separate VFS descriptor, direct legacy
+`FILE *`, and transient-operation references; typed block and io_uring
+owner/active references;
+atomic fdget/detach; and per-open-description offset/I/O serialization. Both
+process creation paths now increment typed ownership while holding the parent fd
+table lock and skip reserved slots. All process teardown paths detach and close
+their fd tables. io_uring last-close waiting now has exclusive final-release
+ownership with a timeout handoff to callbacks, avoiding competing frees.
+SDK `fdopen()` now records its descriptor and `fclose()` flushes then closes that
+descriptor; duplicate ambiguous registrations are rejected. Internal kernel
+threads no longer inherit user descriptors, while the dormant fork path now
+uses referenced cloning instead of copying the lock and raw pointers.
+All fdopen-backed stdio read/write/seek/tell/flush paths route through referenced
+fd syscalls rather than raw `file_PCB` operations. Positioned block operations
+and io_uring submission are serialized against flush submission, preserving
+virtqueue ordering for durability.
+
+**QA delivered with the feature:** `test-spawn` now spawns itself with an open
+FAT descriptor, closes the parent copy, requires the child to write and sync,
+then reopens and verifies the data (`FD_INHERIT_CHILD_PASS` and
+`FD_INHERIT_PASS`). A clean GCC kernel build completed. `test-io-unit` emitted
+12/12 TAP successes; `test-spawn`, two-process/two-vCPU `test-posixio`,
+two-vCPU virtio reset/recovery, and the boot/SMP/exec integration marker gates
+completed successfully. The boot/SMP/virtio QEMU processes are intentionally
+terminated by their runner timeouts after required markers; those timeout
+statuses are ignored by the recipes and are not reported as emulator PASS.
+The fdopen-heavy in-OS GNU assembler/archiver/linker test was rebuilt and
+emitted every required marker through `BINTOOLS_PASS`. Final scoped code review
+reported no blocking ownership issue.
+
+**Residual work:** add repeated multi-vCPU clone/close/exit stress and an
+in-kernel deterministic close-while-VFS-operation-held test, then proceed to
+scheduler blocked wait queues, bottom halves, and finer-grained VFS/cache locks.
+
+### Current — I/O lifetime, quiesce, completion, and recovery foundations
+
+**Current problem:** the first P0 correctness slice prevents immediate lock,
+publication, and DMA-slot reuse defects, but registry lookups, VFS/fd waiters,
+permanently stalled virtio requests, and polling waits still lack the referenced
+lifetime, quiesce/drain, completion, and reset contracts required for safe SMP
+teardown.
+
+**Activity completed:** added referenced device lookup/put with generation and
+`LIVE -> QUIESCING -> DEAD` state, pending removal until active callbacks drain,
+and additive exported compatibility APIs. Migrated block-cache and I/O-manager
+callbacks, moved global block flush callbacks outside the registry lock, and
+pinned filesystem/block interfaces for each mounted VFS root through unmount.
+Device generation is now part of cache-page, fill, writeback, and block-size
+identity, and every queued I/O carries the expected generation through device
+acquisition. Mount/unmount use one transaction gate; an atomic block-device
+claim is retained through teardown and cache invalidation.
+Replaced raw virtio and io_uring PCB waiters with acquire/release one-shot
+completions and cross-CPU reschedule notification. Added bounded virtio reset,
+exactly-once failure of outstanding chains, queue reconstruction, reset counters,
+and deterministic held-completion fault injection followed by DMA readback.
+Failure to acknowledge reset quarantines all unresolved slots rather than
+pretending DMA ownership returned.
+Hard IRQ now only harvests descriptor state. User-buffer callbacks are drained
+under the submitter address space; process teardown resets and retires its
+outstanding callbacks before page-table release. Ring syscalls hold close-safe
+references, timed-out close has deferred final release, and fd allocation
+reserves slots under the process fd-table lock.
+
+**QA delivered with the feature:** expanded the host TAP suite from 3 to 12
+cases for reference acquisition, quiesce rejection, drain/retirement, underflow
+rejection, device-generation cache identity, and completion-before-wait.
+`test-virtio` now requires
+`VIRTIO_RESET_RECOVERY_OK`. Full GCC kernel rebuild, two-vCPU `test-virtio`, and
+two-process/two-vCPU `test-posixio` pass.
+
+**Residual work:** fd/open-file and mount/dentry/inode refcounts, process-safe fd
+table cloning and detach-on-close, scheduler blocked wait queues, IRQ bottom
+halves, device destructors/IRQ synchronization, DMA mapping/pinning, and the
+scalable page-cache state/index model remain required before production claims.
+
+### Current — P0 I/O correctness implementation
+
+**Current problem:** verified VFS, FAT, cache, virtio, and io_uring defects could
+deadlock, corrupt metadata, lose redirtied data, reuse hardware-owned DMA state,
+or complete through freed ring storage.
+
+**Activity completed:** implemented atomic process+CPU ownership for legacy
+process-context critical sections and an IRQ-save spinlock API. Added structured
+VFS create cleanup and serialized open/close/unmount transitions. FAT now checks
+failed allocation before cluster access and serializes metadata per volume.
+Cache writeback uses generations. Virtio queue state is SMP-serialized and
+timed-out slots remain owned until used-ring retirement. io_uring now uses
+acquire/release publication, CQ capacity/overflow handling, locked callback and
+in-flight state, and close-time drain. Device remove/lock updates are atomic.
+
+**QA delivered with the feature:** added `test-io-unit`, a TAP 13 host test for
+cache writeback generation, redirty, and slot-reuse decisions. Extended
+`posixio` with close-while-DMA-in-flight readback and a rejected-create lock
+regression; the target runs twice under different PIDs on two vCPUs.
+`test-virtio` now uses two vCPUs. Headless targets touched during validation now
+detach stdin. A full rebuild exposed and repaired incomplete ext4 integration:
+forward declaration/linkage/field typos and the missing linker input.
+
+**Validated results:** GCC kernel build PASS; `test-io-unit` 3/3 PASS;
+`test-posixio`, `test-virtio`, `test-smp`, `test-spawn`, and
+`test-integration` PASS. Boot/SMP/virtio recipes intentionally terminate QEMU
+after asserted markers, so GNU `timeout` reports 124 before log validation.
+Strict GCC self-host certification remains a separate known failure.
+
+**Residual work:** refcounted VFS/device/fd objects, quiescing removal,
+scheduler completions/wait queues, virtio reset for permanently stalled
+requests, process-safe waiter references, deterministic in-transfer redirty
+injection, and finer-grained locks.
+
+### Current — feature-integrated QA policy
+
+**Current problem:** ensure the testing and QA modernization plan is implemented
+continuously as production features are built instead of being deferred as an
+independent future effort.
+
+**Activity completed:** updated `AGENTS.md` to make tests, assertions, diagnostics,
+deterministic fault hooks, structured results, and relevant QA infrastructure part
+of each feature's definition of done. The policy requires the lowest practical test
+layer, regression tests for defects, multi-vCPU and lifecycle/failure coverage for
+concurrent kernel subsystems, truthful command outcomes, and incremental reusable
+test infrastructure rather than new ad hoc marker conventions. It preserves the
+canonical GCC self-host and Multiboot2/QEMU gates while allowing newer compiler and
+instrumentation lanes as additional evidence.
+
+### Current — testing and QA framework assessment
+
+**Current problem:** evaluate whether the existing build, unit, integration,
+continuous-integration, stress, security, performance, and hardware-validation
+framework is sufficient for a production-oriented concurrent operating system,
+then define a practical modernization path without weakening the canonical GCC
+self-host contract.
+
+**Activity completed:** inventoried all 25 top-level `test-*` targets, their QEMU
+configurations and serial-marker oracles, the narrow `test-integration` aggregate,
+warning suppression, ignored application builds, fixed `/tmp` artifacts, container
+privileges, and the absence of repository CI, structured results, unit tests,
+coverage, sanitizers, fuzzing, systematic fault injection, and a hardware lab.
+Direct source verification corrected stale claims: child exit status and the
+post-kexec script path are implemented, while the binutils test comment describing
+the old status behavior is obsolete. The review also identified that the common
+kernel `assert()` is currently a no-op, so debug builds do not enforce general
+runtime invariants.
+
+The resulting assessment and phased design is in
+`ics-os/docs/testing-and-qa-modernization-plan.md`. It preserves the valuable
+Multiboot2/QEMU/self-host vertical tests but places them above host-native units,
+in-kernel KTAP suites, and guest TAP selftests. It defines strict QEMU process
+supervision, run-scoped evidence, JUnit conversion, warning debt ratcheting,
+unprivileged TCG pull-request CI, isolated KVM lanes, 1/2/4/8-vCPU stress, fault
+injection, parser and syscall fuzzing, debug allocator/lock/DMA diagnostics,
+physical-hardware qualification, performance baselines, reproducible builds, and
+release provenance. GCC 4.7.4 remains canonical; newer GCC/Clang and sanitizers are
+separate QA instruments.
+
+The first implementation increment is intentionally small: make existing verdicts
+truthful and parallel-safe, activate QA assertions, add a tiny freestanding KTAP
+core with a host adapter, migrate boot/SMP into a structured QEMU runner, and add
+an unprivileged TCG pull-request gate before expanding the matrix.
+
+### Current — production device-driver subsystem architecture
+
+**Current problem:** design a state-of-the-art driver subsystem for storage, USB,
+networking, graphics/display, AI accelerators, audio, input, platform, and virtual
+devices. The design must support automatic discovery and Plug and Play, scalable
+asynchronous I/O, no-reboot load/unload/rebind/reset, fault containment and recovery,
+maintainable driver APIs, production observability, and a future ARM64 port.
+
+**Activity completed:** audited the current device manager, PCI enumerator, legacy
+IRQ attachment lists, polled UHCI/mass-storage path, module loaders, synchronization,
+and reusable virtio/MMIO primitives. The audit confirmed that the fixed copied-
+interface registry has raw-pointer lifetime, advisory removal, and callback-under-
+global-lock hazards; PCI lacks a complete bus/resource/binding lifecycle; IRQ actions
+cannot be synchronously detached; UHCI has global polled state and pointer-cast DMA;
+and legacy module unload is not integrated with device, IRQ, work, timer, DMA, or
+callback references.
+
+The resulting source-grounded architecture and staged implementation plan is in
+`ics-os/docs/device-driver-subsystem-architecture.md`. It defines typed hierarchical
+device/bus/driver/class objects, immutable IDs and generations, reference-counted
+lifetime, managed resource transactions, operation gates, exact teardown ordering,
+safe module replacement, IRQ domains and threaded/budgeted processing, a generic
+DMA/IOMMU API, queue-local asynchronous requests, recovery domains, power/firmware
+management, kernel/user driver isolation tiers, class designs, developer tooling,
+structured telemetry, fault injection, acceptance criteria, and an eleven-phase
+rollout.
+
+The highest-priority implementation rule is correctness before hot unload or
+multi-queue tuning. Build and stress a virtual device first; then implement safe IRQ
+retirement and DMA ownership; then migrate PCI and virtio-blk as the first complete
+physical lifecycle. Existing `devmgr_*` callers remain behind an adapter until each
+consumer can obey the new reference and quiesce contracts.
+
+### Current — concurrent VFS, device, and async-I/O architecture review
+
+**Current problem:** review the VFS, device-management, and I/O stack for
+correctness and scalability gaps that prevent high-performance multithreaded
+and asynchronous operation. The review covers ownership and lifetime rules,
+locking, per-process descriptor semantics, page/block caching, DMA and IRQ
+completion, io_uring behavior, scheduler integration, observability, and the
+interfaces needed for future non-x86 platforms.
+
+**Activity completed:** mapped the POSIX/VFS/filesystem/block-cache/device/
+virtio/io_uring path and verified the high-risk findings directly in source.
+The resulting design and staged execution plan is in
+`ics-os/docs/io-subsystem-modernization-plan.md`.
+
+The most urgent correctness findings are that `sync_sharedvar` is not an atomic
+SMP lock; VFS open/close/unmount objects have no safe reference protocol;
+`createfile()` leaks its global critical section on several early returns; FAT
+uses an out-of-space cluster result before checking it; block-cache writeback
+can clear a concurrently redirtied page; virtio local interrupt masking does
+not serialize multiple CPUs and timeout releases descriptors still owned by
+the device; and io_uring can overwrite a full CQ or free a ring still referenced
+by in-flight callbacks. The plan deliberately puts these lifetime, memory
+ordering, error, and timeout fixes before multi-queue or zero-copy tuning.
+
+The existing `test-posixio` and `test-virtio` paths were also classified
+correctly as single-vCPU functional smoke tests. New SMP, saturation, delayed
+completion, close/exit, ENOSPC, redirty/writeback, reset, and durability tests
+are required before the subsystem can carry a production concurrency claim.
+
+## 2026-09-01 (Manila, UTC+8)
+
+### Current — strict GCC self-host certification
+
+**Current problem:** the existing GCC kernel capstone proves that GCC/cc1/GAS/ld
+executables running inside ICS-OS can build and kexec the kernel, but that alone
+does not prove compiler closure. Certification now requires three independent
+gates: the in-OS toolchain generates the kernel; the generated kernel boots with
+no tested capability loss; and GCC is rebuilt inside ICS-OS and that rebuilt
+compiler is used to rebuild the kernel/toolchain loop. Until all three gates
+have reproducible passing tests with compiler provenance evidence, ICS-OS must
+not be described as fully self-host capable.
+
+**Activity now:** audit how the current GCC driver and cc1 are produced and
+staged, define provenance-bearing test oracles, then implement and execute the
+missing compiler-closure and capability-regression tests.
+
+### Current — first GCC closure translation diagnosed
+
+The apparent silent reset during `cc1` compilation of GCC's `alias.c` was not
+a stack overflow. The native driver was overflowing the kernel's 1024-byte
+`posix_spawn` command buffer while forwarding the closure profile. It now
+writes that profile to a ramdisk response file, which GCC 4.7.4's `cc1`
+expands through libiberty before option processing.
+
+That exposed two native-process compatibility limits. Native compiler frontends
+retain directory handles for many include roots, so the kernel descriptor
+baseline is now 64. More decisively, POSIX `fstat` returned `(st_dev, st_ino)`
+as `(0, 0)` for every VFS object. GCC therefore classified every include root
+after the first as a duplicate and searched only `gccsrc/gen`, making
+`config.h` unreachable. `fstat` now reports the filesystem ID and stable VFS
+node identity. The GCC driver also requires a `.text` directive in frontend
+output, preventing a fatal-error assembly stub from being accepted and
+converted by GAS into a plausible ELF object while legacy `waitpid` status
+propagation remains incomplete.
+
+The native spawn/exec command baseline was raised from 1024 to 4096 bytes in
+both the SDK and kernel. This carries GCC's complete deterministic profile
+without truncation; an attempted `@response` workaround was rejected because
+libiberty requires fully seekable stdio semantics. Compiler sources and headers
+remain on the read-only ISO while generated objects use the writable FAT work
+disk; a FAT header-staging experiment was removed because long-name lookup was
+less reliable and added avoidable image preparation work.
+
+**Performance finding:** the minimal driver did not pass `-quiet`, an internal
+option the upstream GCC driver supplies on every normal cc1 invocation. cc1
+therefore dumped include search state, every parsed/generated symbol, GC
+progress, and timing details. The first `alias.c` translation generated roughly
+1.1 million syscalls, dominated by character-at-a-time serial output, and took
+over 100 seconds. The driver now always invokes cc1 with `-quiet`; diagnostic
+verbosity must be explicitly reintroduced only for focused troubleshooting.
+
+The SDK `FILE` layer was also unbuffered: GCC's assembly writes crossed
+`int 0x30` in tiny, often one-byte operations. Added bounded 4 KiB per-stream
+output caches with coherent `fwrite`/`fputc`/`fputs`, tell, seek, flush, and
+close behavior. A follow-on input read-ahead cache was rejected after it broke
+GNU ar's seek-heavy archive parser; input semantics remain unchanged. The
+strict target now always asks `contrib/gcc` to update `/tmp/icsos-gcc/cc1`; previously
+the mere presence of that persistent seed bypassed Make dependency checks and
+could hide SDK updates. With a freshly relinked seed, total syscalls after the
+first three compiler units fell from about 209,000 to about 38,000 while all
+three objects still compiled and assembled successfully.
+
+Incrementally reopening and rewriting `cc1.a` for every one of 349 objects was
+both quadratic and incompatible with the current FAT/BFD path: the first
+archive creation succeeded, but the second open reported an unrecognized
+format. `Selfhost.mk` now compiles objects as independent resumable evidence,
+then creates component archives exactly once. Both 70-path and 35-path batches
+overflowed GNU Make's native command construction and faulted the guest. The
+final cc1 set is partitioned into eighteen archives of at most 20 objects,
+keeping each ar invocation comfortably below both Make and the 4 KiB spawn
+limit; ld consumes all archives as one start-group. This removes 331 ar process
+launches and avoids repeated archive replacement.
+
+The first chunked run reached GCC's large `c-family/c-common.c` unit and
+exhausted the 77,789-frame pool of the 512 MiB certification VM while cc1 held
+roughly 270 MiB of private mappings. Strict certification now uses 1 GiB, the
+same memory class already used by the native compiler/build-tool tests; this is
+a workload capacity requirement rather than a leaked-frame workaround, since
+prior units returned to a stable free-frame baseline after exit. A later full
+run reached 299 objects but late tree-optimization units exhausted even the
+208,861-page pool exposed by 1 GiB, so strict certification now uses 2 GiB.
+
+That run also exposed two correctness issues hidden by the former zero-only
+wait status. Several conditionally empty GCC units produced valid directive-only
+assembly and were falsely rejected by the `.text`/data heuristic. The kernel
+PCB now captures the low-byte exit code and both reaping paths propagate it via
+`waitpid`; the GCC driver enforces that status and only requires non-empty
+assembly output. GNU Make can now stop immediately on a failed child rather
+than continuing with missing objects.
+
+**Activity now:** rebuild the kernel and driver, rerun the first closure unit,
+then continue the complete GCC → GNU Make → kernel certification if it passes.
+
+### ~19:00 — GCC made the canonical self-host; TinyCC is optional
+
+**Requirement:** kernel self-hosting must use GCC. TinyCC may bootstrap tools
+but must not define completion of the supported kernel self-host path.
+
+**Change:** `make test-kbuild` now delegates to the passing in-OS GCC → cc1 →
+GAS → GNU ld → kexec test. The former TinyCC recipe is renamed
+`test-tcc-kbuild`; its compiler-rebuild variant is `test-tcc-fullhost`.
+The generic Make targets and kernel console commands `kbuild` and `fullhost`
+now run the GCC path. `gkbuild` remains an explicit alias; `tcckbuild` and
+`tccfullhost` select optional experiments. Documentation and contributor
+guidance now consistently identify GCC as the supported self-host compiler.
+
+**Validation:** `make test-kbuild` passed through the canonical target and
+reported `test-gcc-kbuild PASS` followed by `test-kbuild PASS (GCC)`. The final
+host kernel rebuild also passed. Long headless kbuild invocations now redirect
+QEMU stdin from `/dev/null`, preventing terminal job control from suspending a
+quiet `-nographic` VM.
+
+### ~17:00 — Self-host handoff resumed; GNU-tool SDK symbol conflicts under repair
+
+**Current problem:** the GCC-built kernel and kexec capstone is green, but the
+post-kexec regression suite is incomplete.  The top-level `apps` build also has
+ignored GNU make/binutils link failures because SDK compatibility routines in
+`sdk/posix.c` collide with application or libiberty implementations.
+
+**Activity now:** reviewed `HANDOFF.md`, the self-host guide, repository status,
+and the pending test matrix.  Marking the seven SDK fallback implementations
+(`fdopen_unlocked`, `fopen_unlocked`, `unlock_std_streams`, `strcasecmp`,
+`strncasecmp`, `strsignal`, and `bsearch`) weak, then rebuilding applications
+and running the pending focused and kexec regressions.
+
+**Regression finding:** the strict `apps` rebuild is now clean and GNU make and
+binutils are no longer ignored by that target. `test-cc1` and
+`test-integration` pass. `test-kbuild` exposed an older TinyCC-only C89 issue in
+`hardware/vga/dexvga.c`: `draw_x()` called `write_text` before its definition
+and omitted its fifth (`size`) argument, so the implicit `int` declaration
+conflicted with the later `void` definition. Added forward declarations for
+`write_text`/`write_char` and passed size `0` (the existing 8x8 path); rerunning
+the kbuild/kexec regression next.
+
+The next TinyCC pass reached the complete `kernel32.c` amalgamation and exposed
+another strict type error in `module/pe_module.c`: the `void module_listfxn()`
+function returned integer status values. Its only caller ignores a result, so
+the invalid `return 1`/`return 0` statements were converted to bare returns.
+
+The following pass reached `hardware/keyboard/mouse.c` and found
+`get_mouse_pos()` had no declaration in `mouse.h`; earlier calls from the
+console therefore created an implicit `int` declaration that conflicted with
+its `void` definition. Added the missing typed prototype to the public header.
+The same preflight identified `machine_reboot()` as another `void` routine used
+before definition, so its existing hardware API header now declares it too.
+
+With frontend errors resolved, `test-kbuild` reached TinyCC's internal link and
+showed that the legacy object list had fallen behind the production kernel:
+virtio-blk symbols were unresolved, and TinyCC does not consume the GNU linker
+script that normally defines `bssEnd`. Added `hardware/virtio/virtio_blk.c` to
+the TinyCC compile/link set. Added a `bssEnd` marker to the final C compatibility
+object, which is intentionally linked after the kernel C objects so startup's
+BSS clear retains its end-marker semantics.
+
+The first retry still used the old in-OS `kbuild_run()` object list because the
+top-level `vmdex` target shares a name with a checked-in file but was not phony;
+Make therefore skipped `make -C kernel`. Marked `vmdex` phony so test targets
+always perform the incremental kernel build and cannot silently boot stale code.
+
+After rebuilding the guest, TinyCC compiled and internally linked the current
+object set, but its ad-hoc `-Ttext` layout produced a kexeced kernel whose LAPIC
+2 MiB identity-map entry faulted with reserved bits before `KEXEC_BOOT_OK`.
+The GCC path already proved that the production GNU linker script has the safe
+layout. Updated `kbuild_run()` to retain TinyCC for all C compilation but link
+with the in-OS GNU `ld.exe` plus `lscript64-objs.ld`; both `test-kbuild` and
+`test-fullhost` now stage the linker. This also removes the temporary synthetic
+`bssEnd`, since the real script defines the exact end of BSS.
+
+The first GNU-ld attempt exposed link semantics previously hidden by TinyCC's
+internal linker: the kbuild command used `-fno-common` even though the production
+kernel uses `-fcommon`, creating repeated header-defined BSS symbols such as
+`time_systime`; and `tcccompat.c` duplicated `stopints`/`startints`, which the
+TinyCC-compiled `kernel32.c` amalgamation already emits. Switched the in-OS C
+compile to `-fcommon` and removed those redundant compatibility definitions.
+
+GNU ld then produced an ELF, but the TinyCC object model did not preserve the
+boot-time fallback map correctly under that link: the kexeced kernel reported
+zero frames and faulted before process initialization. Restored TinyCC's own
+linker (while keeping the current virtio object list and synthetic end-of-BSS
+marker). The earlier internally linked kernel had reached LAPIC timer setup but
+faulted with a reserved-bit page error after the 64-bit MMIO PDE compound OR;
+an explicit load/OR/store experiment produced the identical fault and was
+reverted.
+
+**Final verification this session:** `test-make` passes (`MAKE_TCC_OK`,
+`MAKE_PASS`) and `test-bintools` passes (`AS_PASS`, `AR_PASS`, `LD_PASS`,
+`BINTOOLS_PASS`). The weak SDK fallbacks therefore work both at link time and
+at runtime. `test-kbuild` remains blocked only by the reproducible LAPIC
+reserved-bit fault in the kexeced TinyCC-built kernel; its compile, link,
+ELF validation, staging, and jump all succeed before that fault.
+
+### ~16:30 — **test-gcc-kbuild PASS** + machine handoff prepared
+
+**Current problem (solved for the capstone test):** `test-gcc-kbuild` was failing after in-OS GCC compiled/assembled all kernel objects. Two independent blockers remained:
+
+1. GCC emitted Sun-style dotted cmov forms (`cmovq.be`, `cmovl.le`, ...) that in-OS GAS 2.23 rejected.
+2. The kexec trampoline copied the staged kernel image to `0x100000` with `rep movsb` while paging was still enabled. The running kernel's page tables are in `.bss` inside the destination range, so larger images could clobber page-table entries still needed by the copy and hang before `KEXEC_BOOT_OK`.
+
+**Fixes:**
+- `contrib/gcc/Makefile`: removed `-DHAVE_AS_IX86_CMOV_SUN_SYNTAX=1` so GCC emits plain cmov mnemonics accepted by in-OS GAS.
+- `kernel/console/selfhost.c`: removed `-Map /ramdisk/mapfile.txt` from the in-OS `ld` link command in `gkbuild`. This avoids the SDK stdio/map-output path that GPF'd in `ld.exe`. Treat as a workaround; do not re-enable `-Map` until SDK printf/vfprintf is hardened.
+- `kernel/kexec.S`: trampoline now stashes MB2 data and the copy source/count, drops to 32-bit mode, disables paging/PAE/PGE/LME, and only then performs the physical `rep movsb` to `0x100000`.
+
+**Verification:**
+- `make -C ics-os/kernel bzImage`
+- `make -C ics-os test-gcc-kbuild` → **PASS**
+- `/tmp/icsos-gkbuild.log` contains `GKBUILD_LINK_OK`, `GKBUILD_TEST_PASS`, `KBUILD_KEXEC`, and `KEXEC_BOOT_OK`.
+
+**Known issue found during aborted regression:** `make apps` has ignored link failures for GNU make/binutils due to duplicate strong symbols between `sdk/posix.c` and app-provided implementations (`strcasecmp`, `strncasecmp`, `strsignal`, `fdopen_unlocked`, `fopen_unlocked`, `unlock_std_streams`, `bsearch`). This blocks clean `test-make`/`test-bintools` verification and should be fixed with weak SDK symbols or build exclusions.
+
+**Pending before commit:** `test-cc1`, `test-integration`, and `test-kbuild` have not been completed after the `kexec.S` change. The aborted `test-kbuild` run should not be counted.
+
+**Activity now:** machine handoff created in `HANDOFF.md`. Do not commit until regressions are complete or the user explicitly accepts the current partial state.
+
+### ~05:50 — **test-cc1 PASS with real GGC collection** (1000-function probe)
+
+**Current problem (solved):** in-OS `cc1` compiled all 1000 functions only if collection was postponed (`--param ggc-min-heapsize=524288`). With default GC it GPFed in `instantiate_decl_rtl` (`rax` = x86 prologue bytes) after `{GC …}` during assemble.
+
+**Cause:** snapshotted `gtype-desc.c` was generated without the i386 `machine_function` type (`GTY((maybe_undef))`). The marker did `gcc_assert (!(*x).machine)` and never walked `stack_locals` / `split_stack_varargs_pointer`. Host gcc ≥ 4.5 turns that assert into `__builtin_unreachable` when `machine` is set. Parse/IPA GCs were fine (`machine` still NULL); the collect at `fn_64` (`{GC 21194k -> 18486k}`) ran after RTL expand and swept live `stack_local_entry` / DECL RTL.
+
+**Fix:**
+- `gt_ggc_mx_machine_function` in `contrib/gcc/shims/shim-ggc-alloc.c`; `gt_ggc_mx_function` calls it.
+- `ggc_set_mark` / 64-bit page-table lookup refuse non-GC pointers instead of NULL-walking the chain.
+- SDK `malloc` header magic so `free` of a non-malloc pointer is ignored.
+
+**Verification:** `make test-cc1 CC1_TIMEOUT=300` **PASS**. Log has multiple `{GC …}` including during assemble, then `CC1_TEST_PASS`. No `ggc-min-heapsize` override on the cc1 command line.
+
+**Next:** `test-gcc-kbuild` / larger in-OS compiles; consider regenerating `gtype-desc` from gengtype so the shim walker is not a permanent overlay.
+
+### ~04:40 — Kernel anonymous mmap for GGC zone collector (in-OS cc1 corruption)
+
+**Current problem:** in-OS cc1 1000-function probe still fails. `delete_tree_ssa()` saw
+four corrupted `gimple_referenced_vars` slots (`0x10`, `0x10`, `0x10`, `0x300000000`).
+`BADVAR_INSERT` is in the cc1 binary; the last serial log never printed it, so the
+bad pointers were not inserted through `referenced_var_check_and_insert()`. Host
+harnesses (including Valgrind on the SDK malloc harness) still pass.
+
+**Hypothesis:** GCC 4.7.4 `ggc-zone.c` puts small pages in `mmap()` and large objects
+in `xmalloc()`. ICS-OS `mmap()` was malloc/sbrk-backed, so both lived in
+`0x0A000000+`. Zone page-table lookup indexes the containing 4KiB page of a possibly
+unaligned large-object pointer, which can collide with a small GGC page and overwrite
+live GC objects (hash entries).
+
+**Fix:** real kernel anonymous mmap/munmap (`int 0x30` `0xB6`/`0xB7`). mmap grows down
+from `MEM_USER_HEAP_LIMIT`; sbrk grows up from `MEM_USER_HEAP`. SDK `mmap()` uses the
+syscall for `MAP_ANONYMOUS`. File-backed maps stay malloc-backed.
+
+**Activity now:** rebuild kernel + relink in-OS cc1 (new `posix.c`) and run `test-cc1`.
+
+### ~05:10 — test-cc1 after kernel mmap: collision ruled out; corruption is content-based
+
+**Result:** `test-cc1` still fails, but the layout changed as intended.
+
+- GGC hash tables moved to high mmap VA: `refvars=3fc91f90 entries=3fbe5660` (was `a6ddf90` / `aa77660`).
+- sbrk break at assemble is `bfed010` (was `eb2a010`); malloc no longer backs GGC quires.
+- **No `BADVAR_INSERT`.** Bad pointers are not coming from `referenced_var_check_and_insert()`.
+- **fn_0 still has the same four slots:** `0x10, 0x10, 0x10, 0x300000000` at indices 9–12. Same pattern after relocation ⇒ not sbrk/mmap page-table collision.
+- fn_1, fn_2, fn_3 hash dumps look fully valid (previously ICE on fn_1).
+- New crash: `PF64 cr2=0x100000095 rip=ix86_instantiate_decls` with `rax=0x10000008d`. That is `stack_local_entry.next` walked as a pointer; accessing `s->rtl` at offset 8. Value has bit 32 set (`1<<32 | 0x8d`).
+
+**Next:** treat remaining corruption as GGC mark/sweep or a 32-vs-64-bit store into a pointer field (bit 32), not SDK mmap-in-malloc overlap.
+
 ## 2026-08-31 (Manila, UTC+8)
 
 ### ~08:00 — **MILESTONE: in-OS `gcc` driver composes `cc1/as/ld` (`test-gccdriver` PASS)** + flaky `test-spawn` fixed (atomic `printf` + `waitpid` zombie fix)

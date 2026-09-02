@@ -17,7 +17,8 @@ QEMU cannot `-kernel` an ELF64 Multiboot image. Prefer the ISO smoke tests:
 cd ics-os
 make
 make test-usb-amd64   # grub-mkrescue + Multiboot2
-make test-smp         # qemu -smp 2
+make test-smp         # qemu -smp 4 by default
+make test-smp-matrix  # qemu -smp 1/2/4/8
 ```
 
 USB images still build with `make usb` (multiboot2 in grub.cfg); ISO boot is the more reliable QEMU path today.
@@ -40,11 +41,31 @@ Default scheduler is **priority round-robin** (`process/scheduler.c`):
 
 - `cpu/lapic.c` — map LAPIC, EOI, timer, INIT/SIPI IPIs.
 - `cpu/smp.c` + `cpu/ap_trampoline.S` — AP trampoline at `0x8000`, per-CPU stacks.
+- Up to `MAX_CPUS=8` xAPIC CPUs are supported. AP startup separates slot claim
+  from fully initialized online publication; the BSP waits for the latter,
+  retries one SIPI when needed, and never exposes a partial per-CPU record.
+- xAPIC ICR writes wait for delivery-idle before and after each IPI. This avoids
+  overwriting an in-progress reschedule or startup command at larger CPU counts.
 - `current_process` is per-CPU (`smp_this_cpu()->current`).
 - APs come up **parked** until `smp_enable_scheduling()` after a successful root mount, then load the **kernel GDT**, arm a **LAPIC timer on vector 0x41**, and participate in scheduling.
 - Ready-queue tasks are claimed via `on_cpu`; `cpu_affinity` pins console/`fg_mgr`/user processes to the BSP. APs run migratable kthreads (see `ap_work` smoke).
+- `createkthread_on_cpu()` installs affinity before ready-queue publication;
+  setting affinity after `createkthread()` is unsafe once AP scheduling is live.
 - The ready-queue walk skips foreign idle threads and wrong-affinity tasks.
-- QEMU `-smp 2`: `make test-smp`.
+- The context-switch reentrancy guard is sized by `MAX_CPUS`, not a fixed
+  topology size; context-load and voluntary-switch guards are per CPU. FPU
+  save/restore uses per-CPU aligned scratch storage so concurrent switches never
+  share the `fxsave` staging buffer. The SMP smoke creates one pinned worker per AP and publishes
+  a BSP-generated aggregate execution mask. COM1 writes are protected by an
+  IRQ-safe SMP lock; test assertions use whole-record `SMP_RESULT` messages so
+  concurrent console output cannot corrupt acceptance markers.
+- QEMU defaults to four CPUs for `make test-smp`; override with
+  `SMP_CPUS=1..8`. `make test-smp-matrix` validates 1/2/4/8 CPUs.
+
+Current bare-metal discovery still assumes contiguous legacy xAPIC IDs starting
+at one. ACPI MADT parsing, sparse APIC IDs, x2APIC, NUMA topology, CPU hotplug,
+and more than eight CPUs remain future architecture work; QEMU's validated
+contiguous topology must not be presented as that broader hardware support.
 
 ## Boot root
 
@@ -55,7 +76,8 @@ Default scheduler is **priority round-robin** (`process/scheduler.c`):
 - **ISO9660** `convertname` now respects `ident_length` (names are not NUL-terminated).
 - QEMU Multiboot2 ISO boots reach `Root mount [OK]` via `cdfs` on `cds0` (`make test-smp` also asserts this).
 - Free-page pool expanded (~120 MiB usable under 128 MiB QEMU).
-- APs unpark with kernel GDT + LAPIC timer; work-steal proven via `SMP: AP work-steal OK (cpu=1)`.
+- APs unpark with kernel GDT + LAPIC timer; work-steal is proven by the
+  `SMP_RESULT work-steal=ok cpus=N mask=M` aggregate AP execution record.
 - `test-exec` runs real ELF64 CRT/`hello.exe` and expects `Hello World` + `EXEC_TEST_PASS`.
 
 ## Userland / TinyCC
@@ -78,8 +100,9 @@ Default scheduler is **priority round-robin** (`process/scheduler.c`):
   compiled **per file** (`-DONE_SOURCE=0`) and linked to `tccnew.exe`,
   which compiles and runs `min.c`. Static EXEs must `fill_got()` for
   `R_X86_64_JUMP_SLOT` (otherwise `call foo@plt` jumps to rip=0).
-  `make test-kbuild` compiles kernel C with in-OS tcc and kexecs it.
-  `make test-fullhost` is tccboot then kbuild using `tccnew.exe`.
+  `make test-kbuild` compiles the kernel with in-OS GCC/binutils and kexecs it.
+  `make test-tcc-kbuild` is the optional TinyCC kernel experiment;
+  `make test-tcc-fullhost` first rebuilds TinyCC as `tccnew.exe`.
 - ISO9660 directory records skip sector padding so multi-sector dirs
   (e.g. `/src/tcc`) list all files.
 
@@ -101,7 +124,7 @@ Command classification (`console_execute`):
 - **user utility (target):** `ls`/`dir`, `cat`/`type`, `cp`/`copy`, `mkdir`,
   `ps`/`procs`, `rm`/`del`
 - **privileged (stay kernel syscalls):** `mount`, `umount`, `reboot`,
-  `kbuild`, `loadmod`, `selfhost`, `tccboot`
+  `kbuild` (GCC), `tcckbuild` (optional), `loadmod`, `selfhost`, `tccboot`
 
 F12 still switches virtual consoles; each VT has its own tty. COM1 is
 `ttyS0` (serial backend) for headless tests.
@@ -139,19 +162,45 @@ by `(device, byte_offset >> 12)`. CD 2048-byte sectors occupy two per page
 `bio_submit_sync()` is the internal submit path. Dirty pages flush from
 `disk_mgr` / `fclose`. Ramdisk still uses its own `getcache`/`putcache`.
 
-**P3 POSIX / uring:** Per-process fd table (`FD_MAX` 16). `sys_open` / `sys_close` /
+**P3 POSIX / uring:** Per-process fd table (`FD_MAX` 64). `sys_open` / `sys_close` /
 `sys_read` / `sys_write` / `sys_lseek` / `sys_preadv` / `sys_pwritev` /
 `sys_fsync` wrap `file_PCB`. DEX `fopen`/`fread` stay as compat. Ring VA is
 `params.sq_off.user_addr` (identity map, no mmap). Ramdisk SQEs complete
-inline. `/dev/vblk` READ/WRITE/FSYNC SQEs are submitted to virtio-blk and
-complete from the MSI-X harvest into the CQ. `io_uring_enter` waits for
-`min_complete`. `make test-posixio` greps `POSIXIO_PASS`, `URING_PASS`, and
-`URING_VBLK_PASS`.
+inline. `/dev/vblk` READ/WRITE/FSYNC SQEs are submitted to virtio-blk. The
+MSI-X handler harvests used descriptors and marks slots complete; a later
+process-context harvest publishes asynchronous callbacks into the CQ. Successful
+read copyback is restricted to the submitting address space; process teardown
+resets and retires callbacks before releasing its page tables. `io_uring_enter`
+uses scheduler-backed hashed completion wait queues and periodically harvests in
+submitter context while waiting for `min_complete`. A global bottom-half worker
+must not copy through user virtual addresses until DMA pin/kernel-map support
+exists.
+`make test-posixio` greps `POSIXIO_PASS`, `URING_PASS`, and
+`URING_VBLK_PASS` while running two processes on two vCPUs. VFS and block fd
+lookups acquire typed transient references before releasing `fd_lock`; close
+atomically detaches first, and final release waits for active users. Spawned
+processes increment descriptor-owner references and skip reserved slots rather
+than shallow-copying the fd table. Shared offsets and buffered VFS state use a
+per-open-description serialization gate. This is focused SMP regression
+coverage, not an exhaustive memory-ordering or lifetime proof. The required
+concurrency, teardown, and completion contracts are specified in
+`docs/io-subsystem-modernization-plan.md`.
 
-**POSIX spawn / waitpid:** Syscalls `0xB1` (`waitpid`), `0xB2` (`posix_spawn` /
-non-waiting ELF load), `0xB3` (`execve` same-pid replace). `user_execp`
-(`0x5B`) still waits. `forkprocess` remains 32-bit and is not used.
-`make test-spawn` greps `SPAWN_PASS` and `WORK_DISK_PASS`.
+**POSIX process creation / waitpid:** Syscalls `0xB1` (`waitpid`), `0xB2`
+(`posix_spawn` / non-waiting ELF load), `0xB3` (`execve` same-pid replace), and
+`0x90` (copy-on-write `fork`). `user_execp` (`0x5B`) still waits. The x86-64
+fork path bypasses the legacy dispatcher, COW-shares ordinary writable private
+PML4 leaves, eagerly copies the active CPL0 user/syscall stack, and publishes a
+fresh PCB only after resource cloning succeeds. ELF text remains read-only. It
+rejects multithreaded callers and in-flight io_uring.
+`make test-spawn` greps `SPAWN_PASS`, `FD_INHERIT_PASS`, and `WORK_DISK_PASS`;
+the inheritance case closes the parent's VFS fd before the child writes through
+its retained open description. COW page-table changes use synchronous CR3-
+targeted TLB invalidation on IPI vector `0xFB`; remote targets require matching
+CR3 and authoritative `on_cpu` ownership. `CR0.WP` is enabled on every CPU.
+`make test-fork-matrix` validates COW faults, OOM recovery, immutable text, and
+ten-child delayed reaping on 1/2/4/8 vCPUs. User processes remain BSP-pinned, so
+the remote shootdown path is infrastructure for later process migration.
 
 **virtio-blk** (`hardware/virtio/virtio_blk.c`) is the VM production path:
 modern virtio-pci caps, one request queue with a 3-descriptor slot pool,
@@ -189,5 +238,6 @@ on any CPU. TinyCC kbuild is deferred.
 | Block I/O | `kernel/iomgr/iosched.c`, `blkcache.c` |
 | POSIX fds / io_uring / spawn | `kernel/vfs/posixfd.c` |
 | virtio-blk | `kernel/hardware/virtio/virtio_blk.c` |
+| Concurrent I/O modernization plan | `docs/io-subsystem-modernization-plan.md` |
 | GCC self-host plan | `docs/gcc-selfhost.md` |
 | Memory map | `kernel/memory/memlayout.h` |

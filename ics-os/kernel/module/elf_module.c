@@ -415,8 +415,10 @@ int elf_loadmodule(char *module_name,char *elf_image,
                   if (ph64[segi].p_type == PT_LOAD && ph64[segi].p_memsz > 0) {
                      unsigned long long lo = ph64[segi].p_vaddr & ~0xFFFULL;
                      unsigned long long sz = (ph64[segi].p_vaddr - lo) + ph64[segi].p_memsz;
-                     mapok = userpd_map_region(upml4, lo, sz,
-                                               (unsigned long)(PG_WR | PG_USER));
+                     unsigned long map_flags = PG_USER;
+                     if (ph64[segi].p_flags & 2)
+                        map_flags |= PG_WR;
+                     mapok = userpd_map_region(upml4, lo, sz, map_flags);
                   }
                }
                if (!mapok) printf("elf64: map fail image\n");
@@ -440,13 +442,13 @@ int elf_loadmodule(char *module_name,char *elf_image,
                         (unsigned long long)frame_free_count(),
                         (unsigned long long)frame_total_count());
                 if (!mapok) {
-                  printf("elf64: userpd map failed for %s; shared map\n", module_name);
+                  printf("elf64: userpd map failed for %s\n", module_name);
                   userpd_free(upml4);
-                  pagedir = pagedir1;
+                  return 0;
                }
             } else {
-               printf("elf64: no userpd frames for %s; shared map\n", module_name);
-               pagedir = pagedir1;
+               printf("elf64: no userpd frames for %s\n", module_name);
+               return 0;
             }
 
             stackloc=(DWORD*)dex32_commitblock((DWORD)(uintptr)userstackloc-ELF_STACK_COMMIT,

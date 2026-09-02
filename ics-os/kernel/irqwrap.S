@@ -19,7 +19,9 @@
 .extern schedule_from_timer
 .extern lapic_eoi
 .extern smp_reschedule_ipi
+.extern smp_tlb_shootdown_ipi
 .extern virtio_blk_irq
+.extern user_fork_frame
 
 .macro PUSH_ALL
     pushq %rax
@@ -62,6 +64,13 @@ syscallwrapper:
     PUSH_ALL
     /* After PUSH_ALL, stack top is r15..rax (rax at offset 14*8=112).
        Legacy DEX int 0x30 ABI: rax=fxn, rbx=a1, rcx=a2, rdx=a3, rsi=a4, rdi=a5. */
+    cmpq $0x90, 112(%rsp)
+    jne .Lapi_syscall
+    movq %rsp, %rdi
+    call user_fork_frame
+    movq %rax, 112(%rsp)
+    jmp .Lsyscall_return
+.Lapi_syscall:
     movq 112(%rsp), %rdi        /* saved rax -> fxn */
     movq 104(%rsp), %rsi        /* saved rbx -> a1 */
     movq 96(%rsp), %rdx         /* saved rcx -> a2 */
@@ -70,6 +79,12 @@ syscallwrapper:
     movq 72(%rsp), %r9          /* saved rdi -> a5 */
     call api_syscall
     movq %rax, 112(%rsp)        /* return value in caller's rax */
+.Lsyscall_return:
+    POP_ALL
+    iretq
+
+.globl fork_child_return
+fork_child_return:
     POP_ALL
     iretq
 
@@ -202,6 +217,14 @@ reschedwrapper:
     cli
     PUSH_ALL
     call smp_reschedule_ipi
+    POP_ALL
+    iretq
+
+.globl tlbshootdownwrapper
+tlbshootdownwrapper:
+    cli
+    PUSH_ALL
+    call smp_tlb_shootdown_ipi
     POP_ALL
     iretq
 

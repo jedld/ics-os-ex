@@ -62,6 +62,7 @@ unsigned int ticks=0;
 
 extern void timerwrapper(void);
 extern void reschedwrapper(void);
+extern void tlbshootdownwrapper(void);
 extern void loadregisters(void);
 extern void kbdwrapper(void);
 extern void mousewrapper(void);
@@ -488,6 +489,8 @@ void setdefaulthandlers(){
    /* SMP reschedule IPI (vector 0xFC) */
    setinterruptvector(0xFC,dex_idtbase,0x8E,
                         reschedwrapper,SYS_CODE_SEL);
+   setinterruptvector(0xFB,dex_idtbase,0x8E,
+                        tlbshootdownwrapper,SYS_CODE_SEL);
 
    /* LAPIC timer (BSP + APs); PIT remains on 0x20 */
    setinterruptvector(0x41,dex_idtbase,0x8E,

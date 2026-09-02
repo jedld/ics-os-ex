@@ -32,6 +32,8 @@ struct k_iovec {
 
 struct _PCB386;
 int posix_fd_clone(struct _PCB386 *dst, struct _PCB386 *src);
+int posix_fd_fork_ready(struct _PCB386 *src);
+int posix_fd_clone_fork(struct _PCB386 *dst, struct _PCB386 *src);
 void posix_fd_close_all(struct _PCB386 *process);
 
 /* POSIX syscall handlers return a 64-bit (long) value so negative errno

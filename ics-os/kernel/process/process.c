@@ -428,8 +428,186 @@ DWORD ps_dequeue(PCB386 *process){
 };
 
 
-//duplicates a process using COPY_ON_WRITE methods *NOT YET WORKING!!*
+static void freeprocessmemory_metadata(process_mem *memptr)
+{
+   while (memptr) {
+      process_mem *next=memptr->next;
+      free(memptr);
+      memptr=next;
+   }
+}
+
+static int cloneprocessmemory_metadata(process_mem *source,process_mem **dest)
+{
+   process_mem **tail=dest;
+   *dest=0;
+   while (source) {
+      process_mem *node=(process_mem *)malloc(sizeof(process_mem));
+      if (!node) {
+         freeprocessmemory_metadata(*dest);
+         *dest=0;
+         return 0;
+      }
+      node->vaddr=source->vaddr;
+      node->pages=source->pages;
+      node->next=0;
+      *tail=node;
+      tail=&node->next;
+      source=source->next;
+   }
+   return 1;
+}
+
+#ifdef __x86_64__
+extern void fork_child_return(void);
+
+static int fork_has_other_threads(PCB386 *parent)
+{
+   PCB386 *process,*head;
+   int found=0;
+   DWORD flags;
+
+   dex32_stopints(&flags);
+   sync_entercrit(&processmgr_busy);
+   head=sched_phead;
+   process=head;
+   if (process) {
+      do {
+         if (process!=parent && process->owner==parent->processid
+             && (process->status&PS_ATTB_THREAD)) {
+            found=1;
+            break;
+         }
+         process=process->next;
+      } while (process && process!=head);
+   }
+   sync_leavecrit(&processmgr_busy);
+   dex32_restoreints(flags);
+   return found;
+}
+
+long user_fork_frame(u64 *frame)
+{
+   PCB386 *parent=current_process;
+   PCB386 *child=0;
+   u64 *child_pml4=0;
+   u64 *child_rax;
+   DWORD flags,entry_flags;
+
+   storeflags(&entry_flags);
+   startints();
+
+   if (!parent || parent->accesslevel!=ACCESS_USER
+       || (parent->status&PS_ATTB_THREAD)
+       || !userpd_is_private(parent->pagedirloc)
+         || fork_has_other_threads(parent)
+         || parent->nlive+parent->waitq_n>=WAITQ_MAX
+         || posix_fd_fork_ready(parent)<0) {
+      restoreflags(entry_flags);
+      return -11;
+   }
+
+   child_pml4=userpd_clone_cow((u64 *)(uintptr)parent->pagedirloc,
+                               (unsigned long long)(uintptr)frame);
+   if (!child_pml4) {
+      restoreflags(entry_flags);
+      return -12;
+   }
+   child_rax=(u64 *)userpd_resolve(child_pml4,
+                                   (unsigned long long)(uintptr)frame+112);
+   if (!child_rax)
+      goto nomem;
+   *child_rax=0;
+
+   child=(PCB386 *)malloc(sizeof(PCB386));
+   if (!child)
+      goto nomem;
+   memset(child,0,sizeof(PCB386));
+   spin_init(&child->fd_lock);
+
+   child->regs=parent->regs;
+   child->regs.CR3=(DWORD)(uintptr)child_pml4;
+   child->regs2=parent->regs2;
+   storeflags(&flags);
+   stopints();
+   fpu_save(&parent->fpu);
+   restoreflags(flags);
+   memcpy(&child->fpu,&parent->fpu,sizeof(child->fpu));
+   child->size=sizeof(PCB386);
+   child->version=parent->version;
+   child->pagedirloc=(DWORD *)(uintptr)child_pml4;
+   child->owner=parent->processid;
+   strcpy(child->name,parent->name);
+   child->workdir=parent->workdir;
+   child->accesslevel=parent->accesslevel;
+   child->priority=parent->priority;
+   child->syscallsize=parent->syscallsize;
+   child->stackptr=parent->stackptr;
+   child->knext=parent->knext;
+   child->mmap_brk=parent->mmap_brk;
+   child->putc=parent->putc;
+   child->getc=parent->getc;
+   child->outdev=parent->outdev;
+   child->stdin=parent->stdin;
+   child->ctty=parent->ctty;
+   child->session=parent->session;
+   child->pgrp=parent->pgrp;
+   child->usercs=parent->usercs;
+   child->dex32_signal=parent->dex32_signal;
+   child->signaltable=parent->signaltable;
+   child->cpu_affinity=0;
+   child->on_cpu=-1;
+
+   child->ctx.rip=(u64)(uintptr)fork_child_return;
+   child->ctx.rsp=(u64)(uintptr)frame;
+   child->ctx.rflags=0x202;
+   child->ctx.cs=SYS_CODE_SEL;
+   child->ctx.ss=SYS_DATA_SEL;
+   child->ctx.cr3=(u64)(uintptr)child_pml4;
+
+   if (parent->parameters) {
+      int length=strlen(parent->parameters)+1;
+      child->parameters=(char *)malloc(length);
+      if (!child->parameters)
+         goto fail;
+      memcpy(child->parameters,parent->parameters,length);
+   }
+   if (!cloneprocessmemory_metadata(parent->meminfo,&child->meminfo))
+      goto fail;
+   if (posix_fd_clone_fork(child,parent)<0)
+      goto fail;
+
+   dex32_stopints(&flags);
+   sync_entercrit(&processmgr_busy);
+   child->processid=nextprocessid++;
+   totalprocesses++;
+   parent->childwait++;
+   parent->nlive++;
+   ps_enqueue(child);
+   sync_leavecrit(&processmgr_busy);
+   dex32_restoreints(flags);
+   restoreflags(entry_flags);
+   return (long)child->processid;
+
+fail:
+   posix_fd_close_all(child);
+   freeprocessmemory_metadata(child->meminfo);
+   if (child->parameters)
+      free(child->parameters);
+   free(child);
+nomem:
+   userpd_free(child_pml4);
+   restoreflags(entry_flags);
+   return -12;
+}
+#endif
+
+//duplicates a process using the legacy 32-bit paging path
 DWORD forkprocess(PCB386 *parent){
+#ifdef __x86_64__
+   (void)parent;
+   return (DWORD)-1;
+#else
    int pages;
    DWORD *pagedir,*pg,flags;
    DWORD parentpd = parent->pagedirloc;
@@ -497,6 +675,7 @@ DWORD forkprocess(PCB386 *parent){
 #endif
 
    return pcb->processid;
+#endif
 };
 
 
@@ -1639,14 +1818,15 @@ void ps_switchto(PCB386 *process){
       }
    }
 
+   /* Publish current only after preemption is disabled.  Otherwise a timer
+      can observe the destination PCB while RSP/CR3 still belong to prev and
+      save that mixed state into the destination context. */
+   stopints();
    current_process = process;
    fpu_restore(&process->fpu);
 
-   /* Clear the guard before the actual switch.  The remaining window
-      (context_load's `pushq; ret`) is tiny; even if a timer fires
-      there, the nested ps_switchto will save the new task's live ctx
-      (RIP inside context_load) and the new task will correctly resume
-      to its entry point when re-scheduled. */
+   /* Assembly disables interrupts before saving or loading CR3/RSP. The
+      destination RFLAGS restore re-enables them after the handoff is coherent. */
    ps_switchto_in_progress[me] = 0;
 
     /* Diagnostic: valid RIPs are kernel code (0x100000..0x300000) or user

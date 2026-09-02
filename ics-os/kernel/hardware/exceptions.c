@@ -294,7 +294,8 @@ DWORD pagefaulthandler(unsigned long location, DWORD fault_info,
                         unsigned long rip, unsigned long *saved_regs)
   {
     DWORD ret,mm,i;
-    static volatile int pf_busy = 0;
+   static volatile int pf_busy[MAX_CPUS];
+   int fault_cpu=smp_cpu_id();
     stopints();
     pfoccured=1;//set the pfoccured register of the task scheduler
     pf64_rip = rip;
@@ -329,14 +330,29 @@ DWORD pagefaulthandler(unsigned long location, DWORD fault_info,
     }
 
 #ifdef __x86_64__
-   if (pf_busy) {
+   if (pf_busy[fault_cpu]) {
       serial_puts("PF64: re-entered -> halt\n");
       while (1) {}
    }
-   pf_busy = 1;
+   pf_busy[fault_cpu] = 1;
    if (!current_process || !(DWORD)(uintptr)current_process->pagedirloc) {
       serial_puts("PF64: bad current_process/pagedirloc -> halt\n");
       while (1) {}
+   }
+   {
+      int cow_result=userpd_handle_cow(
+         (u64 *)(uintptr)current_process->pagedirloc,
+         (unsigned long long)location,(unsigned)fault_info);
+      if (cow_result>0) {
+         pf_busy[fault_cpu]=0;
+         return 0;
+      }
+      if (cow_result<0) {
+         serial_puts("PF64: COW resolution failed\n");
+         pf_busy[fault_cpu]=0;
+         exc_recover();
+         while (1) {}
+      }
    }
    mm=getphys(location,current_process->pagedirloc);
    /* Not present: lazily map a private frame for the user window / ELF image
@@ -351,7 +367,7 @@ DWORD pagefaulthandler(unsigned long location, DWORD fault_info,
                                    (unsigned long)(PG_WR | PG_USER));
          if (fr) {
             __asm__ __volatile__("invlpg (%0)" :: "r" ((unsigned long)(unsigned)location) : "memory");
-            pf_busy = 0;
+            pf_busy[fault_cpu] = 0;
             return 0;
          }
          serial_puts("PF64: userpd_map_page failed (pool empty?)\n");
@@ -365,12 +381,12 @@ DWORD pagefaulthandler(unsigned long location, DWORD fault_info,
                  (unsigned)mm);
          serial_puts(line);
       }
-      pf_busy = 0;
+      pf_busy[fault_cpu] = 0;
       exc_showdump(location, PAGE_FAULT, mm);
       exc_recover();
       while (1) {}
    }
-   pf_busy = 0;
+   pf_busy[fault_cpu] = 0;
 #else
    (void)rip;
    mm=getphys(location,current_process->pagedirloc);

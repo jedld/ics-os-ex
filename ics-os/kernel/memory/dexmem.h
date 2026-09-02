@@ -193,6 +193,8 @@ inline void stopints();
    user — is handed out by frame_alloc() and returned by frame_release().
    See the implementation and Phase-1/Phase-2 notes in memory/dexmem.c. */
 extern u64 frame_alloc(void);
+extern int frame_retain(u64 phys);
+extern unsigned frame_refcount(u64 phys);
 extern void frame_release(u64 phys);
 extern u64 frame_free_count(void);
 extern u64 frame_total_count(void);
@@ -251,6 +253,14 @@ int userpd_map_region(u64 *pml4, unsigned long long base,
                       unsigned long long size, unsigned long attb);
 u64 *userpd_map_page(u64 *pml4, unsigned long long vaddr, unsigned long attb);
 int userpd_unmap_page(u64 *pml4, unsigned long long vaddr);
+void *userpd_resolve(u64 *pml4, unsigned long long vaddr);
+u64 *userpd_clone_eager(const u64 *parent);
+u64 *userpd_clone_cow(u64 *parent, unsigned long long private_vaddr);
+int userpd_handle_cow(u64 *pml4, unsigned long long vaddr,
+                      unsigned fault_info);
+void userpd_cow_fail_next(void);
+void userpd_cow_stats(u64 *faults, u64 *copies, u64 *fastpaths,
+                      u64 *shootdowns, u64 *oom);
 void userpd_free(u64 *pml4);
 int userpd_is_private(const void *pml4);
 int userpd_used(void);

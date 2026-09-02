@@ -223,7 +223,7 @@ typedef struct _PCB386 {
    DWORD childwait;    /*used by dex32_wait to check if a child has terminated
                         or not, incremented by 1 when a child process is spawned*/
 
-#define WAITQ_MAX 8
+#define WAITQ_MAX 64
    int nlive;          /* live children (posix waitpid) */
    int waitq_n;
    int waitq_pid[WAITQ_MAX];
@@ -414,8 +414,11 @@ PCB386   *ps_findprocess(DWORD processid);
 int      dex32_thread_join(DWORD threadid);
 int      findprocessname(const char *name);
 void     *findsemaphore(DWORD handle);
-DWORD    fork(); /*NOT WORKING YET*/
-DWORD    forkprocess(); /*NOT WORKING YET*/
+DWORD    fork();
+DWORD    forkprocess();
+#ifdef __x86_64__
+long     user_fork_frame(u64 *frame);
+#endif
 DWORD    free_semaphore(DWORD handle);
 void     freeprocessmemory(process_mem *memptr,DWORD *pagedir);
 int      getmessage(DWORD *source,DWORD *mes,DWORD *data);

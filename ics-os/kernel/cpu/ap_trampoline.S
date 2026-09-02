@@ -54,7 +54,7 @@ ap_tramp_blob:
     orl  $(1<<8), %eax
     wrmsr
     movl %cr0, %eax
-    orl  $0x80000000, %eax
+    orl  $((1<<31) | (1<<16)), %eax /* PG | WP */
     movl %eax, %cr0
     ljmp $0x08, $0x8200
 

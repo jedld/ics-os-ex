@@ -33,6 +33,8 @@ static volatile int ap_claimed = 0;
 static volatile int ap_boot_state = 0;
 static volatile int ap_boot_apic = -1;
 volatile int smp_sched_enabled = 0;
+static volatile u64 tlb_shootdown_cr3;
+static volatile u32 tlb_shootdown_ack;
 
 int smp_cpu_id(void) {
     u32 id;
@@ -76,6 +78,56 @@ void smp_reschedule_ipi(void) {
     lapic_eoi();
     if (smp_sched_enabled)
         schedule_from_timer();
+}
+
+void smp_tlb_shootdown_ipi(void)
+{
+    unsigned long cr3;
+    int cpu = smp_cpu_id();
+
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
+    if ((cr3 & ~0xFFFUL) == (tlb_shootdown_cr3 & ~0xFFFULL))
+        __asm__ __volatile__("movq %0, %%cr3" :: "r"(cr3) : "memory");
+    __sync_fetch_and_or(&tlb_shootdown_ack, 1u << cpu);
+    lapic_eoi();
+}
+
+int smp_tlb_shootdown(u64 cr3)
+{
+    u32 targets = 0;
+    unsigned long local_cr3;
+    int cpu, me = smp_cpu_id();
+    volatile u32 spins;
+
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(local_cr3));
+    if ((local_cr3 & ~0xFFFUL) == (cr3 & ~0xFFFULL))
+        __asm__ __volatile__("movq %0, %%cr3" :: "r"(local_cr3) : "memory");
+    if (!lapic_mmio || cpu_count < 2)
+        return 1;
+
+    tlb_shootdown_cr3 = cr3;
+    tlb_shootdown_ack = 1u << me;
+    __sync_synchronize();
+    for (cpu = 0; cpu < cpu_count; cpu++) {
+        PCB386 *running;
+        if (cpu == me || !cpus[cpu].online)
+            continue;
+        running = cpus[cpu].current;
+        if (!running || running->on_cpu != cpu
+            || (u64)(uintptr)running->pagedirloc != cr3)
+            continue;
+        targets |= 1u << cpu;
+        if (!lapic_send_ipi(cpus[cpu].apic_id, IPI_TLB_SHOOTDOWN))
+            return 0;
+    }
+    for (spins = 0; spins < 10000000u; spins++) {
+        if ((tlb_shootdown_ack & targets) == targets)
+            return 1;
+        __asm__ __volatile__("pause");
+    }
+    printf("SMP: TLB shootdown timeout target=%x ack=%x cr3=%llx\n",
+           targets, tlb_shootdown_ack, (unsigned long long)cr3);
+    return 0;
 }
 
 static volatile u32 ap_work_mask = 0;

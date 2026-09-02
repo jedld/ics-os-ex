@@ -30,20 +30,68 @@ Useful individual targets (from `ics-os/`):
 
 | Target | Checks |
 |--------|--------|
+| `test-kbuild` | In-OS GCC → cc1 → GAS → GNU ld kernel build and kexec; not full self-host certification |
 | `test-boot` | Multiboot2 ISO boots; `Root mount [OK]` |
-| `test-smp` | `-smp 2`; AP online; AP work-steal; no GPF |
+| `test-smp` | `-smp 4` by default; every AP executes pinned work; no GPF |
+| `test-smp-matrix` | `-smp 1/2/4/8`; boot, online count, root mount, per-AP scheduler mask |
 | `test-exec` | `hello.exe` → `Hello World` + `EXEC_TEST_PASS` |
 | `test-selfhost` | In-OS TinyCC compiles/runs `min.c` + `hello.c` |
 | `test-tccboot` | In-OS TinyCC rebuilds itself (`tccnew.exe`) and compiles `min.c` |
+| `test-tcc-kbuild` | Optional TinyCC kernel experiment; not a supported-path gate |
 | `test-iobench` | CD sequential map; 4KiB page cache hits; `IOBENCH_PASS` + `IOBENCH_CACHE_OK` |
 | `test-posixio` | POSIX fds + preadv/pwritev/fsync + io_uring; ramdisk `POSIXIO_PASS`/`URING_PASS`; virtio `/dev/vblk` `URING_VBLK_PASS` |
 | `test-virtio` | QEMU virtio-blk DMA; MSI-X completions; `VIRTIO_BLK_OK` + `VIRTIO_IRQ_OK` |
 | `test-spawn` | `posix_spawn` + `waitpid` of `hello.exe` (`SPAWN_PASS`); FAT `/work` on virtio (`WORK_DISK_PASS`) |
+| `test-fork` | COW fork ABI/isolation, fast path, text protection, OOM, inherited fd, exit/wait, and delayed reaping |
+| `test-fork-matrix` | COW fork pressure gate on `-smp 1/2/4/8` |
 | `test-make` | In-OS TinyCC builds GNU make 3.82 onto `/work`; `make -f t.mk` spawns `hello.exe` (`MAKE_PASS`) |
 | `test-bintools` | In-OS GNU binutils: `as` assembles, `ar` archives, `ld` links a default-script ELF64, then it execs (`AS_PASS`/`AR_PASS`/`LD_PASS`/`BINTOOLS_PASS`) |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).
+
+## QA is part of every feature
+
+Read `ics-os/docs/testing-and-qa-modernization-plan.md` before implementing a
+feature or fixing a defect. QA modernization is not a separate future project:
+implement the applicable improvements from that plan incrementally in the same
+change as the production feature.
+
+For every feature or behavioral change:
+
+1. Define the observable behavior, failure semantics, concurrency assumptions,
+	and test impact before implementation.
+2. Add tests at the lowest practical layer: host-native unit tests for pure
+	logic, in-kernel tests for target-dependent components, guest selftests for
+	SDK/syscall behavior, and QEMU or hardware tests for integrated behavior.
+3. Add normal, boundary, invalid-input, and failure-path cases. Changes involving
+	shared state, IRQs, DMA, devices, VFS, scheduling, or asynchronous I/O also
+	require multi-vCPU contention, timeout, cancellation, teardown, recovery, and
+	deterministic fault-injection coverage where applicable.
+4. Add a regression test for every defect. It must fail for the original cause,
+	not merely look for a final success message.
+5. Improve the shared QA infrastructure instead of creating another ad hoc test
+	convention. New or migrated tests should use stable test IDs, explicit
+	timeouts, isolated run artifacts, deterministic seeds, and KTAP/TAP-compatible
+	results as those facilities become available.
+6. Run the focused new tests and the relevant existing subsystem/integration
+	tests. Report commands, configurations, and results; never claim PASS for a
+	command that timed out, crashed, was skipped, or returned nonzero.
+7. Update the QA plan, developer guide, test manifest, and observability tooling
+	when the feature introduces a new test layer, fault model, invariant, hardware
+	capability, or release requirement.
+
+A feature is not complete when it has only an untested implementation, a manual
+launch recipe, or a serial success marker without assertions. Do not defer
+applicable tests, assertions, diagnostics, runner support, or fault hooks to an
+unspecified follow-up. If missing infrastructure makes the complete test
+impossible, implement the smallest reusable foundation now, document the precise
+remaining gap and owner, and do not make the unsupported production-readiness
+claim.
+
+Preserve GCC as the canonical supported compiler. Newer GCC/Clang, sanitizers,
+coverage, and host-native builds are additional QA lanes, not replacements for
+the GCC self-host and Multiboot2/QEMU acceptance gates.
 
 ## Architecture notes that bite agents
 
@@ -53,7 +101,7 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 - **Memory map** is `kernel/memory/memlayout.h`. Kernel image must stay below 4MiB (user ELF). Frame stack follows `bssEnd`. Do not invent a new fixed PA; add a reserved range so `mempop` skips it.
 - **SMP**: APs load the kernel GDT (`ap_load_kernel_gdt`), use LAPIC timer vector **0x41**, claim tasks with `on_cpu`, and honor `cpu_affinity`. Console / `fg_mgr` / user processes are BSP-pinned today.
 - **Serial** is the headless oracle. Prefer `serial_puts` / putc mirroring for QEMU `-nographic` tests.
-- **x86_64 in-OS TinyCC** can compile/run `min.c`/`hello.c` (`make test-selfhost`) and rebuild itself (`make test-tccboot`). TinyCC will not compile the kernel; the self-host path is TinyCC → make → binutils → GCC 4.7.4 (see `ics-os/docs/gcc-selfhost.md`).
+- **GCC is the supported kernel compiler.** `make test-kbuild` proves that host-seeded GCC/binutils executables running in ICS-OS can build and kexec the kernel. Do not call ICS-OS fully self-host capable until an in-OS-rebuilt GCC compiles the kernel and the generated kernel passes the post-kexec capability suite. x86_64 TinyCC remains optional.
 
 ## Coding conventions
 
@@ -62,7 +110,8 @@ Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (I
 - Kernel objects: freestanding (`-ffreestanding -fno-pic -mno-red-zone -mcmodel=large`).
 - User apps: `sdk/app.mk` (`-m64`, link `crt1.c` + `tccsdk.c`).
 - Document non-obvious long-mode/SMP behavior in `ics-os/docs/smp-longmode.md`.
-- Ensure tests are created so that there are no regressions.
+- Treat tests, assertions, deterministic fault hooks, diagnostics, and structured
+	result reporting as feature deliverables, following the QA policy above.
 
 ## Design considerations
 
@@ -85,7 +134,7 @@ Properly index these files as needed in a file called reference.md
 
 ## Development blog
 
-Use develpment_blog.md as your diary of activities, what was done, difficulties faced and solutions to problems. Organize this by hour and date.
+Use development_blog.md as your diary of activities, what was done, difficulties faced and solutions to problems. Organize this by hour and date.
 
 Make sure it contains the current problem and the activity currently being performed to solve it.
 
@@ -96,7 +145,7 @@ Make sure it contains the current problem and the activity currently being perfo
 
 ## Suggested next work
 
-1. GCC self-host (see `ics-os/docs/gcc-selfhost.md`): in-OS TinyCC builds GNU make (`make test-make`); in-OS GNU binutils `as`/`ar`/`ld` now build **and** link+run a real ELF64 (`make test-bintools`). Next: GCC 4.7.4 (C only), which compiles ICS-OS. TinyCC `test-kbuild` is deferred.
+1. Complete strict GCC self-host certification (see `ics-os/docs/gcc-selfhost.md`): `test-kbuild` passes with a host-seeded compiler, but GCC must still rebuild itself in-OS and that rebuilt compiler must build the kernel before the loop is closed.
 2. Richer io_uring (registered buffers, linked SQEs) if needed. Async virtio CQEs and `/dev/vblk` are in. `posix_spawn` / `waitpid` / `/work` are in (`make test-spawn`).
-3. Allow user processes on any CPU (harden `waitpid`/exit migration). Fix `fork` for x86_64 (today `posix_spawn` wraps GCC `pexecute`).
+3. Allow user processes on any CPU and validate remote COW TLB shootdown during migration; harden `waitpid`/exit migration first.
 4. Full ring-3 user mode (today user ELFs still enter with kernel CS).

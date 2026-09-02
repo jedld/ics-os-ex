@@ -239,7 +239,7 @@ long_mode_start:
     /* Enable SSE / FXSAVE */
     movq %cr0, %rax
     andq $~0x4, %rax                /* clear EM */
-    orq  $0x2, %rax                 /* set MP */
+    orq  $((1 << 16) | 0x2), %rax   /* set WP | MP */
     movq %rax, %cr0
     movq %cr4, %rax
     orq  $(1 << 9), %rax            /* OSFXSR */
