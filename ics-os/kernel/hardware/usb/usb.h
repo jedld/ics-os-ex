@@ -10,5 +10,7 @@
 
 int usb_init(void);
 int usb_storage_available(void);
+int usb_start_hotplug_monitor(void);
+int usb_xhci_mounted_disconnect_selftest(void);
 
 #endif

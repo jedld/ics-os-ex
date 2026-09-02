@@ -48,7 +48,6 @@
 #define VIRTIO_BLK_S_UNSUPP       2
 
 #define VIRTIO_MSI_NO_VECTOR      0xFFFF
-#define VIRTIO_MSIX_VECTOR        0x42
 
 #define VIRTIO_QUEUE_MAX          128
 #define VIRTIO_BLK_SECTOR_SIZE    512

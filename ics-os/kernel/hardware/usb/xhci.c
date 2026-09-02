@@ -1,12 +1,16 @@
-/* Minimal polling xHCI backend for the legacy USB MSC/BOT layer. */
+/* Minimal xHCI backend for the legacy USB MSC/BOT layer. */
+
+#include "../irq_lifecycle.h"
 
 #define XHCI_TRBS             256
 #define XHCI_EVENT_TRBS       256
 #define XHCI_MAX_SLOTS        8
+#define XHCI_MAX_HCDS         8
 #define XHCI_TIMEOUT          4000000
 
 #define XHCI_CMD_RUN          (1u << 0)
 #define XHCI_CMD_RESET        (1u << 1)
+#define XHCI_CMD_INTE         (1u << 2)
 #define XHCI_STS_HALTED       (1u << 0)
 #define XHCI_STS_CNR          (1u << 11)
 #define XHCI_PORT_CCS         (1u << 0)
@@ -30,9 +34,12 @@
 #define XHCI_TRB_ENABLE_SLOT  XHCI_TRB_TYPE(9)
 #define XHCI_TRB_ADDRESS      XHCI_TRB_TYPE(11)
 #define XHCI_TRB_CONFIG_EP    XHCI_TRB_TYPE(12)
+#define XHCI_TRB_RESET_EP     XHCI_TRB_TYPE(14)
+#define XHCI_TRB_SET_DEQUEUE  XHCI_TRB_TYPE(16)
 #define XHCI_TRB_TRANSFER_EV  32
 #define XHCI_TRB_COMMAND_EV   33
 #define XHCI_CC_SUCCESS       1
+#define XHCI_CC_STALL         6
 #define XHCI_CC_SHORT_PACKET  13
 
 typedef struct __attribute__((packed, aligned(16))) {
@@ -49,47 +56,126 @@ typedef struct __attribute__((packed, aligned(16))) {
 
 typedef struct {
     xhci_trb *trbs;
+    dma_region dma;
     DWORD enqueue;
     DWORD cycle;
     DWORD link_chain;
 } xhci_ring;
 
-static u64 xhci_dcbaa[256] __attribute__((aligned(64)));
-static xhci_trb xhci_cmd_trbs[XHCI_TRBS] __attribute__((aligned(64)));
-static xhci_trb xhci_event_trbs[XHCI_EVENT_TRBS] __attribute__((aligned(64)));
-static xhci_trb xhci_ep0_trbs[XHCI_TRBS] __attribute__((aligned(64)));
-static xhci_trb xhci_ep_in_trbs[XHCI_TRBS] __attribute__((aligned(64)));
-static xhci_trb xhci_ep_out_trbs[XHCI_TRBS] __attribute__((aligned(64)));
-static xhci_erst_entry xhci_erst __attribute__((aligned(64)));
-static BYTE xhci_input_ctx[33 * 64] __attribute__((aligned(64)));
-static BYTE xhci_device_ctx[32 * 64] __attribute__((aligned(64)));
+typedef struct {
+    u64 *dcbaa;
+    xhci_trb *event_trbs;
+    xhci_erst_entry *erst;
+    BYTE *input_ctx;
+    BYTE *device_ctx;
+    volatile BYTE *mmio;
+    volatile BYTE *op;
+    volatile BYTE *runtime;
+    volatile DWORD *doorbell;
+    DWORD context_size;
+    DWORD max_ports;
+    DWORD port;
+    DWORD speed;
+    DWORD slot;
+    DWORD ep0_mps;
+    DWORD event_dequeue;
+    DWORD event_cycle;
+    xhci_ring cmd_ring;
+    xhci_ring ep0_ring;
+    xhci_ring ep_in_ring;
+    xhci_ring ep_out_ring;
+    dma_region dcbaa_dma;
+    dma_region event_dma;
+    dma_region erst_dma;
+    dma_region input_ctx_dma;
+    dma_region device_ctx_dma;
+    dma_region scratchpad_array_dma;
+    dma_region scratchpad_pages_dma;
+    dma_device stream_dma;
+    DWORD scratchpad_count;
+    volatile int recovery_needed;
+    volatile int fault_drop_next;
+    volatile int fault_fail_init;
+    volatile int fault_disconnect_inflight;
+    volatile int connection_lost;
+    DWORD stalled_endpoints;
+    volatile DWORD irq_count;
+    volatile DWORD irq_wait_count;
+    int has_msix;
+    int msix_qualified_reported;
+    int sg_qualified_reported;
+    int bounce_to_device_qualified;
+    int bounce_from_device_qualified;
+    int bounce_qualified_reported;
+    BYTE pci_bus;
+    BYTE pci_slot;
+    BYTE pci_func;
+    BYTE msix_cap;
+    int pci_discovered;
+    volatile DWORD *msix_entry;
+    u8 irq_vector;
+    int irq_route;
+    char irq_owner;
+} xhci_hcd;
 
-static volatile BYTE *xhci_mmio;
-static volatile BYTE *xhci_op;
-static volatile BYTE *xhci_runtime;
-static volatile DWORD *xhci_doorbell;
-static DWORD xhci_context_size;
-static DWORD xhci_max_ports;
-static DWORD xhci_port;
-static DWORD xhci_speed;
-static DWORD xhci_slot;
-static DWORD xhci_ep0_mps;
-static DWORD xhci_event_dequeue;
-static DWORD xhci_event_cycle;
-static xhci_ring xhci_cmd_ring;
-static xhci_ring xhci_ep0_ring;
-static xhci_ring xhci_ep_in_ring;
-static xhci_ring xhci_ep_out_ring;
-static void *xhci_scratchpad_array_alloc;
-static void *xhci_scratchpad_pages_alloc;
-static DWORD xhci_scratchpad_count;
-static volatile int xhci_recovery_needed;
-static volatile int xhci_fault_drop_next;
-static volatile int xhci_fault_fail_init;
+static xhci_hcd xhci_primary_hcd;
+static xhci_hcd xhci_secondary_hcds[XHCI_MAX_HCDS - 1];
+static xhci_hcd *xhci_hcds[XHCI_MAX_HCDS] = {
+    &xhci_primary_hcd,
+    &xhci_secondary_hcds[0], &xhci_secondary_hcds[1],
+    &xhci_secondary_hcds[2], &xhci_secondary_hcds[3],
+    &xhci_secondary_hcds[4], &xhci_secondary_hcds[5],
+    &xhci_secondary_hcds[6]
+};
+static DWORD xhci_hcd_count;
+static xhci_hcd *xhci_irq_routes[XHCI_MAX_HCDS];
+static char xhci_test_reservation_owner;
+static int xhci_test_vector_reserved;
 
 extern void *mmio_map(u64 phys, u64 len);
 extern void *malloc(unsigned int size);
+extern void free(void *ptr);
+extern void xhci_msixwrapper0(void);
+extern void xhci_msixwrapper1(void);
+extern void xhci_msixwrapper2(void);
+extern void xhci_msixwrapper3(void);
+extern void xhci_msixwrapper4(void);
+extern void xhci_msixwrapper5(void);
+extern void xhci_msixwrapper6(void);
+extern void xhci_msixwrapper7(void);
+extern void lapic_eoi(void);
 extern char kernel_cmdline[];
+
+#define SYS_CODE_SEL 0x08
+
+static void (*xhci_irq_wrappers[XHCI_MAX_HCDS])(void) = {
+    xhci_msixwrapper0, xhci_msixwrapper1,
+    xhci_msixwrapper2, xhci_msixwrapper3,
+    xhci_msixwrapper4, xhci_msixwrapper5,
+    xhci_msixwrapper6, xhci_msixwrapper7
+};
+
+static int xhci_irq_route_bind(xhci_hcd *hcd)
+{
+    int route;
+    for (route = 0; route < XHCI_MAX_HCDS; route++) {
+        if (__sync_bool_compare_and_swap(&xhci_irq_routes[route], 0, hcd)) {
+            hcd->irq_route = route;
+            printf("xhci: IRQ route=%d bound\n", route);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void xhci_irq_route_unbind(xhci_hcd *hcd)
+{
+    int route = hcd->irq_route;
+    if (route >= 0 && route < XHCI_MAX_HCDS)
+        (void)__sync_bool_compare_and_swap(&xhci_irq_routes[route], hcd, 0);
+    printf("xhci: IRQ route=%d unbound\n", route);
+    hcd->irq_route = -1;
+}
 
 static void xhci_mb(void)
 {
@@ -130,9 +216,31 @@ static int xhci_wait32(volatile BYTE *base, DWORD off, DWORD mask,
     return 0;
 }
 
-static int xhci_find_controller(BYTE *bus, BYTE *slot, BYTE *func)
+static int xhci_device_connected(xhci_hcd *hcd)
+{
+    if (!hcd->op || !hcd->port)
+        return 0;
+    return (xhci_r32(hcd->op, 0x400 + (hcd->port - 1) * 0x10) &
+            XHCI_PORT_CCS) != 0;
+}
+
+static int xhci_device_attached(xhci_hcd *hcd)
+{
+    DWORD port;
+    if (!hcd->op)
+        return 0;
+    for (port = 1; port <= hcd->max_ports; port++)
+        if (xhci_r32(hcd->op, 0x400 + (port - 1) * 0x10) & XHCI_PORT_CCS)
+            return 1;
+    return 0;
+}
+
+static DWORD xhci_discover_hcds(void)
 {
     BYTE b, s, f;
+    DWORD count = 0;
+    if (xhci_hcd_count)
+        return xhci_hcd_count;
     for (b = 0; b < 8; b++) {
         for (s = 0; s < 32; s++) {
             WORD vendor = pci_read16(b, s, 0, 0);
@@ -144,13 +252,127 @@ static int xhci_find_controller(BYTE *bus, BYTE *slot, BYTE *func)
             for (f = 0; f < maxf; f++) {
                 DWORD classreg = pci_read32(b, s, f, 0x08);
                 if ((classreg >> 8) == 0x0C0330) {
-                    *bus = b;
-                    *slot = s;
-                    *func = f;
-                    return 1;
+                    xhci_hcd *hcd;
+                    if (count == XHCI_MAX_HCDS) {
+                        printf("xhci: controller limit reached max=%u\n",
+                               XHCI_MAX_HCDS);
+                        continue;
+                    }
+                    hcd = xhci_hcds[count++];
+                    hcd->pci_bus = b;
+                    hcd->pci_slot = s;
+                    hcd->pci_func = f;
+                    hcd->pci_discovered = 1;
+                    hcd->irq_route = -1;
+                    printf("xhci: discovered hcd=%u PCI %u:%u.%u\n",
+                           count - 1, b, s, f);
                 }
             }
         }
+    }
+    xhci_hcd_count = count;
+    printf("xhci: discovered controllers=%u\n", count);
+    return count;
+}
+
+static BYTE xhci_pci_read8(BYTE bus, BYTE slot, BYTE func, BYTE off)
+{
+    DWORD value = pci_read32(bus, slot, func, off & 0xFC);
+    return (BYTE)(value >> ((off & 3) * 8));
+}
+
+static int xhci_current_bar(BYTE bus, BYTE slot, BYTE func, DWORD bir,
+                            u64 *base)
+{
+    BYTE off;
+    DWORD lo, hi = 0;
+    if (bir > 5 || !base)
+        return 0;
+    off = (BYTE)(0x10 + bir * 4);
+    lo = pci_read32(bus, slot, func, off);
+    if (lo & 1)
+        return 0;
+    if ((lo & 6) == 4) {
+        if (bir == 5)
+            return 0;
+        hi = pci_read32(bus, slot, func, off + 4);
+    }
+    *base = ((u64)hi << 32) | (lo & ~0xFu);
+    return *base != 0;
+}
+
+static int xhci_setup_msix(xhci_hcd *hcd, BYTE bus, BYTE slot, BYTE func)
+{
+    BYTE ptr;
+    DWORD guard = 48;
+    WORD status = pci_read16(bus, slot, func, 0x06);
+
+    hcd->has_msix = 0;
+    if (!(status & 0x10))
+        return 0;
+    ptr = xhci_pci_read8(bus, slot, func, 0x34);
+    while (ptr >= 0x40 && guard--) {
+        BYTE id = xhci_pci_read8(bus, slot, func, ptr);
+        BYTE next = xhci_pci_read8(bus, slot, func, ptr + 1);
+        if (id == 0x11) {
+            WORD control = pci_read16(bus, slot, func, ptr + 2);
+            DWORD table = pci_read32(bus, slot, func, ptr + 4);
+            DWORD bir = table & 7;
+            u64 bar;
+            volatile DWORD *entry;
+            WORD command;
+            irq_msi_message message;
+            if (!xhci_current_bar(bus, slot, func, bir, &bar) ||
+                bar + (table & ~7u) < bar)
+                return 0;
+            entry = (volatile DWORD *)mmio_map(bar + (table & ~7u), 16);
+            if (!entry)
+                return 0;
+            if (!irq_vector_allocate(&hcd->irq_owner, &hcd->irq_vector)) {
+                printf("xhci: no MSI-X vector available\n");
+                return 0;
+            }
+            if (!irq_domain_compose_xapic_msi(&irq_device_domain,
+                                              hcd->irq_vector,
+                                              lapic_get_id(), &message)) {
+                (void)irq_vector_release(hcd->irq_vector, &hcd->irq_owner);
+                hcd->irq_vector = 0;
+                printf("xhci: cannot compose MSI-X message\n");
+                return 0;
+            }
+            hcd->irq_route = -1;
+            if (!xhci_irq_route_bind(hcd)) {
+                (void)irq_vector_release(hcd->irq_vector, &hcd->irq_owner);
+                hcd->irq_vector = 0;
+                printf("xhci: no IRQ dispatch route available\n");
+                return 0;
+            }
+            entry[3] = 1;
+            xhci_mb();
+            entry[0] = message.address_lo;
+            entry[1] = message.address_hi;
+            entry[2] = message.data;
+            setinterruptvector(hcd->irq_vector, dex_idtbase, 0x8E,
+                               (void (*)(int))xhci_irq_wrappers[hcd->irq_route],
+                               SYS_CODE_SEL);
+            command = pci_read16(bus, slot, func, 0x04);
+            pci_write16(bus, slot, func, 0x04, command | 0x0400);
+            pci_write16(bus, slot, func, ptr + 2,
+                        (WORD)((control | 0x8000) & ~0x4000));
+            entry[3] = 0;
+            xhci_mb();
+            hcd->has_msix = 1;
+            hcd->pci_bus = bus;
+            hcd->pci_slot = slot;
+            hcd->pci_func = func;
+            hcd->msix_cap = ptr;
+            hcd->msix_entry = entry;
+            printf("xhci: MSI-X vector=%u\n", hcd->irq_vector);
+            return 1;
+        }
+        if (!next || next == ptr)
+            break;
+        ptr = next;
     }
     return 0;
 }
@@ -206,16 +428,20 @@ static int xhci_pci_bar(BYTE bus, BYTE slot, BYTE func,
     return *base != 0 && *size != 0;
 }
 
-static void xhci_ring_init(xhci_ring *ring, xhci_trb *trbs, DWORD link_chain)
+static int xhci_ring_init(xhci_ring *ring, DWORD link_chain)
 {
+    xhci_trb *trbs = (xhci_trb *)ring->dma.cpu_addr;
+    if (!trbs || ring->dma.length != sizeof(xhci_trb) * XHCI_TRBS)
+        return 0;
     memset(trbs, 0, sizeof(xhci_trb) * XHCI_TRBS);
     ring->trbs = trbs;
     ring->enqueue = 0;
     ring->cycle = 1;
     ring->link_chain = link_chain;
-    trbs[XHCI_TRBS - 1].parameter = (u64)usb_phys(trbs);
+    trbs[XHCI_TRBS - 1].parameter = ring->dma.dma_addr;
     trbs[XHCI_TRBS - 1].control = XHCI_TRB_LINK | (1u << 1) |
                                     link_chain | XHCI_TRB_CYCLE;
+    return 1;
 }
 
 static xhci_trb *xhci_ring_put(xhci_ring *ring, u64 parameter, DWORD status,
@@ -237,10 +463,9 @@ static xhci_trb *xhci_ring_put(xhci_ring *ring, u64 parameter, DWORD status,
     return trb;
 }
 
-static xhci_trb *xhci_ring_buffer(xhci_ring *ring, BYTE *data, DWORD len,
+static xhci_trb *xhci_ring_buffer(xhci_ring *ring, u64 phys, DWORD len,
                                   DWORD control, DWORD final_control)
 {
-    u64 phys = (u64)usb_phys(data);
     xhci_trb *last = 0;
     while (len) {
         DWORD chunk = 0x10000u - (DWORD)(phys & 0xFFFF);
@@ -258,27 +483,52 @@ static xhci_trb *xhci_ring_buffer(xhci_ring *ring, BYTE *data, DWORD len,
     return last;
 }
 
-static int xhci_next_event(DWORD wanted_type, u64 wanted_ptr,
-                           DWORD *completion, DWORD *slot)
+static int xhci_next_event(xhci_hcd *hcd, DWORD wanted_type, u64 wanted_ptr,
+                           xhci_ring *wanted_ring, DWORD first,
+                           DWORD wanted_endpoint, DWORD *completion,
+                           DWORD *slot)
 {
     DWORD spins;
-    volatile BYTE *intr = xhci_runtime + 0x20;
+    DWORD flags;
+    volatile BYTE *intr = hcd->runtime + 0x20;
     for (spins = 0; spins < XHCI_TIMEOUT; spins++) {
-        xhci_trb *event = &xhci_event_trbs[xhci_event_dequeue];
+        if (hcd->slot && !xhci_device_connected(hcd)) {
+            hcd->connection_lost = 1;
+            return 0;
+        }
+        xhci_trb *event = &hcd->event_trbs[hcd->event_dequeue];
         DWORD control = event->control;
-        if ((control & 1) == xhci_event_cycle) {
+        if ((control & 1) == hcd->event_cycle) {
             DWORD type = (control >> 10) & 0x3F;
+            DWORD event_endpoint = (control >> 16) & 0x1F;
             u64 pointer = event->parameter & ~(u64)0xF;
             DWORD cc = event->status >> 24;
             DWORD event_slot = control >> 24;
-            xhci_event_dequeue++;
-            if (xhci_event_dequeue == XHCI_EVENT_TRBS) {
-                xhci_event_dequeue = 0;
-                xhci_event_cycle ^= 1;
+            hcd->event_dequeue++;
+            if (hcd->event_dequeue == XHCI_EVENT_TRBS) {
+                hcd->event_dequeue = 0;
+                hcd->event_cycle ^= 1;
             }
             xhci_w64(intr, 0x18,
-                     (u64)usb_phys(&xhci_event_trbs[xhci_event_dequeue]) | 8);
-            if (type == wanted_type && (!wanted_ptr || pointer == wanted_ptr)) {
+                     hcd->event_dma.dma_addr +
+                     hcd->event_dequeue * sizeof(xhci_trb) | 8);
+            if (type == wanted_type && wanted_ring) {
+                u64 base = wanted_ring->dma.dma_addr;
+                u64 delta = pointer - base;
+                DWORD index = (DWORD)(delta / sizeof(xhci_trb));
+                DWORD end = wanted_ring->enqueue;
+                int in_td = pointer >= base && !(delta & 0xF) &&
+                            index < XHCI_TRBS - 1 &&
+                            ((first < end && index >= first && index < end) ||
+                             (first > end && (index >= first || index < end)));
+                if (!in_td || event_endpoint != wanted_endpoint ||
+                    event_slot != hcd->slot)
+                    continue;
+            } else if (type != wanted_type ||
+                       (wanted_ptr && pointer != wanted_ptr)) {
+                continue;
+            }
+            if (type == wanted_type) {
                 if (completion)
                     *completion = cc;
                 if (slot)
@@ -286,57 +536,129 @@ static int xhci_next_event(DWORD wanted_type, u64 wanted_ptr,
                 return 1;
             }
         } else {
-            usb_io_delay();
+            storeflags(&flags);
+            if (hcd->has_msix && (flags & 0x200) &&
+                !(spins & 0xFFFF)) {
+                DWORD irq_before = hcd->irq_count;
+                hcd->irq_wait_count++;
+                asm volatile ("hlt" ::: "memory");
+                if (!hcd->msix_qualified_reported &&
+                    hcd->irq_count != irq_before &&
+                    strstr(kernel_cmdline, "xhci-msix-test")) {
+                    hcd->msix_qualified_reported = 1;
+                    serial_puts("XHCI_MSIX_OK\n");
+                }
+            } else {
+                usb_io_delay();
+            }
         }
     }
     return 0;
 }
 
-static int xhci_command(u64 parameter, DWORD status, DWORD control,
+static int xhci_command(xhci_hcd *hcd, u64 parameter, DWORD status,
+                        DWORD control,
                         DWORD *slot)
 {
     DWORD cc = 0;
-    xhci_trb *trb = xhci_ring_put(&xhci_cmd_ring, parameter, status, control);
-    asm volatile ("wbinvd");
-    xhci_doorbell[0] = 0;
+    unsigned long long trb_dma;
+    xhci_trb *trb = xhci_ring_put(&hcd->cmd_ring, parameter, status, control);
+    if (!dma_region_map(&hcd->cmd_ring.dma, trb, sizeof(*trb), &trb_dma))
+        return 0;
     xhci_mb();
-    if (!xhci_next_event(XHCI_TRB_COMMAND_EV, (u64)usb_phys(trb), &cc, slot)) {
+    hcd->doorbell[0] = 0;
+    xhci_mb();
+    if (!xhci_next_event(hcd, XHCI_TRB_COMMAND_EV, trb_dma, 0, 0, 0,
+                         &cc, slot)) {
+        if (hcd->connection_lost)
+            return 0;
         printf("xhci: command timeout type=%u\n", (control >> 10) & 0x3F);
-        xhci_recovery_needed = 1;
+        hcd->recovery_needed = 1;
         return 0;
     }
     if (cc != XHCI_CC_SUCCESS) {
         printf("xhci: command failed type=%u cc=%u\n",
                (control >> 10) & 0x3F, cc);
-         xhci_recovery_needed = 1;
+        hcd->recovery_needed = 1;
         return 0;
     }
     return 1;
 }
 
-static DWORD *xhci_input_context(DWORD index)
+static DWORD *xhci_input_context(xhci_hcd *hcd, DWORD index)
 {
-    return (DWORD *)(xhci_input_ctx + index * xhci_context_size);
+    return (DWORD *)(hcd->input_ctx + index * hcd->context_size);
 }
 
-static DWORD *xhci_device_context(DWORD index)
+static void xhci_free_dma_storage(xhci_hcd *hcd)
 {
-    return (DWORD *)(xhci_device_ctx + index * xhci_context_size);
+    dma_free_coherent(&hcd->cmd_ring.dma, free);
+    dma_free_coherent(&hcd->event_dma, free);
+    dma_free_coherent(&hcd->ep0_ring.dma, free);
+    dma_free_coherent(&hcd->ep_in_ring.dma, free);
+    dma_free_coherent(&hcd->ep_out_ring.dma, free);
+    dma_free_coherent(&hcd->dcbaa_dma, free);
+    dma_free_coherent(&hcd->erst_dma, free);
+    dma_free_coherent(&hcd->input_ctx_dma, free);
+    dma_free_coherent(&hcd->device_ctx_dma, free);
+    hcd->dcbaa = 0;
+    hcd->event_trbs = 0;
+    hcd->erst = 0;
+    hcd->input_ctx = 0;
+    hcd->device_ctx = 0;
 }
 
-static void xhci_fill_slot_context(DWORD *slot, DWORD entries)
+static int xhci_alloc_dma_storage(xhci_hcd *hcd)
 {
-    memset(slot, 0, xhci_context_size);
-    slot[0] = (xhci_speed << 20) | (entries << 27);
-    slot[1] = xhci_port << 16;
+    if (hcd->dcbaa_dma.cpu_addr)
+        return 1;
+    if (!dma_alloc_coherent(&hcd->cmd_ring.dma,
+                            sizeof(xhci_trb) * XHCI_TRBS, 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->event_dma,
+                            sizeof(xhci_trb) * XHCI_EVENT_TRBS, 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->ep0_ring.dma,
+                            sizeof(xhci_trb) * XHCI_TRBS, 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->ep_in_ring.dma,
+                            sizeof(xhci_trb) * XHCI_TRBS, 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->ep_out_ring.dma,
+                            sizeof(xhci_trb) * XHCI_TRBS, 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->dcbaa_dma, 256 * sizeof(u64), 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->erst_dma, sizeof(xhci_erst_entry), 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->input_ctx_dma, 33 * 64, 64,
+                            0xFFFFFFFFULL, malloc, free) ||
+        !dma_alloc_coherent(&hcd->device_ctx_dma, 32 * 64, 64,
+                            0xFFFFFFFFULL, malloc, free)) {
+        xhci_free_dma_storage(hcd);
+        return 0;
+    }
+    hcd->dcbaa = (u64 *)hcd->dcbaa_dma.cpu_addr;
+    hcd->event_trbs = (xhci_trb *)hcd->event_dma.cpu_addr;
+    hcd->erst = (xhci_erst_entry *)hcd->erst_dma.cpu_addr;
+    hcd->input_ctx = (BYTE *)hcd->input_ctx_dma.cpu_addr;
+    hcd->device_ctx = (BYTE *)hcd->device_ctx_dma.cpu_addr;
+    return 1;
 }
 
-static void xhci_fill_ep_context(DWORD *ep, DWORD type, DWORD max_packet,
-                                 DWORD max_burst, xhci_ring *ring,
-                                 DWORD average)
+static void xhci_fill_slot_context(xhci_hcd *hcd, DWORD *slot, DWORD entries)
 {
-    u64 dequeue = (u64)usb_phys(ring->trbs) | 1;
-    memset(ep, 0, xhci_context_size);
+    memset(slot, 0, hcd->context_size);
+    slot[0] = (hcd->speed << 20) | (entries << 27);
+    slot[1] = hcd->port << 16;
+}
+
+static void xhci_fill_ep_context(xhci_hcd *hcd, DWORD *ep, DWORD type,
+                                 DWORD max_packet, DWORD max_burst,
+                                 xhci_ring *ring, DWORD average)
+{
+    u64 dequeue = ring->dma.dma_addr | 1;
+    memset(ep, 0, hcd->context_size);
         ep[1] = (3u << 1) | (type << 3) | (max_burst << 8) |
             (max_packet << 16);
     ep[2] = (DWORD)dequeue;
@@ -344,7 +666,7 @@ static void xhci_fill_ep_context(DWORD *ep, DWORD type, DWORD max_packet,
     ep[4] = average;
 }
 
-static int xhci_setup_scratchpads(DWORD hcs2)
+static int xhci_setup_scratchpads(xhci_hcd *hcd, DWORD hcs2)
 {
     DWORD high = (hcs2 >> 21) & 0x1F;
     DWORD low = (hcs2 >> 27) & 0x1F;
@@ -358,133 +680,233 @@ static int xhci_setup_scratchpads(DWORD hcs2)
         printf("xhci: unsupported scratchpad count=%u\n", count);
         return 0;
     }
-    if (!xhci_scratchpad_array_alloc || !xhci_scratchpad_pages_alloc) {
-        xhci_scratchpad_array_alloc = malloc(count * sizeof(u64) + 63);
-        xhci_scratchpad_pages_alloc = malloc(count * 4096 + 4095);
-        if (!xhci_scratchpad_array_alloc || !xhci_scratchpad_pages_alloc) {
+    if (!hcd->scratchpad_array_dma.cpu_addr ||
+        !hcd->scratchpad_pages_dma.cpu_addr) {
+        if (!dma_alloc_coherent(&hcd->scratchpad_array_dma,
+                                count * sizeof(u64), 64, 0xFFFFFFFFULL,
+                                malloc, free) ||
+            !dma_alloc_coherent(&hcd->scratchpad_pages_dma,
+                                count * 4096, 4096, 0xFFFFFFFFULL,
+                                malloc, free)) {
+            dma_free_coherent(&hcd->scratchpad_array_dma, free);
+            dma_free_coherent(&hcd->scratchpad_pages_dma, free);
             printf("xhci: scratchpad allocation failed count=%u\n", count);
             return 0;
         }
-        xhci_scratchpad_count = count;
-    } else if (count != xhci_scratchpad_count) {
+        hcd->scratchpad_count = count;
+    } else if (count != hcd->scratchpad_count) {
         printf("xhci: scratchpad count changed old=%u new=%u\n",
-               xhci_scratchpad_count, count);
+               hcd->scratchpad_count, count);
         return 0;
     }
-    array = (u64 *)(((unsigned long)xhci_scratchpad_array_alloc + 63) & ~63UL);
-    pages = (BYTE *)(((unsigned long)xhci_scratchpad_pages_alloc + 4095) &
-                     ~4095UL);
-    if (((u64)(unsigned long)array >> 32) ||
-        ((u64)(unsigned long)(pages + count * 4096 - 1) >> 32)) {
-        printf("xhci: scratchpads are outside 32-bit DMA range\n");
-        return 0;
-    }
+    array = (u64 *)hcd->scratchpad_array_dma.cpu_addr;
+    pages = (BYTE *)hcd->scratchpad_pages_dma.cpu_addr;
     memset(array, 0, count * sizeof(u64));
     memset(pages, 0, count * 4096);
     for (i = 0; i < count; i++)
-        array[i] = (u64)usb_phys(pages + i * 4096);
-    xhci_dcbaa[0] = (u64)usb_phys(array);
+        array[i] = hcd->scratchpad_pages_dma.dma_addr + i * 4096;
+    hcd->dcbaa[0] = hcd->scratchpad_array_dma.dma_addr;
     printf("xhci: scratchpads=%u\n", count);
     return 1;
 }
 
-static int xhci_address_device(int block_set_address)
+static int xhci_address_device(xhci_hcd *hcd, int block_set_address)
 {
     DWORD *control;
     DWORD *slot;
     DWORD *ep0;
-    memset(xhci_input_ctx, 0, sizeof(xhci_input_ctx));
-    control = xhci_input_context(0);
-    slot = xhci_input_context(1);
-    ep0 = xhci_input_context(2);
+    memset(hcd->input_ctx, 0, hcd->input_ctx_dma.length);
+    control = xhci_input_context(hcd, 0);
+    slot = xhci_input_context(hcd, 1);
+    ep0 = xhci_input_context(hcd, 2);
     control[1] = 3;
-    xhci_fill_slot_context(slot, 1);
-    xhci_fill_ep_context(ep0, 4, xhci_ep0_mps, 0, &xhci_ep0_ring, 8);
-    return xhci_command((u64)usb_phys(xhci_input_ctx), 0,
+    xhci_fill_slot_context(hcd, slot, 1);
+    xhci_fill_ep_context(hcd, ep0, 4, hcd->ep0_mps, 0,
+                         &hcd->ep0_ring, 8);
+    return xhci_command(hcd, hcd->input_ctx_dma.dma_addr, 0,
                         XHCI_TRB_ADDRESS | (block_set_address ? (1u << 9) : 0) |
-                        (xhci_slot << 24), 0);
+                        (hcd->slot << 24), 0);
 }
 
-static int xhci_set_ep0_packet_size(BYTE encoded)
+static int xhci_set_ep0_packet_size(xhci_hcd *hcd, BYTE encoded)
 {
-    DWORD size = xhci_speed >= 4 ? (1u << encoded) : encoded;
+    DWORD size = hcd->speed >= 4 ? (1u << encoded) : encoded;
     if (size != 8 && size != 16 && size != 32 && size != 64 && size != 512) {
         printf("xhci: invalid EP0 packet size=%u encoded=%u\n", size, encoded);
         return 0;
     }
-    xhci_ep0_mps = size;
+    hcd->ep0_mps = size;
     return 1;
 }
 
-static int xhci_transfer(xhci_ring *ring, DWORD endpoint, BYTE *data,
-                         DWORD len, DWORD control)
+static DWORD xhci_buffer_trb_count(u64 dma_addr, DWORD len)
+{
+    DWORD count = 0;
+    while (len) {
+        DWORD chunk = 0x10000u - (DWORD)(dma_addr & 0xFFFF);
+        if (chunk > len)
+            chunk = len;
+        dma_addr += chunk;
+        len -= chunk;
+        count++;
+    }
+    return count;
+}
+
+static int xhci_transfer_sg(xhci_hcd *hcd, xhci_ring *ring, DWORD endpoint,
+                            const dma_segment *segments, DWORD segment_count,
+                            DWORD control, DWORD direction)
 {
     DWORD cc = 0;
-    int drop = xhci_fault_drop_next;
-    xhci_trb *last = xhci_ring_buffer(ring, data, len, control,
-                                      XHCI_TRB_IOC);
-    if (!last)
+    DWORD first = ring->enqueue;
+    DWORD index;
+    DWORD len = 0;
+    DWORD trb_count = 0;
+    int drop = hcd->fault_drop_next;
+    int result = 0;
+    dma_sg_mapping mapping = { { { 0 } }, 0, 0, 0 };
+    xhci_trb *last;
+    if (!xhci_device_connected(hcd)) {
+        hcd->connection_lost = 1;
         return 0;
-    asm volatile ("wbinvd");
+    }
+    if (!dma_map_sg_device(&mapping, segments, segment_count, direction,
+                           &hcd->stream_dma))
+        return 0;
+    for (index = 0; index < mapping.count; index++) {
+        trb_count += xhci_buffer_trb_count(mapping.mappings[index].dma_addr,
+                                           mapping.mappings[index].length);
+        len += mapping.mappings[index].length;
+        if (len < mapping.mappings[index].length ||
+            trb_count >= XHCI_TRBS - 1)
+            goto out;
+    }
+    for (index = 0; index < mapping.count; index++) {
+        last = xhci_ring_buffer(ring, mapping.mappings[index].dma_addr,
+                                mapping.mappings[index].length, control,
+                                index + 1 == mapping.count ? XHCI_TRB_IOC :
+                                                            XHCI_TRB_CHAIN);
+        if (!last)
+            goto out;
+    }
+    xhci_mb();
     if (drop) {
-        xhci_fault_drop_next = 0;
+        hcd->fault_drop_next = 0;
         printf("xhci: test dropping bulk doorbell ep=%u\n", endpoint);
     } else {
-        xhci_doorbell[xhci_slot] = endpoint;
+        hcd->doorbell[hcd->slot] = endpoint;
         xhci_mb();
     }
-    if (!xhci_next_event(XHCI_TRB_TRANSFER_EV, (u64)usb_phys(last), &cc, 0)) {
-        printf("xhci: transfer timeout ep=%u len=%u\n", endpoint, len);
-        xhci_recovery_needed = 1;
-        return 0;
+    if (hcd->fault_disconnect_inflight) {
+        DWORD waits;
+        hcd->fault_disconnect_inflight = 0;
+        printf("XHCI_DISCONNECT_INFLIGHT\n");
+           for (waits = 0; waits < XHCI_TIMEOUT &&
+               xhci_device_connected(hcd); waits++)
+            usb_io_delay();
     }
-    asm volatile ("wbinvd");
+    if (!xhci_next_event(hcd, XHCI_TRB_TRANSFER_EV, 0,
+                         ring, first, endpoint,
+                         &cc, 0)) {
+        if (hcd->connection_lost)
+            goto out;
+        printf("xhci: transfer timeout ep=%u len=%u\n", endpoint, len);
+        hcd->recovery_needed = 1;
+        goto out;
+    }
+    xhci_mb();
     if (cc != XHCI_CC_SUCCESS && cc != XHCI_CC_SHORT_PACKET) {
         printf("xhci: transfer failed ep=%u cc=%u\n", endpoint, cc);
-        xhci_recovery_needed = 1;
-        return 0;
+        if (cc == XHCI_CC_STALL && endpoint < 32)
+            hcd->stalled_endpoints |= 1u << endpoint;
+        else
+            hcd->recovery_needed = 1;
+        goto out;
     }
-    return 1;
+    result = 1;
+    if (hcd->stream_dma.force_bounce) {
+        if (direction == DMA_TO_DEVICE || direction == DMA_BIDIRECTIONAL)
+            hcd->bounce_to_device_qualified = 1;
+        if (direction == DMA_FROM_DEVICE || direction == DMA_BIDIRECTIONAL)
+            hcd->bounce_from_device_qualified = 1;
+        if (hcd->bounce_to_device_qualified &&
+            hcd->bounce_from_device_qualified &&
+            !hcd->bounce_qualified_reported) {
+            hcd->bounce_qualified_reported = 1;
+            serial_puts("XHCI_BOUNCE_OK\n");
+        }
+    }
+out:
+    dma_unmap_sg(&mapping);
+    return result;
 }
 
-static int xhci_control(usb_setup *setup, void *data, int len)
+static int xhci_transfer(xhci_hcd *hcd, xhci_ring *ring, DWORD endpoint,
+                         BYTE *data, DWORD len, DWORD control,
+                         DWORD direction)
 {
-    xhci_trb *last;
+    dma_segment segment;
+    segment.cpu_addr = data;
+    segment.length = len;
+    return xhci_transfer_sg(hcd, ring, endpoint, &segment, 1, control,
+                            direction);
+}
+
+static int xhci_control(xhci_hcd *hcd, usb_setup *setup, void *data, int len)
+{
+    DWORD first = hcd->ep0_ring.enqueue;
+    DWORD direction = (setup->bmRequestType & 0x80)
+                      ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
     u64 setup_value = 0;
+    int result = 0;
+    dma_mapping mapping = {0};
     DWORD trt = len ? ((setup->bmRequestType & 0x80) ? 3 : 2) : 0;
+    if (len && !dma_map_single_device(&mapping, data, (DWORD)len, direction,
+                                      &hcd->stream_dma))
+        return 0;
     memcpy(&setup_value, setup, 8);
-    xhci_ring_put(&xhci_ep0_ring, setup_value, 8,
+    xhci_ring_put(&hcd->ep0_ring, setup_value, 8,
                   XHCI_TRB_SETUP | XHCI_TRB_IDT | XHCI_TRB_CHAIN |
                   (trt << 16));
     if (len) {
-        xhci_ring_buffer(&xhci_ep0_ring, data, (DWORD)len,
-                         XHCI_TRB_DATA |
-                         ((setup->bmRequestType & 0x80) ? XHCI_TRB_DIR_IN : 0),
-                         XHCI_TRB_CHAIN);
+        if (!xhci_ring_buffer(&hcd->ep0_ring, mapping.dma_addr, (DWORD)len,
+                      XHCI_TRB_DATA |
+                      ((setup->bmRequestType & 0x80)
+                       ? XHCI_TRB_DIR_IN : 0),
+                      XHCI_TRB_CHAIN))
+            goto out;
     }
-    last = xhci_ring_put(&xhci_ep0_ring, 0, 0,
-                         XHCI_TRB_STATUS | XHCI_TRB_IOC |
-                         ((!len || !(setup->bmRequestType & 0x80))
-                          ? XHCI_TRB_DIR_IN : 0));
-    asm volatile ("wbinvd");
-    xhci_doorbell[xhci_slot] = 1;
+        xhci_ring_put(&hcd->ep0_ring, 0, 0,
+              XHCI_TRB_STATUS | XHCI_TRB_IOC |
+              ((!len || !(setup->bmRequestType & 0x80))
+               ? XHCI_TRB_DIR_IN : 0));
+    xhci_mb();
+    hcd->doorbell[hcd->slot] = 1;
     xhci_mb();
     {
         DWORD cc = 0;
-        if (!xhci_next_event(XHCI_TRB_TRANSFER_EV, (u64)usb_phys(last), &cc, 0)) {
+        if (!xhci_next_event(hcd, XHCI_TRB_TRANSFER_EV, 0,
+                 &hcd->ep0_ring, first,
+                     1, &cc, 0)) {
+            if (hcd->connection_lost)
+                goto out;
             printf("xhci: control timeout request=%u\n", setup->bRequest);
-            xhci_recovery_needed = 1;
-            return 0;
+            hcd->recovery_needed = 1;
+            goto out;
         }
-        asm volatile ("wbinvd");
+        xhci_mb();
         if (cc != XHCI_CC_SUCCESS && cc != XHCI_CC_SHORT_PACKET) {
             printf("xhci: control failed request=%u cc=%u\n",
                    setup->bRequest, cc);
-                 xhci_recovery_needed = 1;
-            return 0;
+                hcd->recovery_needed = 1;
+            goto out;
         }
     }
-    return 1;
+    result = 1;
+out:
+    if (mapping.active)
+        dma_unmap_single(&mapping);
+    return result;
 }
 
 static DWORD xhci_endpoint_id(BYTE endpoint, int in)
@@ -492,14 +914,65 @@ static DWORD xhci_endpoint_id(BYTE endpoint, int in)
     return (DWORD)endpoint * 2 + (in ? 1 : 0);
 }
 
-static int xhci_bulk(BYTE endpoint, int in, BYTE *data, int len)
+static int xhci_bulk(xhci_hcd *hcd, BYTE endpoint, int in, BYTE *data,
+                     int len)
 {
     DWORD endpoint_id = xhci_endpoint_id(endpoint, in);
-    xhci_ring *ring = in ? &xhci_ep_in_ring : &xhci_ep_out_ring;
-    return xhci_transfer(ring, endpoint_id, data, (DWORD)len, XHCI_TRB_NORMAL);
+    xhci_ring *ring = in ? &hcd->ep_in_ring : &hcd->ep_out_ring;
+    if (len > 1 && strstr(kernel_cmdline, "xhci-sg-test")) {
+        dma_segment segments[2];
+        int result;
+        segments[0].cpu_addr = data;
+        segments[0].length = (DWORD)len / 2;
+        segments[1].cpu_addr = data + segments[0].length;
+        segments[1].length = (DWORD)len - segments[0].length;
+        result = xhci_transfer_sg(hcd, ring, endpoint_id, segments, 2,
+                                  XHCI_TRB_NORMAL,
+                                  in ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
+        if (result && !hcd->sg_qualified_reported) {
+            hcd->sg_qualified_reported = 1;
+            serial_puts("XHCI_SG_OK\n");
+        }
+        return result;
+    }
+    return xhci_transfer(hcd, ring, endpoint_id, data, (DWORD)len,
+                         XHCI_TRB_NORMAL,
+                         in ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 }
 
-static int xhci_configure_endpoints(BYTE ep_in, WORD mps_in,
+static int xhci_recover_endpoint(xhci_hcd *hcd, DWORD endpoint,
+                                 xhci_ring *ring)
+{
+    u64 dequeue;
+    unsigned long long trb_dma;
+    if (endpoint >= 32 || !(hcd->stalled_endpoints & (1u << endpoint)))
+        return 1;
+    if (!xhci_command(hcd, 0, 0, XHCI_TRB_RESET_EP |
+                      (endpoint << 16) | (hcd->slot << 24), 0))
+        return 0;
+    if (!dma_region_map(&ring->dma, &ring->trbs[ring->enqueue],
+                        sizeof(xhci_trb), &trb_dma))
+        return 0;
+    dequeue = trb_dma | ring->cycle;
+    if (!xhci_command(hcd, dequeue, 0, XHCI_TRB_SET_DEQUEUE |
+                      (endpoint << 16) | (hcd->slot << 24), 0))
+        return 0;
+    hcd->stalled_endpoints &= ~(1u << endpoint);
+    return 1;
+}
+
+static int xhci_recover_bulk_endpoints(xhci_hcd *hcd, BYTE ep_in,
+                                       BYTE ep_out)
+{
+    DWORD in_id = xhci_endpoint_id(ep_in, 1);
+    DWORD out_id = xhci_endpoint_id(ep_out, 0);
+    if (!xhci_recover_endpoint(hcd, in_id, &hcd->ep_in_ring) ||
+        !xhci_recover_endpoint(hcd, out_id, &hcd->ep_out_ring))
+        return 0;
+    return hcd->stalled_endpoints == 0;
+}
+
+static int xhci_configure_endpoints(xhci_hcd *hcd, BYTE ep_in, WORD mps_in,
                                     BYTE burst_in, BYTE ep_out, WORD mps_out,
                                     BYTE burst_out)
 {
@@ -507,39 +980,42 @@ static int xhci_configure_endpoints(BYTE ep_in, WORD mps_in,
     DWORD out_id = xhci_endpoint_id(ep_out, 0);
     DWORD entries = in_id > out_id ? in_id : out_id;
     DWORD *control;
-    memset(xhci_input_ctx, 0, sizeof(xhci_input_ctx));
-    xhci_ring_init(&xhci_ep_in_ring, xhci_ep_in_trbs, XHCI_TRB_CHAIN);
-    xhci_ring_init(&xhci_ep_out_ring, xhci_ep_out_trbs, XHCI_TRB_CHAIN);
-    control = xhci_input_context(0);
+    memset(hcd->input_ctx, 0, hcd->input_ctx_dma.length);
+    if (!xhci_ring_init(&hcd->ep_in_ring, XHCI_TRB_CHAIN) ||
+        !xhci_ring_init(&hcd->ep_out_ring, XHCI_TRB_CHAIN)) {
+        printf("xhci: bulk ring DMA mapping failed\n");
+        return 0;
+    }
+    control = xhci_input_context(hcd, 0);
     control[1] = (1u << 0) | (1u << in_id) | (1u << out_id);
-    xhci_fill_slot_context(xhci_input_context(1), entries);
-    xhci_fill_ep_context(xhci_input_context(in_id + 1), 6, mps_in, burst_in,
-                         &xhci_ep_in_ring, USB_BULK_MAX);
-    xhci_fill_ep_context(xhci_input_context(out_id + 1), 2, mps_out, burst_out,
-                         &xhci_ep_out_ring, USB_BULK_MAX);
-    if (!xhci_command((u64)usb_phys(xhci_input_ctx), 0,
-                      XHCI_TRB_CONFIG_EP | (xhci_slot << 24), 0))
+    xhci_fill_slot_context(hcd, xhci_input_context(hcd, 1), entries);
+    xhci_fill_ep_context(hcd, xhci_input_context(hcd, in_id + 1), 6,
+                         mps_in, burst_in, &hcd->ep_in_ring, USB_BULK_MAX);
+    xhci_fill_ep_context(hcd, xhci_input_context(hcd, out_id + 1), 2,
+                         mps_out, burst_out, &hcd->ep_out_ring, USB_BULK_MAX);
+    if (!xhci_command(hcd, hcd->input_ctx_dma.dma_addr, 0,
+                      XHCI_TRB_CONFIG_EP | (hcd->slot << 24), 0))
         return 0;
     printf("xhci: configured bulk endpoints in=%u out=%u\n", in_id, out_id);
     return 1;
 }
 
-static int xhci_legacy_handoff(DWORD hcc, u64 bar_size)
+static int xhci_legacy_handoff(xhci_hcd *hcd, DWORD hcc, u64 bar_size)
 {
     DWORD off = ((hcc >> 16) & 0xFFFF) * 4;
     DWORD guard = 64;
     while (off && (u64)off + 8 <= bar_size && guard--) {
-        DWORD cap = xhci_r32(xhci_mmio, off);
+        DWORD cap = xhci_r32(hcd->mmio, off);
         DWORD id = cap & 0xFF;
         DWORD next = (cap >> 8) & 0xFF;
         if (id == 1) {
             DWORD value = cap | (1u << 24);
-            xhci_w32(xhci_mmio, off, value);
-            if (!xhci_wait32(xhci_mmio, off, 1u << 16, 0)) {
+            xhci_w32(hcd->mmio, off, value);
+            if (!xhci_wait32(hcd->mmio, off, 1u << 16, 0)) {
                 printf("xhci: firmware ownership handoff timed out\n");
                 return 0;
             }
-            xhci_w32(xhci_mmio, off + 4, 0);
+            xhci_w32(hcd->mmio, off + 4, 0);
             return 1;
         }
         if (!next)
@@ -549,41 +1025,50 @@ static int xhci_legacy_handoff(DWORD hcc, u64 bar_size)
     return 1;
 }
 
-static int xhci_reset_port(void)
+static int xhci_reset_port(xhci_hcd *hcd)
 {
     DWORD p;
-    DWORD off = 0x400 + (xhci_port - 1) * 0x10;
-    p = xhci_r32(xhci_op, off);
+    DWORD off = 0x400 + (hcd->port - 1) * 0x10;
+    p = xhci_r32(hcd->op, off);
     if (!(p & XHCI_PORT_CCS))
         return 0;
-    xhci_w32(xhci_op, off, (p & ~XHCI_PORT_CHANGE) | XHCI_PORT_RESET);
-    if (!xhci_wait32(xhci_op, off, XHCI_PORT_RESET, 0))
+    xhci_w32(hcd->op, off, (p & ~XHCI_PORT_CHANGE) | XHCI_PORT_RESET);
+    if (!xhci_wait32(hcd->op, off, XHCI_PORT_RESET, 0))
         return 0;
-    p = xhci_r32(xhci_op, off);
-    xhci_speed = XHCI_PORT_SPEED(p);
-    if (xhci_speed >= 4)
-        xhci_ep0_mps = 512;
-    else if (xhci_speed == 3)
-        xhci_ep0_mps = 64;
+    p = xhci_r32(hcd->op, off);
+    hcd->speed = XHCI_PORT_SPEED(p);
+    if (hcd->speed >= 4)
+        hcd->ep0_mps = 512;
+    else if (hcd->speed == 3)
+        hcd->ep0_mps = 64;
     else
-        xhci_ep0_mps = 8;
+        hcd->ep0_mps = 8;
     return (p & (XHCI_PORT_CCS | XHCI_PORT_PED)) ==
            (XHCI_PORT_CCS | XHCI_PORT_PED);
 }
 
-static int xhci_init_controller(void)
+static int xhci_init_hcd(xhci_hcd *hcd)
 {
     BYTE bus, slot, func;
     u64 bar = 0, bar_size = 0, required;
     DWORD caplen, hcs1, hcs2, hcc, dboff, rtsoff, found = 0;
     DWORD port;
     volatile BYTE *intr;
-    if (!xhci_find_controller(&bus, &slot, &func)) {
+    if (!hcd)
+        return 0;
+    if (!hcd->pci_discovered && !xhci_discover_hcds()) {
         printf("xhci: no controller found\n");
         return 0;
     }
-    if (xhci_fault_fail_init) {
-        xhci_fault_fail_init = 0;
+    if (!hcd->pci_discovered) {
+        printf("xhci: HCD has no discovered PCI function\n");
+        return 0;
+    }
+    bus = hcd->pci_bus;
+    slot = hcd->pci_slot;
+    func = hcd->pci_func;
+    if (hcd->fault_fail_init) {
+        hcd->fault_fail_init = 0;
         printf("xhci: test forcing recovery initialization failure\n");
         return 0;
     }
@@ -594,78 +1079,114 @@ static int xhci_init_controller(void)
     }
     pci_write16(bus, slot, func, 0x04,
                 pci_read16(bus, slot, func, 0x04) | 0x06);
-    xhci_mmio = (volatile BYTE *)mmio_map(bar, bar_size);
-    if (!xhci_mmio) {
+    hcd->mmio = (volatile BYTE *)mmio_map(bar, bar_size);
+    if (!hcd->mmio) {
         printf("xhci: cannot map BAR 0x%llx size=%llu\n",
                (unsigned long long)bar, (unsigned long long)bar_size);
         return 0;
     }
-    caplen = *(volatile BYTE *)xhci_mmio;
-    hcs1 = xhci_r32(xhci_mmio, 0x04);
-    hcs2 = xhci_r32(xhci_mmio, 0x08);
-    hcc = xhci_r32(xhci_mmio, 0x10);
-    dboff = xhci_r32(xhci_mmio, 0x14) & ~3u;
-    rtsoff = xhci_r32(xhci_mmio, 0x18) & ~0x1Fu;
-    xhci_op = xhci_mmio + caplen;
-    xhci_runtime = xhci_mmio + rtsoff;
-    xhci_doorbell = (volatile DWORD *)(xhci_mmio + dboff);
-    xhci_context_size = (hcc & (1u << 2)) ? 64 : 32;
-    xhci_max_ports = (hcs1 >> 24) & 0xFF;
-    required = caplen + 0x400 + xhci_max_ports * 0x10;
+    caplen = *(volatile BYTE *)hcd->mmio;
+    hcs1 = xhci_r32(hcd->mmio, 0x04);
+    hcs2 = xhci_r32(hcd->mmio, 0x08);
+    hcc = xhci_r32(hcd->mmio, 0x10);
+    dboff = xhci_r32(hcd->mmio, 0x14) & ~3u;
+    rtsoff = xhci_r32(hcd->mmio, 0x18) & ~0x1Fu;
+    hcd->op = hcd->mmio + caplen;
+    hcd->runtime = hcd->mmio + rtsoff;
+    hcd->doorbell = (volatile DWORD *)(hcd->mmio + dboff);
+    hcd->context_size = (hcc & (1u << 2)) ? 64 : 32;
+    hcd->max_ports = (hcs1 >> 24) & 0xFF;
+    hcd->stream_dma.dma_mask = 0xFFFFFFFFULL;
+    hcd->stream_dma.bounce_alignment = 64;
+    hcd->stream_dma.force_bounce =
+        strstr(kernel_cmdline, "xhci-bounce-test") != 0;
+    hcd->stream_dma.allocate = malloc;
+    hcd->stream_dma.release = free;
+    hcd->bounce_to_device_qualified = 0;
+    hcd->bounce_from_device_qualified = 0;
+    hcd->bounce_qualified_reported = 0;
+    required = caplen + 0x400 + hcd->max_ports * 0x10;
     if ((u64)required > bar_size || (u64)dboff + 0x24 > bar_size ||
         (u64)rtsoff + 0x40 > bar_size) {
         printf("xhci: register offsets exceed BAR size=%llu\n",
                (unsigned long long)bar_size);
         return 0;
     }
-    if (!xhci_legacy_handoff(hcc, bar_size))
+    if (!xhci_legacy_handoff(hcd, hcc, bar_size))
         return 0;
+    if (strstr(kernel_cmdline, "xhci-vector-reservation-test") &&
+        !xhci_test_vector_reserved) {
+        if (!irq_vector_reserve(IRQ_VECTOR_FIRST_DEVICE,
+                                &xhci_test_reservation_owner)) {
+            printf("xhci: test platform vector reservation failed\n");
+            return 0;
+        }
+        xhci_test_vector_reserved = 1;
+        printf("xhci: test reserved platform vector=%u\n",
+               IRQ_VECTOR_FIRST_DEVICE);
+    }
+    if (strstr(kernel_cmdline, "xhci-poll-test")) {
+        hcd->has_msix = 0;
+        printf("xhci: test forcing polling fallback\n");
+    } else if (!xhci_setup_msix(hcd, bus, slot, func)) {
+        printf("xhci: MSI-X unavailable; polling\n");
+    }
 
-    xhci_w32(xhci_op, 0x00, xhci_r32(xhci_op, 0x00) & ~XHCI_CMD_RUN);
-    if (!xhci_wait32(xhci_op, 0x04, XHCI_STS_HALTED, XHCI_STS_HALTED))
+    xhci_w32(hcd->op, 0x00, xhci_r32(hcd->op, 0x00) & ~XHCI_CMD_RUN);
+    if (!xhci_wait32(hcd->op, 0x04, XHCI_STS_HALTED, XHCI_STS_HALTED))
         return 0;
-    xhci_w32(xhci_op, 0x00, XHCI_CMD_RESET);
-    if (!xhci_wait32(xhci_op, 0x00, XHCI_CMD_RESET, 0) ||
-        !xhci_wait32(xhci_op, 0x04, XHCI_STS_CNR, 0)) {
+    xhci_w32(hcd->op, 0x00, XHCI_CMD_RESET);
+    if (!xhci_wait32(hcd->op, 0x00, XHCI_CMD_RESET, 0) ||
+        !xhci_wait32(hcd->op, 0x04, XHCI_STS_CNR, 0)) {
         printf("xhci: reset timed out\n");
         return 0;
     }
-    if (!(xhci_r32(xhci_op, 0x08) & 1)) {
+    if (!(xhci_r32(hcd->op, 0x08) & 1)) {
         printf("xhci: 4K pages unsupported\n");
         return 0;
     }
 
-    memset(xhci_dcbaa, 0, sizeof(xhci_dcbaa));
-    if (!xhci_setup_scratchpads(hcs2))
+    if (!xhci_alloc_dma_storage(hcd)) {
+        printf("xhci: controller DMA allocation failed\n");
         return 0;
-    memset(xhci_event_trbs, 0, sizeof(xhci_event_trbs));
-    memset(xhci_device_ctx, 0, sizeof(xhci_device_ctx));
-    xhci_ring_init(&xhci_cmd_ring, xhci_cmd_trbs, 0);
-    xhci_ring_init(&xhci_ep0_ring, xhci_ep0_trbs, XHCI_TRB_CHAIN);
-    xhci_event_dequeue = 0;
-    xhci_event_cycle = 1;
-    xhci_erst.address = (u64)usb_phys(xhci_event_trbs);
-    xhci_erst.size = XHCI_EVENT_TRBS;
-    xhci_erst.reserved = 0;
-    intr = xhci_runtime + 0x20;
+    }
+    memset(hcd->dcbaa, 0, hcd->dcbaa_dma.length);
+    if (!xhci_setup_scratchpads(hcd, hcs2))
+        return 0;
+    memset(hcd->event_trbs, 0, hcd->event_dma.length);
+    memset(hcd->device_ctx, 0, hcd->device_ctx_dma.length);
+    if (!xhci_ring_init(&hcd->cmd_ring, 0) ||
+        !xhci_ring_init(&hcd->ep0_ring, XHCI_TRB_CHAIN)) {
+        printf("xhci: command ring DMA mapping failed\n");
+        return 0;
+    }
+    hcd->event_dequeue = 0;
+    hcd->event_cycle = 1;
+    hcd->erst->address = hcd->event_dma.dma_addr;
+    hcd->erst->size = XHCI_EVENT_TRBS;
+    hcd->erst->reserved = 0;
+    intr = hcd->runtime + 0x20;
     xhci_w32(intr, 0x08, 1);
-    xhci_w64(intr, 0x10, (u64)usb_phys(&xhci_erst));
-    xhci_w64(intr, 0x18, (u64)usb_phys(xhci_event_trbs));
-    xhci_w64(xhci_op, 0x30, (u64)usb_phys(xhci_dcbaa));
-    xhci_w64(xhci_op, 0x18, (u64)usb_phys(xhci_cmd_trbs) | 1);
-    xhci_w32(xhci_op, 0x38,
+    xhci_w64(intr, 0x10, hcd->erst_dma.dma_addr);
+    xhci_w64(intr, 0x18, hcd->event_dma.dma_addr);
+    xhci_w64(hcd->op, 0x30, hcd->dcbaa_dma.dma_addr);
+    xhci_w64(hcd->op, 0x18, hcd->cmd_ring.dma.dma_addr | 1);
+    xhci_w32(hcd->op, 0x38,
              ((hcs1 & 0xFF) < XHCI_MAX_SLOTS) ? (hcs1 & 0xFF) : XHCI_MAX_SLOTS);
-    xhci_w32(xhci_op, 0x00, XHCI_CMD_RUN);
-    if (!xhci_wait32(xhci_op, 0x04, XHCI_STS_HALTED, 0)) {
+    if (hcd->has_msix)
+        xhci_w32(intr, 0x00, 2);
+    xhci_w32(hcd->op, 0x00, XHCI_CMD_RUN |
+             (hcd->has_msix ? XHCI_CMD_INTE : 0));
+    if (!xhci_wait32(hcd->op, 0x04, XHCI_STS_HALTED, 0)) {
         printf("xhci: controller failed to run\n");
         return 0;
     }
 
-    for (port = 1; port <= xhci_max_ports; port++) {
-        DWORD p = xhci_r32(xhci_op, 0x400 + (port - 1) * 0x10);
+    for (port = 1; port <= hcd->max_ports; port++) {
+        DWORD p = xhci_r32(hcd->op, 0x400 + (port - 1) * 0x10);
         if (p & XHCI_PORT_CCS) {
-            xhci_port = port;
-            if (xhci_reset_port()) {
+            hcd->port = port;
+            if (xhci_reset_port(hcd)) {
                 found = 1;
                 break;
             }
@@ -675,20 +1196,69 @@ static int xhci_init_controller(void)
         printf("xhci: no enabled device port\n");
         return 0;
     }
-    xhci_slot = 0;
-    if (!xhci_command(0, 0, XHCI_TRB_ENABLE_SLOT, &xhci_slot) || !xhci_slot)
+    hcd->slot = 0;
+    hcd->connection_lost = 0;
+    hcd->stalled_endpoints = 0;
+    if (!xhci_command(hcd, 0, 0, XHCI_TRB_ENABLE_SLOT, &hcd->slot) ||
+        !hcd->slot)
         return 0;
-    xhci_dcbaa[xhci_slot] = (u64)usb_phys(xhci_device_ctx);
-    if (!xhci_address_device(1))
+    hcd->dcbaa[hcd->slot] = hcd->device_ctx_dma.dma_addr;
+    if (!xhci_address_device(hcd, 1))
         return 0;
     printf("xhci: controller at PCI %u:%u.%u port=%u speed=%u slot=%u ctx=%u\n",
-           bus, slot, func, xhci_port, xhci_speed, xhci_slot,
-           xhci_context_size);
+           bus, slot, func, hcd->port, hcd->speed, hcd->slot,
+           hcd->context_size);
     return 1;
 }
 
-static void xhci_stop_controller(void)
+static void xhci_stop_hcd(xhci_hcd *hcd)
 {
-    if (xhci_op)
-        xhci_w32(xhci_op, 0x00, xhci_r32(xhci_op, 0x00) & ~XHCI_CMD_RUN);
+    WORD control;
+    if (hcd->runtime && hcd->has_msix)
+        xhci_w32(hcd->runtime + 0x20, 0x00, 1);
+    if (hcd->op)
+        xhci_w32(hcd->op, 0x00,
+                 xhci_r32(hcd->op, 0x00) &
+                 ~(XHCI_CMD_RUN | XHCI_CMD_INTE));
+    if (!hcd->has_msix)
+        return;
+    if (hcd->op)
+        (void)xhci_wait32(hcd->op, 0x04, XHCI_STS_HALTED,
+                          XHCI_STS_HALTED);
+    control = pci_read16(hcd->pci_bus, hcd->pci_slot, hcd->pci_func,
+                         hcd->msix_cap + 2);
+    pci_write16(hcd->pci_bus, hcd->pci_slot, hcd->pci_func,
+                hcd->msix_cap + 2, (WORD)(control & ~0x8000));
+    if (hcd->msix_entry) {
+        hcd->msix_entry[3] = 1;
+        xhci_mb();
+    }
+    if (!irq_vector_release(hcd->irq_vector, &hcd->irq_owner))
+        printf("xhci: MSI-X vector release timed out\n");
+    else {
+        xhci_irq_route_unbind(hcd);
+        hcd->irq_vector = 0;
+    }
+    hcd->has_msix = 0;
+    hcd->msix_cap = 0;
+    hcd->msix_entry = 0;
+}
+
+void xhci_irq(DWORD route)
+{
+    xhci_hcd *hcd;
+    if (route >= XHCI_MAX_HCDS || !(hcd = xhci_irq_routes[route])) {
+        lapic_eoi();
+        return;
+    }
+    int entered = irq_vector_enter(hcd->irq_vector, &hcd->irq_owner);
+    if (entered && hcd->runtime && hcd->has_msix) {
+        volatile BYTE *intr = hcd->runtime + 0x20;
+        DWORD iman = xhci_r32(intr, 0x00);
+        hcd->irq_count++;
+        xhci_w32(intr, 0x00, (iman & 2) | 1);
+    }
+    if (entered)
+        irq_vector_exit(hcd->irq_vector, &hcd->irq_owner);
+    lapic_eoi();
 }

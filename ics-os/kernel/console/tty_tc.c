@@ -250,10 +250,10 @@ long sys_ttyselect(long nfds, long rfds, long wfds, long efds, long tvp)
    int lim, fd;
    long count;
 
-   (void)eset;
-   if (nfds <= 0 || nfds > K_FD_SETSIZE || !rset || !wset)
-      return -K_EINVAL;
-   lim = (int)nfds;
+  (void)eset;
+    if (nfds <= 0 || nfds > K_FD_SETSIZE)
+       return -K_EINVAL;
+    lim = (int)nfds;
    if (tvp) {
       memcpy(&tv, (void *)tvp, sizeof(tv));
       if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000)
@@ -263,20 +263,20 @@ long sys_ttyselect(long nfds, long rfds, long wfds, long efds, long tvp)
 
    for (;;) {
       count = 0;
-      for (fd = 0; fd < lim; fd++) {
-         if (k_fd_bit(rset, fd)) {
-            if (posix_fd_selectable(fd, 0))
-               count++;
-            else
-               k_fd_clr(rset, fd);
-         }
-         if (k_fd_bit(wset, fd)) {
-            if (posix_fd_selectable(fd, 1))
-               count++;
-            else
-               k_fd_clr(wset, fd);
-         }
-      }
+  for (fd = 0; fd < lim; fd++) {
+          if (rset && k_fd_bit(rset, fd)) {
+             if (posix_fd_selectable(fd, 0))
+                count++;
+             else
+                k_fd_clr(rset, fd);
+          }
+          if (wset && k_fd_bit(wset, fd)) {
+             if (posix_fd_selectable(fd, 1))
+                count++;
+             else
+                k_fd_clr(wset, fd);
+          }
+       }
       if (count)
          return count;
       if (current_process && current_process->pending_sig == SIGINT) {

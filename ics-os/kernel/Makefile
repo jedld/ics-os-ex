@@ -14,10 +14,10 @@ ASMFLAGS=$(CFLAGS)
 LDFLAGS=-m elf_x86_64 -T lscript64.ld --build-id=none -z max-page-size=0x1000 -z noexecstack -nostdlib
 MAPFLAGS=-Map mapfile.txt
 
+# Prefer uncompressed ELF64 for Multiboot2 (gzip optional).
 bzImage: all
 	$(OBJCOPY) --only-keep-debug Kernel64.bin Kernel64.sym
 	$(OBJCOPY) --strip-debug Kernel64.bin
-	# Prefer uncompressed ELF64 for Multiboot2 (gzip optional)
 	$(CP) Kernel64.bin vmdex
 	$(CP) vmdex ..
 	$(CP) Kernel64.bin Kernel32.bin
@@ -25,10 +25,13 @@ bzImage: all
 all: obj Kernel64.bin
 
 obj: scheduler.o fat.o ext4.o iso9660.o ramdisk.o devfs.o iomgr.o blkcache.o posixfd.o devmgr_error.o kernel32.o \
-		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o virtio_blk.o
+		startup.o asmlib.o irqwrap.o context.o ap_trampoline.o lapic.o smp.o kexec.o irq_lifecycle.o vtd.o virtio_blk.o
 		
-kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/xhci.c hardware/usb/usb.h \
-		hardware/chips/serial.c hardware/ATA/ide.c \
+kernel32.o: kernel32.c build.h hardware/usb/uhci.c hardware/usb/xhci.c hardware/usb/usb.h hardware/dma.h hardware/irq_lifecycle.h \
+		hardware/chips/serial.c hardware/ATA/ide.c hardware/ATA/ata_capacity.h \
+		partition/crc32.c partition/crc32.h \
+		partition/gpt.c partition/gpt.h \
+		partition/partdev.c partition/partdev.h \
 		hardware/floppy/floppy.c hardware/floppy/floppy.h \
 		memory/dexmem.c memory/dexmem.h memory/memlayout.h \
 		stdlib/time.c stdlib/time.h \
@@ -95,8 +98,14 @@ ap_trampoline.o: cpu/ap_trampoline.S
 kexec.o: kexec.S
 	$(CC) $(TOOLPREFIX) $(CFLAGS) -o kexec.o kexec.S
 
-virtio_blk.o: hardware/virtio/virtio_blk.c hardware/virtio/virtio_blk.h hardware/virtio/virtio.h process/process.h
+virtio_blk.o: hardware/virtio/virtio_blk.c hardware/virtio/virtio_blk.h hardware/virtio/virtio.h hardware/irq_lifecycle.h process/process.h
 	$(CC) $(TOOLPREFIX) $(CFLAGS) -o virtio_blk.o hardware/virtio/virtio_blk.c
+
+irq_lifecycle.o: hardware/irq_lifecycle.c hardware/irq_lifecycle.h cpu/spinlock.h
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o irq_lifecycle.o hardware/irq_lifecycle.c
+
+vtd.o: hardware/vtd.c hardware/vtd.h hardware/iommu.h
+	$(CC) $(TOOLPREFIX) $(CFLAGS) -o vtd.o hardware/vtd.c
 
 lapic.o: cpu/lapic.c cpu/lapic.h
 	$(CC) $(TOOLPREFIX) $(CFLAGS) -o lapic.o cpu/lapic.c
@@ -106,7 +115,7 @@ smp.o: cpu/smp.c cpu/smp.h process/process.h
 	
 Kernel64.bin: startup.o asmlib.o context.o ap_trampoline.o lapic.o smp.o kernel32.o \
 		scheduler.o iomgr.o blkcache.o posixfd.o fat.o ext4.o iso9660.o ramdisk.o \
-		devfs.o irqwrap.o devmgr_error.o kexec.o virtio_blk.o
+		devfs.o irqwrap.o devmgr_error.o kexec.o irq_lifecycle.o vtd.o virtio_blk.o
 	$(LD) $(LDFLAGS) $(MAPFLAGS)
 
 clean:

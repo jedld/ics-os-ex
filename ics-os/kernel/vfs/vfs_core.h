@@ -245,6 +245,7 @@ int     vfs_deletefile(vfs_node *ptr);
 int     vfs_freedirectory(vfs_node *ptr);
 int     vfs_mountdirectory(vfs_node *node);
 int     vfs_mount_device(const char *fsname,const char *devname,const char *location);
+int     vfs_remount_device(const char *fsname,const char *devname,const char *location);
 char    *vfs_readline(char *s,int n,const char term, file_PCB *fhandle);
 vfs_node *vfs_searchname(const char *name);
 vfs_node *searchname(const char *name,int);

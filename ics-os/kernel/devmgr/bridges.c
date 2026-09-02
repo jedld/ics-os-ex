@@ -81,9 +81,42 @@ DWORD bridges_link(devmgr_generic *dev, void **function,
     return retval;
 };
 
+u64 bridges_link64(devmgr_generic *dev, void **function,
+                 DWORD p1,DWORD p2,DWORD p3,DWORD p4,DWORD p5,DWORD p6)
+{
+    u64 (*module_function)(DWORD,DWORD,DWORD,DWORD,DWORD,DWORD)=0;
+    u64 retval = 0;
+    int function_number = ((DWORD)function - (DWORD)dev - sizeof(devmgr_generic)) / 4;
+    int last_context = devmgr_getcontext();
+    #ifdef DEBUG_BRIDGE
+    printf("bridge64 to %d called fxn id %d.\n", dev->id,function_number);
+    #endif
+
+    if (dev==0) return -1;
+    /*Set current module ID and function ID so that the module knows itself
+      as well as for debuggin purposes*/
+    devmgr_setcontext(dev->id);
+
+    devmgr_setfunction(function_number);
+
+    module_function = *function;
+
+    //Make sure we're calling something
+    if (module_function == 0) return -1;
+
+    //call the module's function
+    retval = module_function(p1,p2,p3,p4,p5,p6);
+
+
+    devmgr_setcontext(last_context);
+
+    return retval;
+};
+
 void bridges_init()
 {
     bridges_call = bridges_link;
+    bridges_call64 = bridges_link64;
 };
 
 

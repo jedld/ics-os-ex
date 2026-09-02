@@ -7,6 +7,15 @@
 #define DEVMGR_STATE_QUIESCING  2
 #define DEVMGR_STATE_DEAD       3
 
+static inline int devmgr_lifecycle_quiesce(int *state)
+{
+   if (!state)
+      return 0;
+   if (*state == DEVMGR_STATE_LIVE)
+      *state = DEVMGR_STATE_QUIESCING;
+   return *state == DEVMGR_STATE_QUIESCING;
+}
+
 static inline int devmgr_lifecycle_get(int state, DWORD *refs)
 {
    if (state != DEVMGR_STATE_LIVE || !refs || *refs == ~(DWORD)0)

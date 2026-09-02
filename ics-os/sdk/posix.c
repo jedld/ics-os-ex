@@ -21,6 +21,10 @@
 #include <signal.h>
 #include <time.h>
 #include <stdarg.h>
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/poll.h>
 
 extern unsigned long dexsdk_systemcall(int function_number,long p1,long p2,
                   long p3,long p4,long p5);
@@ -60,6 +64,14 @@ extern void exit(int status);
 #define FXN_GETDENTS 0xB4
 #define FXN_MMAP     0xB6
 #define FXN_MUNMAP   0xB7
+#define FXN_TCGETATTR 0xC0
+#define FXN_TCSETATTR 0xC1
+#define FXN_TCFUSH    0xC2
+#define FXN_TTYIOCTL  0xC3
+#define FXN_TTYSELECT 0xC4
+#define FXN_DUP 0xC5
+#define FXN_DELAY 0x9B
+#define FXN_PRECISTIME 0x96
 
 static long ics_sys(int n, long a, long b, long c, long d, long e)
 {
@@ -91,9 +103,14 @@ int creat(const char *path, int mode)
 
 int close(int fd)
 {
-   if (fd >= 0 && fd < 3)
-      return 0;
-   return (int)ics_sys(FXN_SYSCLOSE, fd, 0, 0, 0, 0);
+    if (fd >= 0 && fd < 3)
+       return 0;
+    return (int)ics_sys(FXN_SYSCLOSE, fd, 0, 0, 0, 0);
+}
+
+int dup(int oldfd)
+{
+    return (int)ics_sys(FXN_DUP, oldfd, 0, 0, 0, 0);
 }
 
 ssize_t read(int fd, void *buf, size_t n)
@@ -678,7 +695,153 @@ time_t time(time_t *t)
 
 clock_t clock(void)
 {
-   return (clock_t)time(0);
+    return (clock_t)time(0);
+}
+
+/*
+ * Termios / tty control (syscalls 0xC0-0xC3). The struct termios layout is
+ * passed by pointer and read directly by the kernel, so it must match
+ * kernel/console/tty_tc.c byte-for-byte.
+ */
+int tcgetattr(int fd, struct termios *termios_p)
+{
+    if (!termios_p) {
+       errno = 22;
+       return -1;
+    }
+    return (int)ics_sys(FXN_TCGETATTR, fd, (long)termios_p, 0, 0, 0);
+}
+
+int tcsetattr(int fd, int optional_actions, const struct termios *termios_p)
+{
+    if (!termios_p) {
+       errno = 22;
+       return -1;
+    }
+    return (int)ics_sys(FXN_TCSETATTR, fd, optional_actions, (long)termios_p, 0, 0);
+}
+
+int tcflush(int fd, int queue_selector)
+{
+    return (int)ics_sys(FXN_TCFUSH, fd, queue_selector, 0, 0, 0);
+}
+
+/*
+ * ioctl for tty window size (syscall 0xC3).
+ */
+int ioctl(int fd, unsigned long request, ...)
+{
+    va_list ap;
+    long arg;
+    va_start(ap, request);
+    arg = va_arg(ap, long);
+    va_end(ap);
+    return (int)ics_sys(FXN_TTYIOCTL, fd, (long)request, arg, 0, 0);
+}
+
+/*
+ * select(2) (syscall 0xC4). The kernel mutates the fd_set words in place and
+ * returns the ready count (or -EINTR if a signal arrived).
+ */
+int select(int nfds, fd_set *readfds, fd_set *writefds,
+           fd_set *exceptfds, struct timeval *timeout)
+{
+    long tv = 0;
+    if (timeout)
+       tv = (long)timeout;
+    return (int)ics_sys(FXN_TTYSELECT, nfds,
+                        (long)readfds, (long)writefds,
+                        (long)exceptfds, tv);
+}
+
+/*
+ * poll(2) on top of select(2).
+ */
+int poll(struct pollfd *fds, unsigned int nfds, int timeout)
+{
+    fd_set rfds, wfds, efds;
+    struct timeval tv;
+    int maxfd = 1;
+    int i, n;
+
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+    for (i = 0; i < (int)nfds; i++) {
+       if (fds[i].fd < 0) continue;
+       if (fds[i].fd + 1 > maxfd) maxfd = fds[i].fd + 1;
+       if (fds[i].events & (POLLIN | POLLPRI)) FD_SET(fds[i].fd, &rfds);
+       if (fds[i].events & POLLOUT)           FD_SET(fds[i].fd, &wfds);
+       FD_SET(fds[i].fd, &efds);
+    }
+    if (timeout < 0) {
+       /* blocking: pass NULL timeout */
+       n = select(maxfd, &rfds, &wfds, &efds, 0);
+    } else {
+       tv.tv_sec = timeout / 1000;
+       tv.tv_usec = (timeout % 1000) * 1000;
+       n = select(maxfd, &rfds, &wfds, &efds, &tv);
+    }
+    if (n < 0)
+       return -1;
+    for (i = 0; i < (int)nfds; i++) {
+       short r = 0;
+       if (fds[i].fd < 0) { fds[i].revents = 0; continue; }
+       if (FD_ISSET(fds[i].fd, &rfds)) r |= POLLIN;
+       if (FD_ISSET(fds[i].fd, &wfds)) r |= POLLOUT;
+       if (FD_ISSET(fds[i].fd, &efds)) r |= POLLHUP;
+       fds[i].revents = r;
+    }
+    return n;
+}
+
+/*
+ * Monotonic millisecond clock (syscall 0x96 getprecisetime).
+ */
+int clock_gettime(int clockid, struct timespec *tp)
+{
+    long ms;
+    if (!tp) {
+       errno = 22;
+       return -1;
+    }
+    ms = (long)dexsdk_systemcall(FXN_PRECISTIME, 0, 0, 0, 0, 0);
+    if (clockid == CLOCK_MONOTONIC || clockid == CLOCK_REALTIME) {
+       tp->tv_sec = ms / 1000;
+       tp->tv_nsec = (ms % 1000) * 1000000L;
+    } else {
+       errno = 22;
+       return -1;
+    }
+    return 0;
+}
+
+/*
+ * Microsecond sleep. POSIX permits sleeping longer than requested, so the
+ * sub-millisecond remainder is rounded up to a whole millisecond and the
+ * kernel delay syscall (0x9B) is used: it halts the CPU and waits for the
+ * tick interrupt, yielding to other runnable tasks instead of busy-spinning.
+ */
+int usleep(useconds_t usec)
+{
+    unsigned long ms;
+    if (usec == 0)
+       return 0;
+    ms = (unsigned long)((usec + 999) / 1000);
+    dexsdk_systemcall(FXN_DELAY, ms, 0, 0, 0, 0);
+    return 0;
+}
+
+/*
+ * ftruncate is not supported by the kernel VFS; report ENOSYS so callers can
+ * fall back (vim only needs it for certain file writes).
+ */
+int ftruncate(int fd, off_t length)
+{
+    (void)fd;
+    (void)length;
+    errno = 38;
+    return -1;
 }
 
 int fstat(int fd, struct stat *buf)
@@ -845,6 +1008,38 @@ double ceil(double x)
    long i = (long)x;
    if (x > 0 && (double)i != x) i++;
    return (double)i;
+}
+
+/*
+ * Base-10 logarithm for the freestanding target (no libm). Scale x into
+ * [1.0, 10.0) to recover the integer part, then interpolate the fractional
+ * part over a per-decade table (linear error is << 1 over each unit interval,
+ * so floor(log10(x)) is always exact). Loops are bounded so non-finite input
+ * (inf/NaN) returns the integer exponent without hanging.
+ */
+double log10(double x)
+{
+   static const double tbl[9] = {
+      0.0, 0.30103, 0.47712, 0.60206, 0.69897,
+      0.77815, 0.84510, 0.90309, 0.95424
+   };
+   long k, n, i;
+   double t, frac, v0, v1;
+   if (x <= 0.0)
+      return -1.0e300;
+   t = x;
+   k = 0;
+   for (i = 0; i < 700 && t >= 10.0; i++) { t /= 10.0; k++; }
+   for (i = 0; i < 700 && t < 1.0; i++) { t *= 10.0; k--; }
+   if (!(t >= 1.0 && t < 10.0))
+      return (double)k;
+   n = (long)t;
+   if (n < 1) n = 1;
+   if (n > 9) n = 9;
+   frac = t - (double)n;
+   v0 = tbl[n - 1];
+   v1 = (n == 9) ? 1.0 : tbl[n];
+   return (double)k + v0 + frac * (v1 - v0);
 }
 
 int isspace(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
@@ -1185,6 +1380,24 @@ int getuid(void) { return 0; }
 int geteuid(void) { return 0; }
 int getgid(void) { return 0; }
 int getegid(void) { return 0; }
+
+/*
+ * No uname/hostname facility in the kernel; report a fixed identity. The name
+ * is always NUL-terminated and never exceeds len bytes.
+ */
+int gethostname(char *name, size_t len)
+{
+    static const char host[] = "icsos";
+    size_t i;
+    if (!name || len == 0) {
+       errno = 22;
+       return -1;
+    }
+    for (i = 0; host[i] != '\0' && i < len - 1; i++)
+       name[i] = host[i];
+    name[i] = '\0';
+    return 0;
+}
 
 int dup2(int oldfd, int newfd)
 {

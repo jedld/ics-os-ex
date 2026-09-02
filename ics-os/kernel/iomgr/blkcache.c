@@ -544,20 +544,24 @@ int blkcache_flush(void)
    return 1;
 }
 
-void blkcache_invalidate_device(int deviceid)
+int blkcache_invalidate_device(int deviceid)
 {
    int i;
+   int dirty=0;
    if (!pc_tab)
-      return;
+      return 0;
    sync_entercrit(&pc_busy);
    for (i = 0; i < PC_NPAGES; i++)
       if (pc_tab[i].deviceid == deviceid) {
-         if (pc_tab[i].flags & PC_DIRTY)
+         if (pc_tab[i].flags & PC_DIRTY) {
             pc_dirty--;
+            dirty++;
+         }
          pc_tab[i].flags = 0;
          pc_tab[i].deviceid = -1;
       }
    sync_leavecrit(&pc_busy);
+   return dirty;
 }
 
 void blkcache_stats(DWORD *hits, DWORD *misses, DWORD *fills, DWORD *slots)

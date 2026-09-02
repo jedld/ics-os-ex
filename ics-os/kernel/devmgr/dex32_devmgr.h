@@ -146,7 +146,7 @@ void (*freemultiple)(void *virtualaddr,DWORD *pagedir,DWORD pages);
 typedef struct _devmgr_block_info {
 devmgr_generic hdr;
 int blocksize;
-int maxblocks;
+u64 maxblocks;
 } devmgr_block_info;
 
 typedef struct _devmgr_status {
@@ -181,7 +181,10 @@ int (*invalidate_cache)();
 int (*getcache)(char *buf,DWORD sectornumber,DWORD numblocks);
 int (*read_block)(u64 block,char *blockbuff, DWORD numblocks);
 int (*write_block)(u64 block,char *blockbuff,DWORD numblocks);
-int (*total_blocks) ();
+/* Returns the device's user-addressable sector count. Must be invoked
+   through the 64-bit bridge (bridges_call64); the legacy DWORD bridge
+   truncates the return value. */
+u64 (*total_blocks) ();
 int (*flush_device)();
 int (*get_block_size)();
 int (*putcache)(char *buf,DWORD sectornumber,DWORD numblocks);
@@ -262,6 +265,7 @@ typedef struct _devmgr_interface {
     devmgr_generic *(*devmgr_claimdevice_ref)(int deviceid);
     void (*devmgr_putdevice)(devmgr_generic *device);
     int (*devmgr_removedevice)(int deviceid);
+    int (*devmgr_quiesce_device)(int deviceid);
 } devmgr_interface;
 
 //defines a filesystem interface
@@ -330,6 +334,7 @@ char *devmgr_identify(int type,char *buf);
 void devmgr_init();
 int  devmgr_register(devmgr_generic *);
 int  devmgr_removedevice(int deviceid);
+int  devmgr_quiesce_device(int deviceid);
 int  devmgr_sendmessage(int deviceid,int type,DWORD message);
 void devmgr_setcontext(int deviceid);
 void devmgr_setfunction(int fxn);

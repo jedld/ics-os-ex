@@ -664,8 +664,9 @@ void console_df()
 
    for (i = 0; i < MAXDEVICES; i++) {
       devmgr_block_desc *blk;
-      DWORD raw_bytes = 0, total_bytes = 0, free_bytes = 0;
-      DWORD size_kb, used_kb, free_kb, pct;
+       u64 raw_bytes = 0, size_kb;
+       DWORD total_bytes = 0, free_bytes = 0;
+       DWORD used_kb, free_kb, pct;
       int have_raw = 0, have_fs = 0;
       char mount[256];
       const char *name;
@@ -679,13 +680,13 @@ void console_df()
       name = blk->hdr.name;
 
       if (blk->total_blocks && blk->get_block_size) {
-         DWORD nblk = (DWORD)bridges_call((devmgr_generic*)blk, &blk->total_blocks);
-         DWORD bsz = (DWORD)bridges_call((devmgr_generic*)blk, &blk->get_block_size);
-         if (bsz > 0 && bsz != (DWORD)-1 && nblk != (DWORD)-1) {
-            raw_bytes = nblk * bsz;
-            have_raw = 1;
-         }
-      }
+          u64 nblk = bridges_call64((devmgr_generic*)blk, &blk->total_blocks);
+          DWORD bsz = (DWORD)bridges_call((devmgr_generic*)blk, &blk->get_block_size);
+          if (bsz > 0 && bsz != (DWORD)-1 && nblk != (u64)-1) {
+             raw_bytes = nblk * bsz;
+             have_raw = 1;
+          }
+       }
 
       /* Probe FAT on any readable  volume. Skip uninitialized floppy
          (FDC waits hang) and CD-ROM (2048-byte sectors). */
@@ -708,21 +709,71 @@ void console_df()
          strcpy(mount, "-");
 
       if (have_fs) {
-         size_kb = total_bytes / 1024;
-         free_kb = free_bytes / 1024;
-         used_kb = (total_bytes - free_bytes) / 1024;
-         pct = (total_bytes == 0) ? 0 : (used_kb * 100) / (size_kb ? size_kb : 1);
-         printf("%-10s %9u %9u %9u %3u%% %s\n",
-                name, size_kb, used_kb, free_kb, pct, mount);
-      } else if (have_raw) {
-         size_kb = raw_bytes / 1024;
-         printf("%-10s %9u %9s %9s %4s %s\n",
-                name, size_kb, "-", "-", "-", mount);
-      } else {
+          size_kb = (u64)total_bytes / 1024;
+          free_kb = free_bytes / 1024;
+          used_kb = (total_bytes - free_bytes) / 1024;
+          pct = (total_bytes == 0) ? 0 : (used_kb * 100) / (size_kb ? size_kb : 1);
+          printf("%-10s %9llu %9u %9u %3u%% %s\n",
+                 name, size_kb, used_kb, free_kb, pct, mount);
+       } else if (have_raw) {
+          size_kb = raw_bytes / 1024;
+          printf("%-10s %9llu %9s %9s %4s %s\n",
+                 name, size_kb, "-", "-", "-", mount);
+       } else {
          printf("%-10s %9s %9s %9s %4s %s\n",
-                name, "-", "-", "-", "-", mount);
-      }
-   }
+                 name, "-", "-", "-", "-", mount);
+       }
+    }
+}
+
+/* lsblk-style partition table for every disk the partdev layer knows about:
+   table type, disk GUID, and per-partition index/start/end/size/type/attrs. */
+void console_partitions()
+{
+    int d, i, any;
+    char guid[40];
+
+    any = 0;
+    for (d = 0; d < partdev_disk_count(); d++) {
+        const partdev_disk *disk = partdev_disk_get(d);
+        const char *ttype;
+
+        if (disk->table_type == PARTDEV_TABLE_GPT)
+            ttype = "GPT";
+        else if (disk->table_type == PARTDEV_TABLE_MBR)
+            ttype = "MBR";
+        else
+            ttype = "none";
+        any = 1;
+        partdev_format_guid(disk->disk_guid, guid, sizeof(guid));
+        if (disk->table_type == PARTDEV_TABLE_GPT)
+            printf("%s: %s diskguid=%s entries=%d%s\n", disk->disk_name, ttype,
+                   guid, disk->gpt_entries,
+                   disk->used_backup ? " (backup header)" : "");
+        else
+            printf("%s: %s\n", disk->disk_name, ttype);
+
+        for (i = 0; i < partdev_count(); i++) {
+            const partdev_entry *e = partdev_get(i);
+            u64 size;
+
+            if (e->parent_deviceid != disk->parent_deviceid)
+                continue;
+            size = (e->endlba > e->startlba) ? (e->endlba - e->startlba) : 0;
+            if (e->pname[0])
+                printf("  p%-3d start=%llu end=%llu size=%llu type=%s%s name=\"%s\"\n",
+                       e->entry_index, (unsigned long long)e->startlba,
+                       (unsigned long long)e->endlba, (unsigned long long)size,
+                       e->type_name, (e->attrs & 2ULL) ? " [boot]" : "", e->pname);
+            else
+                printf("  p%-3d start=%llu end=%llu size=%llu type=%s%s\n",
+                       e->entry_index, (unsigned long long)e->startlba,
+                       (unsigned long long)e->endlba, (unsigned long long)size,
+                       e->type_name, (e->attrs & 2ULL) ? " [boot]" : "");
+        }
+    }
+    if (!any)
+        printf("No partitioned disks.\n");
 }
 
 /* ==================================================================
@@ -899,9 +950,12 @@ int console_execute(const char *str){
       console_execute("type /icsos/icsos.hlp");
    }else
    if (strcmp(u,"df") == 0){           //-- Shows free space on block devices.
-      console_df();
-   }else
-   if (strcmp(u,"iobench") == 0){      //-- Benchmark file I/O / block cache.
+       console_df();
+    }else
+    if (strcmp(u,"partitions") == 0){   //-- Shows partition tables (MBR/GPT) and partitions.
+       console_partitions();
+    }else
+    if (strcmp(u,"iobench") == 0){      //-- Benchmark file I/O / block cache.
       console_iobench();
    }else
    if (strcmp(u,"umount") == 0){       //-- Unmounts a mounted device. Args: <mount point>
@@ -1180,7 +1234,17 @@ int console_execute(const char *str){
          if (!user_execp("/icsos/apps/termtest.exe", 0, "/icsos/apps/termtest.exe"))
             printf("TERMTEST_RUN_FAIL\n");
       }else
-    if (strcmp(u,"cc1test") == 0){  //-- Run host-built GCC cc1 to compile a trivial file in-OS.
+    if (strcmp(u,"vimtest") == 0){  //-- Run FEAT_TINY vim --version (ELF TUI loader smoke test).
+       printf("vimtest: running /icsos/apps/vim.exe --version\n");
+       if (!user_execp("/icsos/apps/vim.exe", 0, "/icsos/apps/vim.exe --version"))
+           printf("VIM_RUN_FAIL\n");
+     }else
+     if (strcmp(u,"duptest") == 0){  //-- Run the dup(2) syscall self-test (tty fd clone + write).
+        printf("duptest: running /icsos/apps/duptest.exe\n");
+        if (!user_execp("/icsos/apps/duptest.exe", 0, "/icsos/apps/duptest.exe"))
+           printf("DUPT_RUN_FAIL\n");
+     }else
+     if (strcmp(u,"cc1test") == 0){  //-- Run host-built GCC cc1 to compile a trivial file in-OS.
        char cmd[512];
        int ok = 1;
        file_PCB *f;

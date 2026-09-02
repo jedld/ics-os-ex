@@ -92,6 +92,8 @@ extern void textcolor(unsigned char c);
 #include "process/pdispatch.h"
 #include "devmgr/dex32_devmgr.h"
 #include "devmgr/devmgr_error.h"
+#include "partition/gpt.h"
+#include "partition/partdev.h"
 #include "console/dexio.h"
 #include "hardware/keyboard/keyboard.h"
 #include "hardware/keyboard/mouse.h"
@@ -201,6 +203,9 @@ extern int cpu_count;
 #include "dexapi/dex32API.c"
 #include "hardware/ATA/ide.c"
 #include "hardware/usb/uhci.c"
+#include "partition/crc32.c"
+#include "partition/gpt.c"
+#include "partition/partdev.c"
 #include "vfs/vfs_aux.c"
 #include "memory/kheap.c"
 #include "memory/dexmem.c"
@@ -232,6 +237,8 @@ char boot_device_name[255]="";
   ORDER is important when starting up the kernel modules!!*/
 
 multiboot_header *mbhdr = 0;
+static BYTE acpi_rsdp[36];
+static DWORD acpi_rsdp_length;
 
 
 //here we go!
@@ -243,6 +250,7 @@ void main(){
    mbhdr = 0;
    memory_map = 0;
    map_length = 0;
+   acpi_rsdp_length = 0;
 
    serial_init();
    serial_puts("ICS-OS: serial console ready (x86_64)\n");
@@ -306,6 +314,14 @@ void main(){
                    mb2map_n++;
                 }
              }
+          }
+          if ((tag->type == 15 || (tag->type == 14 && !acpi_rsdp_length)) &&
+              tag->size > 8) {
+             DWORD length = tag->size - 8;
+             if (length > sizeof(acpi_rsdp))
+                length = sizeof(acpi_rsdp);
+             memcpy(acpi_rsdp, (char *)tag + 8, length);
+             acpi_rsdp_length = length;
           }
           if (tag->type == 1) { /* command line */
             unsigned n = tag->size > 8 ? tag->size - 8 : 0;
@@ -509,6 +525,16 @@ void dex32_startup(){
       function you wish to use as the paramater*/
    alloc_init("dl_malloc"); 
    printf("[OK]\n");
+
+   {
+      extern int vtd_discover(const void *rsdp, unsigned int length);
+      printf("Discovering VT-d hardware...\n");
+      if (acpi_rsdp_length)
+         vtd_discover(acpi_rsdp, acpi_rsdp_length);
+      else
+         printf("vtd: ACPI RSDP unavailable\n");
+      printf("[OK]\n");
+   }
     
    //register the hardware ports manager
    printf("Initializing ports...");
@@ -834,6 +860,35 @@ void dex_init(){
          printf("Warning: no root filesystem mounted (continuing).\n");
       else
          printf("Root mount [OK]\n");
+
+        if (mounted &&
+           (strstr(kernel_cmdline, "xhci-mounted-disconnect-test") ||
+            strstr(kernel_cmdline, "xhci-mounted-reconnect-test") ||
+            strstr(kernel_cmdline, "xhci-mounted-remount-test"))) {
+         int usb_test_ok = usb_xhci_mounted_disconnect_selftest();
+         if (strstr(kernel_cmdline, "xhci-mounted-remount-test")) {
+            vfs_node *saved_workdir = current_process->workdir;
+            vfs_node *busy_workdir = vfs_searchname("icsos/boot");
+            int busy_rejected = 0;
+            if (busy_workdir) {
+               current_process->workdir = busy_workdir;
+               busy_rejected =
+                  vfs_remount_device("fat","usb0p0","icsos") == -1;
+               current_process->workdir = saved_workdir;
+            }
+            if (busy_rejected)
+               printf("VFS_REMOUNT_BUSY_REJECT_OK\n");
+            if (usb_test_ok && busy_rejected &&
+                vfs_remount_device("fat","usb0p0","icsos") != -1 &&
+                vfs_searchname("icsos/vmdex"))
+               printf("XHCI_MOUNTED_REMOUNT_OK\n");
+            else
+               printf("XHCI_MOUNTED_REMOUNT_FAIL\n");
+         }
+      }
+
+      if (usb_start_hotplug_monitor() == -1)
+         printf("xhci: failed to start hotplug monitor\n");
 
       /* Writable scratch FS for in-OS compiles (selfhost / tccboot). */
       if (mounted)

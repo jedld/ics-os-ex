@@ -51,7 +51,7 @@ static int ramdisk_get_block_size(void)
    return RAMDISK_SECSIZE;
 }
 
-static int ramdisk_total_blocks(void)
+static u64 ramdisk_total_blocks(void)
 {
    return RAMDISK_SECTORS;
 }

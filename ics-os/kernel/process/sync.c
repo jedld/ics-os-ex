@@ -43,6 +43,29 @@ void sync_entercrit(sync_sharedvar *var){
    var->wait=1;
 };
 
+unsigned long sync_entercrit_irqsave(sync_sharedvar *var){
+   unsigned long flags;
+   int owner=sync_owner_token();
+   int held;
+
+   for (;;) {
+      __asm__ __volatile__("pushfq; popq %0; cli"
+                           : "=r"(flags) : : "memory");
+      held=__sync_val_compare_and_swap(&var->busy,0,0);
+      if (held==owner) {
+         var->wait++;
+         return flags;
+      }
+      if (!held && __sync_bool_compare_and_swap(&var->busy,0,owner)) {
+         var->wait=1;
+         return flags;
+      }
+      if (flags & (1UL << 9))
+         __asm__ __volatile__("sti" : : : "memory");
+      __asm__ __volatile__("pause");
+   }
+};
+
 //leave the critical section
 void sync_leavecrit(sync_sharedvar *var){
    int owner=sync_owner_token();
@@ -59,4 +82,10 @@ void sync_leavecrit(sync_sharedvar *var){
    if (var->wait==0)
       __sync_lock_release(&var->busy);
 };
+
+   void sync_leavecrit_irqrestore(sync_sharedvar *var,unsigned long flags){
+      sync_leavecrit(var);
+      if (flags & (1UL << 9))
+      __asm__ __volatile__("sti" : : : "memory");
+   };
 

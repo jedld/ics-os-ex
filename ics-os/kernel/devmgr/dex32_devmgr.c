@@ -94,6 +94,7 @@ void devmgr_init()
     myinterface.devmgr_claimdevice_ref = devmgr_claimdevice_ref;
     myinterface.devmgr_putdevice = devmgr_putdevice;
     myinterface.devmgr_removedevice = devmgr_removedevice;
+    myinterface.devmgr_quiesce_device = devmgr_quiesce_device;
   myinterface.devmgr_copyinterface = devmgr_copyinterface;
   myinterface.devmgr_disableints = stopints;
   myinterface.devmgr_enableints= startints;
@@ -135,6 +136,23 @@ int devmgr_removedevice(int deviceid)
     /* Legacy devmgr_getdevice() callers cannot publish a read-side reference.
        Keep the detached copy allocated until all callers use get/put; no new
        lookup can reach it and referenced users have already drained. */
+    (void)retired;
+    return retval;
+};
+
+int devmgr_quiesce_device(int deviceid)
+{
+    devmgr_generic *retired=0;
+    int retval=-1;
+    sync_entercrit(&devmgr_busy);
+    if (deviceid>=0 && deviceid<MAXDEVICES &&
+        devmgr_devlist[deviceid]!=0) {
+        if (devmgr_lifecycle_quiesce(&devmgr_statuslist[deviceid].state)) {
+            retired=devmgr_retire_locked(deviceid);
+            retval=retired ? 1 : 0;
+        }
+    }
+    sync_leavecrit(&devmgr_busy);
     (void)retired;
     return retval;
 };

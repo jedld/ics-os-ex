@@ -43,6 +43,7 @@ void posix_fd_close_all(struct _PCB386 *process);
  * its 32-bit result, turning e.g. -ENOENT into a huge positive value. */
 long sys_open(const char *path, int flags, int mode);
 long sys_close(int fd);
+long sys_dup(int oldfd);
 long sys_read(int fd, void *buf, long n);
 long sys_write(int fd, const void *buf, long n);
 long sys_lseek(int fd, long off, int whence);

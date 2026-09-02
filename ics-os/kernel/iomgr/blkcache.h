@@ -26,7 +26,7 @@ int  blkcache_read(int deviceid, u64 sector, DWORD numblocks, void *buf);
 int  blkcache_write(int deviceid, u64 sector, DWORD numblocks, void *buf);
 int  blkcache_flush(void);
 int  blkcache_has_dirty(void);
-void blkcache_invalidate_device(int deviceid);
+int  blkcache_invalidate_device(int deviceid);
 void blkcache_stats(DWORD *hits, DWORD *misses, DWORD *fills, DWORD *slots);
 void blkcache_reset_stats(void);
 void blkcache_mq_stats(DWORD *merged);

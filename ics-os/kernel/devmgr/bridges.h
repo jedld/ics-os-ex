@@ -34,3 +34,13 @@ DWORD (*bridges_call)(devmgr_generic *dev, void **function, ...);
 DWORD bridges_link(devmgr_generic *dev, void **function,
                 DWORD p1,DWORD p2,DWORD p3,DWORD p4,DWORD p5,DWORD p6);
 
+/* 64-bit variant for module functions that return values wider than a
+   DWORD (e.g. total_blocks). Calling an int-returning function through
+   the DWORD bridge, or a u64-returning one through the 64-bit bridge,
+   are both well defined on SysV AMD64; mixing them is not (the caller
+   would read only the low 32 bits of a 64-bit return, or the high 32
+   bits of an int return are undefined). */
+u64 (*bridges_call64)(devmgr_generic *dev, void **function, ...);
+u64 bridges_link64(devmgr_generic *dev, void **function,
+                 DWORD p1,DWORD p2,DWORD p3,DWORD p4,DWORD p5,DWORD p6);
+

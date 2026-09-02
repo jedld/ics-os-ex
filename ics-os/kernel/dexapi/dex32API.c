@@ -209,8 +209,9 @@ void api_init(){
     api_addsystemcall(0xC1,sys_tcsetattr,0,0);
     api_addsystemcall(0xC2,sys_tcflush,0,0);
     api_addsystemcall(0xC3,sys_ttyioctl,0,API_REQUIRE_INTS);
-    api_addsystemcall(0xC4,sys_ttyselect,0,API_REQUIRE_INTS);
- };
+     api_addsystemcall(0xC4,sys_ttyselect,0,API_REQUIRE_INTS);
+     api_addsystemcall(0xC5,sys_dup,0,API_REQUIRE_INTS);
+  };
 
 
 api_arg_t api_syscall(api_arg_t fxn, api_arg_t val, api_arg_t val2,
@@ -277,9 +278,11 @@ api_arg_t syscallentry64(api_arg_t sysno, api_arg_t a0, api_arg_t a1,
    case 2:  /* open(path, flags, mode) */
       return api_syscall(0xA7, a0, a1, a2, 0, 0);
    case 3:  /* close(fd) */
-      return api_syscall(0xA8, a0, 0, 0, 0, 0);
-   case 4:  /* stat */
-      return api_syscall(36, a0, a1, 0, 0, 0);
+       return api_syscall(0xA8, a0, 0, 0, 0, 0);
+    case 32: /* dup(oldfd) */
+       return api_syscall(0xC5, a0, 0, 0, 0, 0);
+    case 4:  /* stat */
+       return api_syscall(36, a0, a1, 0, 0, 0);
    case 5:  /* fstat(fd, buf) */
       return api_syscall(0xAF, a0, a1, 0, 0, 0);
    case 8:  /* lseek */

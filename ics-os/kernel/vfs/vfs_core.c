@@ -448,14 +448,25 @@ int vfs_setbuffer(file_PCB *handle,char *buffer,int bufsize,int mode)
 int vfs_checkdirused(vfs_node *ptr)
 {
     PCB386 *ptr2;
-    int total = get_processlist(&ptr), i;
+    int total = get_processlist(&ptr2), i;
+    int used = 0;
     
     for (i=0; i < total ;i++)
     {
-        if (ptr2[i].workdir == ptr )
-               return 1; 
+        vfs_node *workdir = ptr2[i].workdir;
+        while (workdir) {
+            if (workdir == ptr) {
+                used = 1;
+                break;
+            }
+            workdir = workdir->path;
+        }
+        if (used)
+            break;
     };
-    return 0;
+    if (ptr2)
+        free(ptr2);
+    return used;
 };
 
 int vfs_freedirectory(vfs_node *ptr)
@@ -616,7 +627,8 @@ vfs_node *mkvirtualdir(const char *name,int fsid,int deviceid);
 //This function "mounts" a device to the filesystem. Mounting means that
 //the files and or directories on a device gets to be mapped to the VFS so that
 //it becomes visible to the operating system.
-int vfs_mount_device(const char *fsname,const char *devname,const char *location)
+static int vfs_mount_device_locked(const char *fsname,const char *devname,
+                                   const char *location)
 {
     devmgr_fs_desc *myfs=(devmgr_fs_desc*)-1;
     devmgr_block_desc *myblock=(devmgr_block_desc*)-1;
@@ -633,7 +645,6 @@ int vfs_mount_device(const char *fsname,const char *devname,const char *location
 
         int fsid, devid;
         vfs_node *mount_location;
-        sync_entercrit(&vfs_mount_busy);
         //get the device id of the devices requested
         fsid = devmgr_finddevice( fsname);
         if (fsid == -1)
@@ -693,10 +704,11 @@ int vfs_mount_device(const char *fsname,const char *devname,const char *location
         
         if (retval == -1) //unsuccessful mount
         {
-                    vfs_unmount(mount_location);
+                    sync_entercrit(&vfs_busy);
+                    vfs_unmount_locked(mount_location);
+                    sync_leavecrit(&vfs_busy);
         };
         //return myfs->mountroot(mount_location, devid);
-        sync_leavecrit(&vfs_mount_busy);
         return retval;
 
     mount_fail:
@@ -704,11 +716,50 @@ int vfs_mount_device(const char *fsname,const char *devname,const char *location
             devmgr_setlock(devid,0);
         devmgr_putdevice((devmgr_generic*)myfs);
         devmgr_putdevice((devmgr_generic*)myblock);
-        sync_leavecrit(&vfs_mount_busy);
         return -1;
     };  
     //return -1;
 };
+
+int vfs_mount_device(const char *fsname,const char *devname,const char *location)
+{
+    int retval;
+    sync_entercrit(&vfs_mount_busy);
+    retval=vfs_mount_device_locked(fsname,devname,location);
+    sync_leavecrit(&vfs_mount_busy);
+    return retval;
+}
+
+int vfs_remount_device(const char *fsname,const char *devname,
+                       const char *location)
+{
+    unsigned long mount_flags,vfs_flags;
+    char absolute_location[256];
+    int retval;
+    vfs_node *node;
+    if (!location || strlen(location)>253)
+        return -1;
+    if (location[0]=='/')
+        strcpy(absolute_location,location);
+    else {
+        absolute_location[0]='/';
+        strcpy(&absolute_location[1],location);
+    }
+    mount_flags=sync_entercrit_irqsave(&vfs_mount_busy);
+    vfs_flags=sync_entercrit_irqsave(&vfs_busy);
+    node=vfs_searchname(absolute_location);
+    if (!node || node==vfs_root) {
+        sync_leavecrit_irqrestore(&vfs_busy,vfs_flags);
+        sync_leavecrit_irqrestore(&vfs_mount_busy,mount_flags);
+        return -1;
+    }
+    retval=vfs_unmount_locked(node);
+    sync_leavecrit_irqrestore(&vfs_busy,vfs_flags);
+    if (retval==1)
+        retval=vfs_mount_device_locked(fsname,devname,location);
+    sync_leavecrit_irqrestore(&vfs_mount_busy,mount_flags);
+    return retval;
+}
 
 //opens a file, supports file locking if opened for writing,append
 file_PCB *openfilex(char *filename,int mode)

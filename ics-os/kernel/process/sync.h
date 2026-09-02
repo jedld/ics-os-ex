@@ -18,5 +18,7 @@ typedef struct _sync_sharedvar {
 
 void sync_entercrit(sync_sharedvar *var);
 void sync_leavecrit(sync_sharedvar *var);
+unsigned long sync_entercrit_irqsave(sync_sharedvar *var);
+void sync_leavecrit_irqrestore(sync_sharedvar *var,unsigned long flags);
 
 #endif

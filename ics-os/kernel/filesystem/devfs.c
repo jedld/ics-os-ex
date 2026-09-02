@@ -48,8 +48,9 @@ int devfs_writefile(vfs_node *f, char *buf, int start, int end, int device_id)
     int blockdevid = devmgr_finddevice(f->name);
     if (blockdevid != -1)
     {
-         DWORD bytes_per_sector, block_requests, block, total_blocks;
-         DWORD startblock, endblock, adj, startadj, startlength;
+         DWORD bytes_per_sector, block_requests, block;
+          u64 total_blocks;
+          DWORD startblock, endblock, adj, startadj, startlength;
          DWORD *handles, *buffers, ofs, handle;
          DWORD i, req_ind, index;
          void *temp_buffer;
@@ -77,8 +78,8 @@ int devfs_writefile(vfs_node *f, char *buf, int start, int end, int device_id)
          /*validate the end block given*/
          if (myblock->total_blocks) 
          {
-                  total_blocks = bridges_call(myblock, &myblock->total_blocks);
-                  if ( endblock >= total_blocks) return -1;
+                  total_blocks = bridges_call64(myblock, &myblock->total_blocks);
+                  if ((u64)endblock >= total_blocks) return -1;
          }
          else
                   return -1;
@@ -169,8 +170,9 @@ int devfs_openfile(vfs_node *f, char *buf, DWORD start, DWORD end, int device_id
     int blockdevid = devmgr_finddevice(f->name);
     if (blockdevid != -1)
     {
-         DWORD bytes_per_sector, block_requests, block, total_blocks;
-         DWORD startblock, endblock, adj, startadj, startlength;
+         DWORD bytes_per_sector, block_requests, block;
+          u64 total_blocks;
+          DWORD startblock, endblock, adj, startadj, startlength;
          DWORD *handles, *buffers, ofs;
          DWORD i, req_ind, index;
          devmgr_block_desc *myblock = (devmgr_block_desc *)devmgr_getdevice(blockdevid);
@@ -197,8 +199,8 @@ int devfs_openfile(vfs_node *f, char *buf, DWORD start, DWORD end, int device_id
          /*validate the end block given*/
          if (myblock->total_blocks) 
          {
-                  total_blocks = bridges_call(myblock, &myblock->total_blocks);
-                  if ( endblock >= total_blocks) return -1;
+                  total_blocks = bridges_call64(myblock, &myblock->total_blocks);
+                  if ((u64)endblock >= total_blocks) return -1;
          }
          else
                   return -1;
@@ -326,9 +328,12 @@ int devfs_mountroot(vfs_node *mountpoint,int device_id)
                 devmgr_block_desc *blockdev = (devmgr_block_desc*)devmgr_devlist[i];
                 if (blockdev->total_blocks!=0 &&
                     blockdev->get_block_size!=0)
-                    { 
-                      node->size = bridges_call(blockdev,&blockdev->total_blocks) *
-                                   bridges_call(blockdev,&blockdev->get_block_size);
+                    {
+                      /* node->size stays 32-bit; devices larger than
+                         4 TiB/512B show a truncated size in directory
+                         listings until the VFS size field is widened. */
+                      node->size = (DWORD)(bridges_call64(blockdev,&blockdev->total_blocks) *
+                                   bridges_call(blockdev,&blockdev->get_block_size));
                     };
             }
               else 

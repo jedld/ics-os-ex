@@ -21,6 +21,7 @@
 .extern smp_reschedule_ipi
 .extern smp_tlb_shootdown_ipi
 .extern virtio_blk_irq
+.extern xhci_irq
 .extern user_fork_frame
 
 .macro PUSH_ALL
@@ -425,3 +426,23 @@ virtio_msixwrapper:
     call virtio_blk_irq
     POP_ALL
     iretq
+
+.macro XHCI_MSIX_WRAPPER index
+.globl xhci_msixwrapper\index
+xhci_msixwrapper\index:
+    cli
+    PUSH_ALL
+    movq $\index, %rdi
+    call xhci_irq
+    POP_ALL
+    iretq
+.endm
+
+XHCI_MSIX_WRAPPER 0
+XHCI_MSIX_WRAPPER 1
+XHCI_MSIX_WRAPPER 2
+XHCI_MSIX_WRAPPER 3
+XHCI_MSIX_WRAPPER 4
+XHCI_MSIX_WRAPPER 5
+XHCI_MSIX_WRAPPER 6
+XHCI_MSIX_WRAPPER 7

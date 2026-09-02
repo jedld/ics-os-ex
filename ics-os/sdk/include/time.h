@@ -19,4 +19,16 @@ char *ctime(const time_t *t);
 char *asctime(const struct tm *);
 size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm);
 
+/* Monotonic millisecond clock from the kernel (getprecisetime, syscall
+   0x96). Used by full-screen apps (vim) for timeout/syntax timing. */
+#define CLOCK_MONOTONIC 1
+#define CLOCK_REALTIME  0
+
+struct timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
+int clock_gettime(int clockid, struct timespec *tp);
+
 #endif

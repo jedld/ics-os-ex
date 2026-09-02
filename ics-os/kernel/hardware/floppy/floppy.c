@@ -892,7 +892,7 @@ BOOL format_track(BYTE track,DrvGeom *g)
    return TRUE;
 }
 
-int floppy_totalblocks()
+u64 floppy_totalblocks()
 {
 //return the total blocks of a 1.44MB floppy disk
 return 3056;

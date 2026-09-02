@@ -520,23 +520,73 @@ long sys_close(int fd)
       return 0;
    spin_lock(&current_process->fd_lock);
    type=current_process->fds[fd].type;
-   ptr=current_process->fds[fd].ptr;
-   if (type==FD_NONE || type==FD_RESERVED || type==FD_TTY) {
-      spin_unlock(&current_process->fd_lock);
-      return -EBADF;
-   }
-   current_process->fds[fd].type=FD_NONE;
-   current_process->fds[fd].ptr=0;
-   spin_unlock(&current_process->fd_lock);
-   if (type==FD_VFS)
-      return vfs_file_fdclose((file_PCB *)ptr);
-   if (type==FD_URING)
-      return uring_close((ics_uring *)ptr);
-   if (type==FD_BLK) {
-      fd_blk_close((fd_blk_t *)ptr);
-      return 0;
-   }
-   return 0;
+    ptr=current_process->fds[fd].ptr;
+    if (type==FD_NONE || type==FD_RESERVED) {
+       spin_unlock(&current_process->fd_lock);
+       return -EBADF;
+    }
+    current_process->fds[fd].type=FD_NONE;
+    current_process->fds[fd].ptr=0;
+    spin_unlock(&current_process->fd_lock);
+    if (type==FD_VFS)
+       return vfs_file_fdclose((file_PCB *)ptr);
+    if (type==FD_URING)
+       return uring_close((ics_uring *)ptr);
+    if (type==FD_BLK) {
+        fd_blk_close((fd_blk_t *)ptr);
+        return 0;
+     }
+    /* FD_TTY: the tty is a shared, never-destroyed resource (see sys_dup);
+       closing a dup'd tty descriptor only releases the fd slot. */
+    return 0;
+ }
+
+long sys_dup(int oldfd)
+{
+    int nf, type;
+    void *ptr;
+    tty_t *t;
+    if (!current_process || oldfd < 0 || oldfd >= FD_MAX)
+       return -EBADF;
+    spin_lock(&current_process->fd_lock);
+    type=current_process->fds[oldfd].type;
+    ptr=current_process->fds[oldfd].ptr;
+    spin_unlock(&current_process->fd_lock);
+    /* fd<3 resolves to the controlling tty via fd_istty(); the tty is a
+       shared, never-destroyed resource so no reference count is taken. */
+    t = fd_istty(oldfd);
+    if (t) {
+       nf = fd_alloc_slot();
+       if (nf < 0)
+          return nf;
+       fd_install(nf,FD_TTY,t);
+       return nf;
+    }
+    if (type==FD_VFS && ptr) {
+       file_PCB *f=(file_PCB *)ptr;
+       nf = fd_alloc_slot();
+       if (nf < 0)
+          return nf;
+       if (!vfs_file_inherit(f)) {
+          fd_release_slot(nf);
+          return -EBADF;
+       }
+       fd_install(nf,FD_VFS,f);
+       return nf;
+    }
+    if (type==FD_BLK && ptr) {
+       fd_blk_t *b=(fd_blk_t *)ptr;
+       nf = fd_alloc_slot();
+       if (nf < 0)
+          return nf;
+       if (!fd_blk_inherit(b)) {
+          fd_release_slot(nf);
+          return -EBADF;
+       }
+       fd_install(nf,FD_BLK,b);
+       return nf;
+    }
+    return -EBADF;
 }
 
 long sys_read(int fd, void *buf, long n)

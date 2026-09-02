@@ -3,20 +3,49 @@
 
 #include <stddef.h>
 
+/* Smallest type in which a signal handler may store an int and reference it
+   atomically (C/POSIX). ICS-OS delivers no async signals in ring 3, so a
+   plain int is sufficient for the mask bookkeeping vim and the SDK do. */
+typedef int sig_atomic_t;
+
 typedef void (*sighandler_t)(int);
 #define SIG_DFL ((sighandler_t)0)
 #define SIG_IGN ((sighandler_t)1)
+/* Standard signal numbers (Linux x86-64). ICS-OS does not deliver most of
+   these asynchronously in ring 3, but the constants are defined so that
+   portable code (vim's os_unix.c, the binutils/ld job-control paths) that
+   branches on them compiles and its handlers are simply never invoked. */
+#define SIGHUP  1
 #define SIGINT  2
-#define SIGCHLD 17
-#define SIGSEGV 11
-#define SIGTERM 15
-#define SIGKILL 9
+#define SIGQUIT 3
+#define SIGILL  4
+#define SIGTRAP 5
 #define SIGABRT 6
-#define SIGALRM 14
+#define SIGBUS  7
 #define SIGFPE  8
-#define SIGPIPE 13
+#define SIGKILL 9
 #define SIGUSR1 10
+#define SIGSEGV 11
 #define SIGUSR2 12
+#define SIGPIPE 13
+#define SIGALRM 14
+#define SIGTERM 15
+#define SIGSTKFLT 16
+#define SIGCHLD 17
+#define SIGCONT 18
+#define SIGSTOP 19
+#define SIGTSTP 20
+#define SIGTTIN 21
+#define SIGTTOU 22
+#define SIGURG  23
+#define SIGXCPU 24
+#define SIGXFSZ 25
+#define SIGVTALRM 26
+#define SIGPROF 27
+#define SIGWINCH 28
+#define SIGIO   29
+#define SIGPWR  30
+#define SIGSYS  31
 #define NSIG 32
 
 #define SIG_BLOCK   0

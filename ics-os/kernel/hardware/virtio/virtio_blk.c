@@ -2,7 +2,8 @@
  * virtio-blk (OASIS virtio 1.2, modern PCI transport).
  *
  * One request queue, DMA via identity-mapped buffers, MSI-X on vector
- * 0x42. Each in-flight request owns a 3-descriptor chain. The used ring
+ * a dynamically allocated device vector. Each in-flight request owns a
+ * 3-descriptor chain. The used ring
  * is harvested in the MSI-X handler (and as a poll fallback); waiters
  * hlt until that IRQ instead of pause-spinning. ATA PIO remains the
  * fallback when QEMU has no virtio disk.
@@ -15,6 +16,7 @@
 #include "../../process/process.h"
 #include "../../process/completion.h"
 #include "../../stdlib/time.h"
+#include "../irq_lifecycle.h"
 
 extern void *malloc(unsigned int);
 extern void *memset(void *s, int c, unsigned int n);
@@ -203,12 +205,16 @@ struct vblk_dev {
    int readonly;
    int has_flush;
    int has_msix;
+   u8 msix_cap;
+   u8 irq_vector;
+   volatile u32 *msix_entry;
    int deviceid;
    spinlock_t qlock;
 };
 
 static struct vblk_dev vblk;
 static int vblk_ready;
+static char vblk_irq_owner;
 
 static void *zalloc_align(unsigned sz, unsigned align)
 {
@@ -298,7 +304,7 @@ static int virtio_setup_msix(struct vblk_dev *d)
    u16 ctrl;
    u64 table_base;
    volatile u32 *entry;
-   u32 apic_id;
+   irq_msi_message message;
    u16 cmd;
 
    if (!(status & PCI_STATUS_CAPS))
@@ -317,13 +323,24 @@ static int virtio_setup_msix(struct vblk_dev *d)
          entry = (volatile u32 *)mmio_map(table_base, 0x1000);
          if (!entry)
             return 0;
-         apic_id = lapic_get_id();
-         entry[0] = 0xFEE00000u | (apic_id << 12);
-         entry[1] = 0;
-         entry[2] = VIRTIO_MSIX_VECTOR;
+         if (!irq_vector_allocate(&vblk_irq_owner, &d->irq_vector)) {
+            printf("virtio-blk: no MSI-X vector available\n");
+            return 0;
+         }
+         if (!irq_domain_compose_xapic_msi(&irq_device_domain,
+                                           d->irq_vector, lapic_get_id(),
+                                           &message)) {
+            (void)irq_vector_release(d->irq_vector, &vblk_irq_owner);
+            d->irq_vector = 0;
+            printf("virtio-blk: cannot compose MSI-X message\n");
+            return 0;
+         }
+         entry[0] = message.address_lo;
+         entry[1] = message.address_hi;
+         entry[2] = message.data;
          entry[3] = 0;
          virt_mb();
-         setinterruptvector(VIRTIO_MSIX_VECTOR, dex_idtbase, 0x8E,
+         setinterruptvector(d->irq_vector, dex_idtbase, 0x8E,
                             (void (*)(int))virtio_msixwrapper, SYS_CODE_SEL);
          cmd = pci_read16(d->bus, d->dev, d->fn, PCI_CMD);
          pci_write16(d->bus, d->dev, d->fn, PCI_CMD,
@@ -331,6 +348,9 @@ static int virtio_setup_msix(struct vblk_dev *d)
          pci_write16(d->bus, d->dev, d->fn, (u8)(ptr + 2),
                      (u16)(ctrl | 0x8000));
          d->has_msix = 1;
+         d->msix_cap = ptr;
+         d->msix_entry = entry;
+         printf("virtio-blk: MSI-X vector=%u\n", d->irq_vector);
          return 1;
       }
       ptr = next;
@@ -338,6 +358,27 @@ static int virtio_setup_msix(struct vblk_dev *d)
          break;
    }
    return 0;
+}
+
+static void virtio_disable_msix(struct vblk_dev *d)
+{
+   u16 control;
+   if (!d->has_msix)
+      return;
+   control = pci_read16(d->bus, d->dev, d->fn, (u8)(d->msix_cap + 2));
+   pci_write16(d->bus, d->dev, d->fn, (u8)(d->msix_cap + 2),
+               (u16)(control & ~0x8000));
+   if (d->msix_entry) {
+      d->msix_entry[3] = 1;
+      virt_mb();
+   }
+   if (!irq_vector_release(d->irq_vector, &vblk_irq_owner))
+      printf("virtio-blk: MSI-X vector release timed out\n");
+   else
+      d->irq_vector = 0;
+   d->has_msix = 0;
+   d->msix_cap = 0;
+   d->msix_entry = 0;
 }
 
 static u64 virtio_read_features(struct vblk_dev *d)
@@ -795,11 +836,10 @@ static int vblk_write_block(u64 block, char *buf, DWORD numblocks)
    return vblk_rw_chunks(VIRTIO_BLK_T_OUT, block, buf, n);
 }
 
-static int vblk_total_blocks(void)
+static u64 vblk_total_blocks(void)
 {
-   if (vblk.capacity > 0x7FFFFFFFULL)
-      return 0x7FFFFFFF;
-   return (int)vblk.capacity;
+   /* capacity is already a full 64-bit sector count from GET_ID */
+   return vblk.capacity;
 }
 
 static int vblk_get_block_size(void)
@@ -1002,6 +1042,11 @@ void virtio_blk_retire_owner(u64 owner)
 
 void virtio_blk_irq(void)
 {
+   int entered = irq_vector_enter(vblk.irq_vector, &vblk_irq_owner);
+   if (!entered) {
+      lapic_eoi();
+      return;
+   }
    vblk_irq_count++;
    if (vblk.isr)
       (void)*vblk.isr;
@@ -1013,6 +1058,7 @@ void virtio_blk_irq(void)
          process context; the reschedule IPI wakes the drain worker. */
       smp_reschedule_others();
    }
+   irq_vector_exit(vblk.irq_vector, &vblk_irq_owner);
    lapic_eoi();
 }
 
@@ -1070,6 +1116,7 @@ void virtio_blk_init(void)
    virtio_setup_msix(&vblk);
    if (!virtio_setup_queue(&vblk)) {
       printf("virtio-blk: queue setup failed\n");
+      virtio_disable_msix(&vblk);
       mmio_w8(&vblk.common->device_status, VIRTIO_STATUS_FAILED);
       return;
    }

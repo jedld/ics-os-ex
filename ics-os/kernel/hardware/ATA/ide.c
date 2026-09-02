@@ -30,6 +30,7 @@
 #include "ataioreg.c"
 #include "ataiosub.c"
 #include "ataiotmr.c"
+#include "ata_capacity.h"
 
 typedef struct _ide_ata_ident {
 WORD configinfo;
@@ -54,6 +55,10 @@ WORD reserved2;
 WORD reserved3;
 WORD min_pio_data_time;
 WORD min_dma_data_time;
+WORD reserved4[7];   /* words 53-59 */
+WORD lba28_count[2]; /* words 60-61: 28-bit LBA user capacity */
+WORD reserved5[38];  /* words 62-99 */
+WORD lba48_count[4]; /* words 100-103: 48-bit LBA user capacity */
 } ide_ata_ident;
 
 
@@ -73,12 +78,6 @@ typedef struct __attribute__((packed)) _partition_mbr {
 } partition_mbr;
 
 
-typedef struct _ide_partition_info {
-    int   mydeviceid;
-    int   hd_deviceid;
-    DWORD startlba;
-    DWORD endlba;
-} ide_partition_info;
 
 typedef struct _ide_drive_info {
 int mydeviceid;
@@ -88,6 +87,7 @@ int interface,dev;
 char model[21],serial[21];
 int cylinder, heads, sectors_per_track;
 int bytes_per_sector;
+u64 total_sectors;
 } ide_drive_info;
 
 typedef struct __attribute__((packed)) _ide_cdrom_seek 
@@ -187,11 +187,15 @@ void ide_interpret_config(ide_ata_ident *buf,ide_drive_info *driveinfo)
     driveinfo->heads = buf->heads;
     driveinfo->sectors_per_track = buf->sectors_per_track;
     driveinfo->bytes_per_sector = buf->bytes_per_sector;
-    
+    driveinfo->total_sectors =
+        ata_capacity_sectors((const unsigned short *)buf);
+
     printf("Cylinders   = %d,", buf->cylinders);
     printf("Heads       = %d,", buf->heads);
     printf("Spt         = %d,", buf->bytes_per_sector);
     printf("Buffer Size = %d\n", buf->buffer_size);
+    printf("Capacity    = %llu sectors\n",
+           (unsigned long long)driveinfo->total_sectors);
 };
 
 void ide_irqhandler()
@@ -449,7 +453,7 @@ int ide_uni_get_bytes_per_block()
 };
 
 //A universal get total sectors for all ATA devices
-int ide_uni_get_total_sectors()
+u64 ide_uni_get_total_sectors()
 {
      int info_index = -1;
      int i;
@@ -459,18 +463,23 @@ int ide_uni_get_total_sectors()
      for (i=0; i < 4; i++)
       {
               if (ide_drivelist[i].mydeviceid == devmgr_getcontext())
-                   {info_index = i;break;};
+                    {info_index = i;break;};
       };
-      
-      if (info_index == -1) 
+
+      if (info_index == -1)
       {
           printf("ATA driver: unidentified device id supplied!\n");
-          return -1;
+          return 0;
       };
-    
-    return ide_drivelist[info_index].sectors_per_track *
-           ide_drivelist[info_index].cylinder *
-           ide_drivelist[info_index].heads;  
+
+    /* Prefer the LBA capacity reported by the device (28/48-bit); fall
+       back to the CHS product for legacy CHS-only drives. */
+    if (ide_drivelist[info_index].total_sectors)
+        return ide_drivelist[info_index].total_sectors;
+
+    return (u64)ide_drivelist[info_index].sectors_per_track *
+           (u64)ide_drivelist[info_index].cylinder *
+           (u64)ide_drivelist[info_index].heads;
 };
 
 
@@ -537,76 +546,42 @@ int ide_uni_write_block(u64 block,char *blockbuff,DWORD numblocks)
 };
 
 
-int ide_total_partition = 0;
-ide_partition_info ide_partitions[10];
+/* ---- generic partition devices (via partdev) ---------------------------
+   The per-driver partition table and the read/write/total/block-size
+   callbacks live in the shared partdev layer now. This driver only supplies
+   raw accessors (which carry the IDE bridge call) plus the table-specific
+   registration logic (MBR vs GPT). */
 
-//read block with partition adjustments
-int ide_read_block_partition(u64 block, char *blockbuff,DWORD numblocks)
+static int ide_disk_read(int deviceid, u64 lba, char *buf, DWORD nblocks)
+{
+    devmgr_block_desc *myblock = (devmgr_block_desc*)devmgr_getdevice(deviceid);
+    if (myblock == -1) return 0;
+    return bridges_call(myblock, &myblock->read_block, lba, buf, nblocks);
+}
+
+static int ide_disk_write(int deviceid, u64 lba, char *buf, DWORD nblocks)
+{
+    devmgr_block_desc *myblock = (devmgr_block_desc*)devmgr_getdevice(deviceid);
+    if (myblock == -1) return 0;
+    return bridges_call(myblock, &myblock->write_block, lba, buf, nblocks);
+}
+
+/* gpt_read_fn adapter: reads absolute LBAs on a given IDE disk. */
+static int ide_gpt_read(unsigned long long lba, void *buf, unsigned int sectors, void *arg)
+{
+    int deviceid = *(int*)arg;
+    return ide_disk_read(deviceid, (u64)lba, (char*)buf, sectors) ? 1 : 0;
+}
+
+static int ide_drive_read_only(int deviceid)
 {
     int i;
-    //determine which partition was accessed by the io manager based on the
-    //current deviceid
-    int device_context = devmgr_getcontext();
-    
-    //search for partition information in my parition lists
-    for (i=0; i < ide_total_partition; i ++)
-        {
-             //is this it?.   
-             if (ide_partitions[i].mydeviceid == device_context)
-                 {
-                      //obtain the device id of the HDD containing this partition            
-                      devmgr_block_desc *myblock;
-                      myblock = (devmgr_block_desc*)devmgr_getdevice(ide_partitions[i].hd_deviceid);
-                      
-                      //check if the device still exists
-                      if (myblock==-1) return -1;
-                      //read the required block after adjusting
-                      return bridges_call(myblock,&myblock->read_block,
-                             block+ide_partitions[i].startlba,blockbuff,numblocks);             
-                 };   
-        };    
-        
-    //partition not found    
-    return -1;
-};
+    for (i = 0; i < 4; i++)
+        if (ide_drivelist[i].mydeviceid == deviceid)
+            return ide_drivelist[i].read_only;
+    return 0;
+}
 
-//write block with partition adjustments
-int ide_write_block_partition(u64 block, char *blockbuff,DWORD numblocks)
-{
-    int i;
-    //determine which partition was accessed by the io manager based on the
-    //current deviceid
-    int device_context = devmgr_getcontext();
-    
-    //search for partition information in my parition lists
-    for (i=0; i < ide_total_partition; i ++)
-        {
-             //is this it?.   
-             if (ide_partitions[i].mydeviceid == device_context)
-                 {
-                      //obtain the device id of the HDD containing this partition            
-                      devmgr_block_desc *myblock;
-                      myblock = (devmgr_block_desc*)devmgr_getdevice(ide_partitions[i].hd_deviceid);
-                      
-                      //check if the device still exists
-                      if (myblock==-1) return -1;
-                      //read the required block after adjusting
-                             {
-                                    int result=bridges_call(myblock,&myblock->write_block,
-                                        block+ide_partitions[i].startlba,blockbuff,numblocks);
-                                    if (result<=0)
-                                         printf("IDE: partition write failed part=%d disk=%d lba=%llu nb=%u rc=%d\n",
-                                                  device_context,ide_partitions[i].hd_deviceid,
-                                                  (unsigned long long)(block+ide_partitions[i].startlba),
-                                                  (unsigned)numblocks,result);
-                                    return result;
-                             };
-                 };   
-        };    
-        
-    //partition not found    
-    return -1;
-};
 
 
 //identify the partition name given the type ... highly unreliable considering
@@ -629,80 +604,111 @@ const char *ide_identify_partition_type(int part_type)
         };
         
 };
-int ide_partition_get_bytes_per_block()
+
+//register GPT partitions on a HD to the device manager
+static void ide_register_gpt(int deviceid, const char *disk_name, u64 total_blocks)
 {
-   return 512;
-}
+    gpt_disk gpt;
+    char guidstr[40];
+    int i, read_only = ide_drive_read_only(deviceid);
 
-int ide_partition_total_blocks()
+    if (!gpt_parse(ide_gpt_read, &deviceid, (unsigned long long)total_blocks, &gpt)) {
+        printf("GPT_WARN %s GPT detected but failed validation; no partitions registered\n", disk_name);
+        partdev_set_disk(deviceid, disk_name, PARTDEV_TABLE_NONE, 0, 0, 0);
+        return;
+    }
+    if (!gpt.primary_header_ok)
+        printf("GPT_WARN %s primary GPT header failed validation\n", disk_name);
+    if (!gpt.primary_array_ok)
+        printf("GPT_WARN %s primary GPT entry array failed validation\n", disk_name);
+    if (gpt.used_backup)
+        printf("GPT_WARN %s using backup GPT header\n", disk_name);
+
+    partdev_format_guid(gpt.disk_guid, guidstr, sizeof(guidstr));
+    printf("GPT_DETECT %s entries=%d diskguid=%s%s\n", disk_name, gpt.entry_count, guidstr,
+           gpt.used_backup ? " (backup)" : "");
+
+    for (i = 0; i < gpt.entry_count; i++) {
+        const gpt_entry *e = &gpt.entries[i];
+        char name[24], desc[256];
+        const char *tname = (e->type_name && e->type_name[0]) ? e->type_name : "unknown";
+        int devid;
+        sprintf(name, "%sp%d", disk_name, e->index);
+        sprintf(desc, "%s GPT partition %d (%s) on %s", tname, e->index, e->name, disk_name);
+       devid = partdev_register(deviceid, name, desc, GPT_SECTOR_SIZE,
+                                 (u64)e->first_lba, (u64)e->last_lba + 1,
+                                 ide_disk_read, ide_disk_write, read_only, tname, e->index,
+                                 (u64)e->attributes, e->name);
+        if (devid >= 0)
+            printf("PART_REG %s %s start=%llu end=%llu type=%s name=%s\n", disk_name, name,
+                   (unsigned long long)e->first_lba, (unsigned long long)(e->last_lba + 1),
+                   tname, e->name);
+        else
+            printf("GPT_WARN %s partition %d not registered (cap reached)\n", disk_name, e->index);
+    }
+    partdev_set_disk(deviceid, disk_name, PARTDEV_TABLE_GPT, gpt.disk_guid, gpt.used_backup, gpt.entry_count);
+};
+
+//register MBR partitions on a HD to the device manager
+static void ide_register_mbr(int deviceid, const char *disk_name, u64 total_blocks)
 {
-   int i;
-   int device_context = devmgr_getcontext();
+    static char mbrbuf[GPT_SECTOR_SIZE];
+    partition_mbr *mbr = (partition_mbr*)mbrbuf;
+    int i, read_only = ide_drive_read_only(deviceid);
 
-   for (i = 0; i < ide_total_partition; i++) {
-      if (ide_partitions[i].mydeviceid == device_context) {
-         if (ide_partitions[i].endlba > ide_partitions[i].startlba)
-            return (int)(ide_partitions[i].endlba - ide_partitions[i].startlba);
-         return 0;
-      }
-   }
-   return 0;
-}
+    if (!ide_disk_read(deviceid, 0, mbrbuf, 1)) {
+        printf("PART_SCAN %s MBR read failed\n", disk_name);
+        partdev_set_disk(deviceid, disk_name, PARTDEV_TABLE_NONE, 0, 0, 0);
+        return;
+    }
+    if (mbr->magic_value[0] != 0x55 || mbr->magic_value[1] != 0xAA) {
+        printf("PART_SCAN %s bad MBR signature; unpartitioned\n", disk_name);
+        partdev_set_disk(deviceid, disk_name, PARTDEV_TABLE_NONE, 0, 0, 0);
+        return;
+    }
 
-//register the partitions in a HD to the device manager
+    for (i = 0; i < 4; i++) {
+        u64 start = (u64)mbr->tables[i].startlba;
+        u64 end   = start + (u64)mbr->tables[i].sector_size;
+        char name[24], desc[256];
+        const char *tname = ide_identify_partition_type(mbr->tables[i].type);
+        int devid;
+        if (mbr->tables[i].type == 0) continue;
+        sprintf(name, "%sp%d", disk_name, i);
+        sprintf(desc, "%s on partition %d at %s", tname, i, disk_name);
+        devid = partdev_register(deviceid, name, desc, 512, start, end,
+                                 ide_disk_read, ide_disk_write, read_only, tname, i,
+                                 0, (const char *)0);
+        if (devid >= 0)
+            printf("PART_REG %s %s start=%llu end=%llu type=%s\n", disk_name, name,
+                   (unsigned long long)start, (unsigned long long)end, tname);
+        else
+            printf("PART_WARN %s MBR entry %d not registered (cap reached)\n", disk_name, i);
+    }
+    partdev_set_disk(deviceid, disk_name, PARTDEV_TABLE_MBR, 0, 0, 0);
+};
+
+//register the partitions in a HD to the device manager (MBR or GPT)
 int ide_registerpartitions(int deviceid)
 {
-    char temp[10],temp2[10];
-    int i;
     devmgr_block_desc *myblock = (devmgr_block_desc*)devmgr_getdevice(deviceid);
-    partition_mbr *mbr=malloc(sizeof(partition_mbr));
-        
-    //check if the device exists
-    if (myblock==-1) return -1;
+    u64 total_blocks;
+    int detect;
 
-    //obtain partition information from the MBR(Master Boot Record) of the target HDD
-    bridges_call(myblock,&myblock->read_block,0,mbr,1);
-    
-    //Interpret partition information and register them
-    for (i=0;i<4;i++)
-    {
-        devmgr_block_desc mypartition;
-        if (mbr->tables[i].type!=0)
-           {
-                int mydeviceid;      
-                int pindex=ide_total_partition++;
-                memset(&mypartition,0,sizeof(devmgr_block_desc));
-                mypartition.hdr.size = sizeof(devmgr_block_desc);
-                mypartition.hdr.type = DEVMGR_BLOCK;
-                
-                //name this partition something like hd_p1_prt0
-                sprintf(mypartition.hdr.name,"%sp%d",myblock->hdr.name,i);
-                
-                //give a description like "FAT12 on partition 0 at hd_p0"
-                sprintf(mypartition.hdr.description,"%s on partition %d at %s",
-                        ide_identify_partition_type( mbr->tables[i].type),
-                        i,myblock->hdr.name);
-                        
-                mypartition.read_block = ide_read_block_partition;
-                mypartition.write_block = ide_write_block_partition;
-                mypartition.get_block_size = ide_partition_get_bytes_per_block;
-                mypartition.total_blocks = ide_partition_total_blocks;
-                //register the partition to the device manager
-                mydeviceid = devmgr_register((devmgr_generic*)&mypartition);
-                
-                ide_partitions[pindex].hd_deviceid = deviceid;
-                ide_partitions[pindex].mydeviceid = mydeviceid;
-                //record the lba from the partition table
-                ide_partitions[pindex].startlba = mbr->tables[i].startlba;
-                ide_partitions[pindex].endlba =   mbr->tables[i].startlba + 
-                                                  mbr->tables[i].sector_size;
-                
-                        
-           };
-    };
+    if (myblock == -1) return -1;
 
-    free(mbr);  
-    return 1;  
+    total_blocks = bridges_call64((devmgr_generic*)myblock, &myblock->total_blocks);
+    detect = gpt_detect(ide_gpt_read, &deviceid);
+
+    if (detect == 1) {
+        ide_register_gpt(deviceid, myblock->hdr.name, total_blocks);
+    } else if (detect == 0) {
+        ide_register_mbr(deviceid, myblock->hdr.name, total_blocks);
+    } else {
+        printf("PART_SCAN %s no partition table (unpartitioned)\n", myblock->hdr.name);
+        partdev_set_disk(deviceid, myblock->hdr.name, PARTDEV_TABLE_NONE, 0, 0, 0);
+    }
+    return 1;
 };
 
 int ide_sendmessage(int type,const char *message)

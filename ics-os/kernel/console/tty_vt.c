@@ -225,16 +225,16 @@ static int vt_fmt_num(char *dst, int val)
  /* Respond to DSR-6 by injecting CSI row;col R into the tty input queue. */
 static void vt_dsr_response(tty_t *t)
 {
-   char buf[24];
-   int row = t->ddl->cury + 1, col = t->ddl->curx + 1, i = 0;
-   buf[i++] = 0x1B; buf[i++] = '[';
-   i += vt_fmt_num(buf + i, row);
-   buf[i++] = ';';
-   i += vt_fmt_num(buf + i, col);
-   buf[i++] = 'R';
-   while (i > 0)
-      tty_inject(t, buf[--i]);
-}
+    char buf[24];
+    int row = t->ddl->cury + 1, col = t->ddl->curx + 1, i = 0, j;
+    buf[i++] = 0x1B; buf[i++] = '[';
+    i += vt_fmt_num(buf + i, row);
+    buf[i++] = ';';
+    i += vt_fmt_num(buf + i, col);
+    buf[i++] = 'R';
+    for (j = 0; j < i; j++)
+       tty_inject(t, buf[j]);
+ }
 
 static void vt_ris(tty_t *t)
 {
@@ -618,14 +618,16 @@ void vt_feed(tty_t *t, int c)
          v->state = VT_S_GROUND;
          return;
       }
-      if (c >= 0x20 && c <= 0x2F) {
-         if (v->csi_n < (int)sizeof(v->csi) - 1)
-            v->csi[v->csi_n++] = (char)c;
-      } else {
-         /* control char or overflow: abort sequence */
-         v->state = VT_S_GROUND;
-      }
-      return;
+      if (c >= 0x20 && c <= 0x3F) {
+          /* 0x20-0x2F intermediate bytes, 0x30-0x3F parameter bytes
+             (digits, ';', ':', and the '?' private marker). */
+          if (v->csi_n < (int)sizeof(v->csi) - 1)
+             v->csi[v->csi_n++] = (char)c;
+       } else {
+          /* control char or overflow: abort sequence */
+          v->state = VT_S_GROUND;
+       }
+       return;
 
    default:
       break;

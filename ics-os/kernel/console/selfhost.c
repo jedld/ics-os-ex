@@ -302,7 +302,8 @@ static int kbuild_run(const char *cc)
       "tcccompat.c", "process/scheduler.c", "filesystem/fat12.c",
       "filesystem/iso9660.c", "filesystem/ramdisk.c", "filesystem/devfs.c",
       "iomgr/iosched.c", "iomgr/blkcache.c", "vfs/posixfd.c", "devmgr/devmgr_error.c",
-      "cpu/lapic.c", "cpu/smp.c", "hardware/virtio/virtio_blk.c", "kernel32.c",
+      "cpu/lapic.c", "cpu/smp.c", "hardware/vtd.c",
+      "hardware/virtio/virtio_blk.c", "kernel32.c",
       0
    };
    static const char *asms[] = {
@@ -388,7 +389,7 @@ static int kbuild_run(const char *cc)
            "/ramdisk/k/kernel32.o /ramdisk/k/scheduler.o /ramdisk/k/iosched.o "
            "/ramdisk/k/blkcache.o /ramdisk/k/posixfd.o /ramdisk/k/fat12.o /ramdisk/k/iso9660.o "
            "/ramdisk/k/ramdisk.o /ramdisk/k/devfs.o /ramdisk/kasm/irqwrap.o "
-           "/ramdisk/k/devmgr_error.o /ramdisk/k/virtio_blk.o /ramdisk/k/tcccompat.o /ramdisk/kasm/tccva.o "
+           "/ramdisk/k/devmgr_error.o /ramdisk/k/vtd.o /ramdisk/k/virtio_blk.o /ramdisk/k/tcccompat.o /ramdisk/kasm/tccva.o "
            "/ramdisk/kasm/kexec.o",
             cc);
          if (!run_tcc(cc, cmd)) {
@@ -511,7 +512,7 @@ static int kbuild_run(const char *cc)
        "process/scheduler.c", "filesystem/fat12.c", "filesystem/iso9660.c",
        "filesystem/ramdisk.c", "filesystem/devfs.c", "iomgr/iosched.c",
        "iomgr/blkcache.c", "vfs/posixfd.c", "devmgr/devmgr_error.c",
-       "kernel32.c", "cpu/lapic.c", "cpu/smp.c",
+      "kernel32.c", "cpu/lapic.c", "cpu/smp.c", "hardware/vtd.c",
        "hardware/virtio/virtio_blk.c",
        0
     };
@@ -520,7 +521,7 @@ static int kbuild_run(const char *cc)
     static const char *cobjs[] = {
        "scheduler.o", "fat.o", "iso9660.o", "ramdisk.o", "devfs.o",
        "iomgr.o", "blkcache.o", "posixfd.o", "devmgr_error.o",
-       "kernel32.o", "lapic.o", "smp.o", "virtio_blk.o"
+      "kernel32.o", "lapic.o", "smp.o", "vtd.o", "virtio_blk.o"
     };
     /* Host kernel ASM objects (kernel/Makefile, built via gcc). */
     static const char *asms[] = {
@@ -675,7 +676,7 @@ static int kbuild_run(const char *cc)
            "/ramdisk/k/blkcache.o /ramdisk/k/posixfd.o /ramdisk/k/fat.o "
            "/ramdisk/k/iso9660.o /ramdisk/k/ramdisk.o /ramdisk/k/devfs.o "
            "/ramdisk/k/irqwrap.o /ramdisk/k/devmgr_error.o /ramdisk/k/kexec.o "
-           "/ramdisk/k/virtio_blk.o",
+           "/ramdisk/k/vtd.o /ramdisk/k/virtio_blk.o",
            ldp);
     if (!user_execp((char*)ldp, 0, (char*)cmd)) {
        printf("GKBUILD_TEST_FAIL link\n");
