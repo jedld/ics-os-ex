@@ -72,15 +72,12 @@ mformat -i "${IMG}@@${OFFSET}" -v ICSOS -F ::
 mcopy -i "${IMG}@@${OFFSET}" -s "$STAGE_DIR"/* ::
 
 # Build and embed GRUB for BIOS (i386-pc) in the gap before the first partition.
-CORE_BODY=$(mktemp)
 CORE_IMG=$(mktemp)
-trap 'rm -f "$CORE_BODY" "$CORE_IMG"' EXIT
+trap 'rm -f "$CORE_IMG"' EXIT
 
-grub-mkimage -O i386-pc -p '(hd0,msdos1)/boot/grub' -o "$CORE_BODY" \
+grub-mkimage -O i386-pc -p '(hd0,msdos1)/boot/grub' -o "$CORE_IMG" \
     biosdisk part_msdos fat multiboot multiboot2 gzio serial terminal \
     configfile normal ls search echo boot
-
-cat "$GRUB_PC_DIR/diskboot.img" "$CORE_BODY" > "$CORE_IMG"
 
 python3 - "$IMG" "$GRUB_PC_DIR/boot.img" "$CORE_IMG" << 'PY'
 import sys, math, pathlib

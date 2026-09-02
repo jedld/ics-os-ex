@@ -6,7 +6,7 @@ Modern real-world operating systems are too complex to be taught to undergraduat
 
 Thus, this project aims to develop a simple yet operational instructional operating system for teaching undergraduate operating systems courses. ICS-OS is a fork of <a href='http://sourceforge.net/projects/dex-os'>DEX-OS</a> by Joseph Dayo.
 
-This tree (`ics-os-ex`) is an **x86-64 long-mode** instructional kernel. It boots via GRUB **Multiboot2**, uses **software context switching**, **LAPIC/SMP**, **ISO9660 CD root**, **ELF64 user executables**, and an in-OS **x86_64 TinyCC** that can compile and run programs (`make test-selfhost`).
+This tree (`ics-os-ex`) is an **x86-64 long-mode** instructional kernel. It boots via GRUB **Multiboot2**, uses **software context switching**, **LAPIC/SMP**, **ISO9660 CD root**, and **ELF64 user executables**. Host-seeded GCC/binutils executables can rebuild and kexec the kernel in-OS (`make test-kbuild`), but full self-host certification remains pending until GCC rebuilds itself in-OS and that rebuilt compiler closes the kernel-build loop. **x86_64 TinyCC** remains optional.
 
 The historical DEX/ICS-OS 32-bit path is not the active kernel. See [ics-os/docs/smp-longmode.md](ics-os/docs/smp-longmode.md) for long-mode / SMP notes.
 
@@ -54,11 +54,16 @@ Headless smoke tests (serial console, no VGA window):
 
 ```
 $ make test-boot          # Multiboot2 CD: serial + Root mount [OK]
-$ make test-smp           # QEMU -smp 2, LAPIC AP bring-up + work-steal
+$ make test-smp           # QEMU -smp 4, LAPIC AP bring-up + per-AP work
+$ make test-smp-matrix    # QEMU -smp 1/2/4/8 topology matrix
 $ make test-exec          # host-built hello.exe (ELF64 CRT)
-$ make test-selfhost      # in-OS TinyCC compiles min.c + hello.c, then runs them
+$ make test-kbuild        # in-OS GCC builds ICS-OS and kexecs the result
+$ make test-vbox-usb-image      # BIOS USB image + persistent FAT write/readback
+$ make test-vbox-usb-image-efi  # UEFI USB image + persistent FAT write/readback
 $ make test-integration   # test-boot + test-smp + test-exec
-# make test-tccboot       # in-OS rebuild of TinyCC (staging works; full ONE_SOURCE still slow/hangs)
+$ make test-selfhost      # optional TinyCC: compile and run small C programs
+$ make test-tccboot       # optional in-OS TinyCC bootstrap
+# make test-tcc-kbuild    # optional TinyCC kernel experiment
 # make test-iobench       # skipped until disk_mgr is stable on x86_64
 ```
 
@@ -80,6 +85,9 @@ Write `ics-os-usb.img` to a physical thumb drive (BIOS/CSM firmware can boot it 
 ```
 $ sudo dd if=ics-os-usb.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
+
+For Intel N150 hardware, capacity sizing, safe flashing, emulator evidence, and
+the xHCI blocker, see [Intel N150 USB boot and working-storage readiness](ics-os/docs/intel-n150-usb-readiness.md).
 
 For a firmware-bootable hybrid image that works like `dd` of a live USB (BIOS and UEFI):
 
@@ -138,18 +146,19 @@ to set up the build environment.
 - Kernel builds as **ELF64** (`-m64`, `lscript64.ld`) and enters long mode from a Multiboot2 32-bit stub.
 - **Software context switch** + `fxsave`/`fxrstor` (no hardware TSS task switching).
 - **Priority round-robin** scheduler with a spinlock-protected ready queue.
-- **LAPIC** init/timer/EOI and **AP bring-up**; APs unpark after root mount and work-steal (`make test-smp` with `-smp 2`).
+- **LAPIC** init/timer/EOI and **AP bring-up** for up to eight xAPIC CPUs; APs unpark after root mount and each executes pinned scheduler work (`make test-smp-matrix` covers 1/2/4/8 vCPUs).
 - User processes / console / `fg_mgr` are BSP-pinned today; APs run migratable kthreads.
 
-### Userland, TinyCC, and self-hosting
+### Userland, GCC, TinyCC, and self-hosting
 
 - Host apps and in-OS binaries are **ELF64** (`sdk/app.mk`).
 - Vendored **TinyCC 0.9.27** with an **x86_64 backend** (`contrib/tcc/x86_64-gen.c`, `x86_64-link.c`).
 - SDK is LP64 (`sdk/include/`, `tccsdk.c`, `posix.c`, `crt1.c`); x86_64 `va_list` uses compiler builtins.
 - **In-kernel FAT16 ramdisk** at `/ramdisk` for writable compile output (CD is read-only).
 - `make test-selfhost` stages `tcc.exe` + sources onto `/ramdisk`, compiles `min.c` and `hello.c` inside the OS, and runs them (`SELFHOST_TEST_PASS`).
-- Console commands: `selfhost`, `exectest`, `tccboot`, `iobench`, `cc`.
-- `make test-tccboot` stages an 8.3-renamed TinyCC tree (`tccsrc.tar`) onto ramdisk; the in-OS ONE_SOURCE rebuild of TinyCC itself is not green yet.
+- `make test-kbuild` is the supported kernel-build path: host-seeded GCC → cc1 → GAS → GNU ld runs in-OS, builds the kernel, then kexec boots it. This is not by itself full self-host certification.
+- Console commands: `kbuild` (GCC), `gkbuild` (GCC alias), `tcckbuild` (optional), `selfhost`, `exectest`, `tccboot`, `iobench`, `cc`.
+- `make test-tccboot` rebuilds TinyCC inside ICS-OS. TinyCC kernel compilation is retained only as the optional `make test-tcc-kbuild` experiment.
 - ISO9660 multi-sector directories skip sector padding (large dirs such as `/src/tcc` list all files).
 
 ### I/O performance

@@ -57,6 +57,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-inline.h"
 #include "dwarf2out.h"
 
+extern void gt_ggc_mx_machine_function (void *);
+
 /* See definition in function.h.  */
 #undef cfun
 
@@ -1089,7 +1091,8 @@ gt_ggc_mx_function (void *x_p)
       gt_ggc_m_9tree_node ((*x).static_chain_decl);
       gt_ggc_m_9tree_node ((*x).nonlocal_goto_save_area);
       gt_ggc_m_11VEC_tree_gc ((*x).local_decls);
-      gcc_assert (!(*x).machine);
+      if ((*x).machine)
+        gt_ggc_mx_machine_function ((*x).machine);
       gt_ggc_m_17language_function ((*x).language);
       gt_ggc_m_P9tree_node4htab ((*x).used_types_hash);
       gt_ggc_m_13dw_fde_struct ((*x).fde);

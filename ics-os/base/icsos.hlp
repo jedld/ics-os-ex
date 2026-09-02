@@ -1,5 +1,11 @@
 ICS-OS Commands
 ---------------
+1151:   if (strcmp(u,"posixio") == 0){
+1156:   if (strcmp(u,"spawntest") == 0){
+1161:   if (strcmp(u,"forktest") == 0){
+1166:      if (strcmp(u,"forkoomtest") == 0){
+1173:     if (strcmp(u,"ext4test") == 0){
+cc1test- Run host-built GCC cc1 to compile a trivial file in-OS.
 cc- Builds a C program (invokes tcc.exe). Args: <name.exe> <name.c>
 cd- Changes working directory. Args: <directory>
 cls- Clears the screen. 
@@ -15,9 +21,17 @@ exit- Exits a console session.
 fgman-  Foreground manager
 files- Shows list of currently open files.
 find- Finds a file.
+fullhost- Generic self-host alias uses GCC.
+gccclosed- Verify the rebuilt GCC after kexec.
+gccdrv- Run the standalone in-OS gcc driver (gcc.exe):
+gccselfhost- Rebuild GCC, then kernel, entirely in-OS.
+gctest- Full in-OS GCC toolchain: cc1 -> as -> ld -> exec.
+gkbuild- Diagnostic direct GCC build (without make).
 help- Displays this help screen.
 iobench- Benchmark file I/O / block cache.
-kbuild- Rebuild the kernel with in-OS tcc and install as /vmdex.
+kbuild- Supported path: GNU make + GCC + binutils.
+kexec- Boot a kernel ELF from ramdisk/path.
+kexeccert- Final generated-kernel capability marker.
 kill- Kills a thread/process. Performs cleanup.  Args: <thread name>
 libinfo- Shows library information.
 loadmod- Loads a shared library (.dll or .so). Args: <module filename> 
@@ -26,6 +40,7 @@ lsext- Lists all extensions.
 lsmod- Shows the list of loaded libraries and modules. 
 lspcut- Shows a list of path aliases. 
 ls- Shows directory listing. Args: [-l | -osize | -oname] 
+makeboot- TinyCC builds GNU make onto /work.
 meminfo- Show memory map information.
 mem- Shows memory information.
 mkdir- Creates a directory. Args: <directory name> 
@@ -47,6 +62,8 @@ selfhost- Compile a test program with in-OS tcc and run it.
 set- Sets an environment variable. Args: <key>=<value>
 shutdown- Shuts down the system.
 tccboot- Rebuild TinyCC with the in-OS tcc.
+tccfullhost- Optional TinyCC bootstrap.
+tcckbuild- Optional TinyCC kernel-build experiment.
 time- Displays date and time.
 type- Displays the contents of a file. Args: <filename> [-p]
 umount- Unmounts a mounted device. Args: <mount point>

@@ -118,6 +118,14 @@ LIBIBERTY_O := $(patsubst %.c,$(OBJ)/libib/%.o,$(LIBIBERTY_C))
 AR_O        := $(patsubst %.c,$(OBJ)/ar/%.o,$(AR_C))
 AR_EXE      := $(CURDIR)/ar.exe
 
+# ---- objcopy (used by the kernel bzImage target) ----
+# This is upstream binutils 2.23's objcopy_OBJECTS set: the program, debug
+# readers/writer, and the shared bucomm/version/filemode support.
+OBJCOPY_C := objcopy.c not-strip.c rename.c rddbg.c debug.c stabs.c ieee.c \
+	rdcoff.c wrstabs.c bucomm.c version.c filemode.c
+OBJCOPY_O   := $(patsubst %.c,$(OBJ)/objcopy/%.o,$(OBJCOPY_C))
+OBJCOPY_EXE := $(CURDIR)/objcopy.exe
+
 # ---- opcodes (instruction-encoding library) ----
 # i386-opc.c (the i386/x86-64 opcode + modifier tables, used by GAS) and the
 # generic disassembler core (dis-buf/disassemble/dis-init) + i386-dis.c, built
@@ -207,9 +215,9 @@ $(OBJ)/gas/targ-cpu.h: $(SRC)/gas/config/tc-i386.h
 	@mkdir -p $(OBJ)/gas
 	cp $< $@
 
-.PHONY: libiberty libbfd opcodes gas all ar as ld clean
+.PHONY: libiberty libbfd opcodes gas all ar as ld objcopy clean
 
-all: ar as ld
+all: ar as ld objcopy
 
 libiberty: $(LIBIBERTY_O)
 	@echo "libiberty: $(words $(LIBIBERTY_O)) objects built OK"
@@ -231,6 +239,10 @@ $(OBJ)/ar/%.o: $(SRC)/binutils/%.c $(CONF)
 	@mkdir -p $(OBJ)/ar
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJ)/objcopy/%.o: $(SRC)/binutils/%.c $(CONF)
+	@mkdir -p $(OBJ)/objcopy
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # ar: link the tool + libbfd + libiberty + the SDK runtime into a single
 # static ELF64 user executable (same pattern as contrib/gnumake/make.exe).
 # CFLAGS is passed on the link line too (gnumake does the same) so the SDK
@@ -244,9 +256,9 @@ $(AR_EXE): $(AR_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
 		$(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
 	@echo "ar: linked $(AR_EXE)"
 
-install: ar as ld
+install: ar as ld objcopy
 	mkdir -p $(ICSOS_ROOT)/apps
-	cp $(AR_EXE) $(AS_EXE) $(LD_EXE) $(ICSOS_ROOT)/apps
+	cp $(AR_EXE) $(AS_EXE) $(LD_EXE) $(OBJCOPY_EXE) $(ICSOS_ROOT)/apps
 	# ld locates its default linker script (ldscripts/elf_x86_64.x*) via
 	# find_scripts_dir()'s "next to the binary" fallback, so stage them next
 	# to ld.exe. Without them a bare `ld in.o -o out` cannot find a script.
@@ -256,7 +268,8 @@ install: ar as ld
 	cp $(CURDIR)/ldscripts/elf_x86_64.x* $(ICSOS_ROOT)/apps/ldscripts/
 
 uninstall:
-	rm -f $(ICSOS_ROOT)/apps/ar.exe $(ICSOS_ROOT)/apps/as.exe $(ICSOS_ROOT)/apps/ld.exe
+	rm -f $(ICSOS_ROOT)/apps/ar.exe $(ICSOS_ROOT)/apps/as.exe $(ICSOS_ROOT)/apps/ld.exe \
+		$(ICSOS_ROOT)/apps/objcopy.exe
 	rm -rf $(ICSOS_ROOT)/apps/ldscripts
 
 # ---- opcodes + GAS (assembler) ----
@@ -330,6 +343,17 @@ $(LD_EXE): $(LD_O) $(LD_EMU) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
 		$(LD_O) $(LD_EMU) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
 		$(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
 	@echo "ld: linked $(LD_EXE)"
+
+# objcopy: preserve/debug-strip/copy ELF64 kernel images using the same BFD
+# backend already linked into ar/as/ld.
+objcopy: $(OBJCOPY_EXE)
+
+$(OBJCOPY_EXE): $(OBJCOPY_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
+	   $(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
+	$(CC) $(CFLAGS) $(APP_LDFLAGS) -o$@ \
+		$(OBJCOPY_O) $(LIBBFD_O) $(LIBIBERTY_O) $(SDKLIBS) \
+		$(CURDIR)/fileno-alias.c $(CURDIR)/demangle-stub.c
+	@echo "objcopy: linked $(OBJCOPY_EXE)"
 
 clean:
 	rm -rf $(STAGE)

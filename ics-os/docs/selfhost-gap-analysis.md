@@ -1,5 +1,10 @@
 # ICS-OS Self-Compile / Self-Host — Gap Analysis & Plan
 
+> **Historical TinyCC analysis.** The supported self-host path now uses GCC:
+> `make test-kbuild` runs in-OS GCC/binutils and kexecs the result. The targets
+> described below were renamed `test-tcc-kbuild` and `test-tcc-fullhost` and
+> remain optional bootstrap experiments.
+
 Goal (as stated):
 
 1. **OS-in-OS:** ics-os can compile itself inside itself **and boot** that compiled OS.

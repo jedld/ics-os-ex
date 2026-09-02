@@ -17,12 +17,21 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit
+.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-vbox-usb-image test-vbox-usb-image-efi
 
 test-io-unit:
 	@mkdir -p /tmp/icsos-tests
 	@gcc -std=gnu89 -Wall -Wextra -Werror -I. tests/io_p0_unit.c -o /tmp/icsos-tests/io_p0_unit
 	@/tmp/icsos-tests/io_p0_unit
+
+test-vbox-usb-image: ics-os-usb.img
+	@chmod +x scripts/test-vbox-usb-image.sh
+	@scripts/test-vbox-usb-image.sh ics-os-usb.img
+
+test-vbox-usb-image-efi: ics-os-usb.img
+	@chmod +x scripts/test-vbox-usb-image.sh
+	@VBOX_FIRMWARE=efi scripts/test-vbox-usb-image.sh ics-os-usb.img
+
 clean:
 	rm -f vmdex
 	rm -f ics-os-livecd.iso ics-os-usb.img
@@ -43,7 +52,7 @@ prep_image: vmdex
 	cp -r vmdex tmp
 	scripts/gen-help.sh
 	cp base/* tmp
-	if [ -d apps ] && ls apps/* >/dev/null 2>&1; then cp apps/* tmp/apps/; fi
+	if [ -d apps ] && ls apps/* >/dev/null 2>&1; then cp -r apps/* tmp/apps/; fi
 	find sdk -maxdepth 1 -type f -exec cp {} tmp/tcc1/ \;
 	if [ -d lib ] && ls lib/* >/dev/null 2>&1; then cp lib/* tmp/lib1/; fi
 	chmod +x scripts/stage-selfhost.sh

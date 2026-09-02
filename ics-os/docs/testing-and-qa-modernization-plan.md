@@ -35,6 +35,12 @@ functional test suite**, not as a mature unit-testing or production QA
 framework. Its end-to-end tests should be retained and placed at the top of a
 new test pyramid rather than replaced.
 
+The USB image also has disposable VirtualBox BIOS and UEFI gates. They require
+FAT32 root mount, guest create/write/`fsync`, VM poweroff, disk conversion, and
+byte-for-byte host readback. These qualify firmware and IDE-backed persistence,
+not physical USB controller compatibility; modern xHCI hardware still requires
+its own emulated and physical qualification lanes.
+
 The first incremental host-unit foothold now exists: `make test-io-unit` emits
 TAP 13 for block-cache generation decisions. `test-posixio` runs twice under
 distinct PIDs on two vCPUs and verifies VFS create-failure cleanup plus io_uring

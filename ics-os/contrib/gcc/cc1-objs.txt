@@ -92,7 +92,7 @@ function.o
 fwprop.o
 gcse.o
 ggc-common.o
-ggc-zone.o
+ggc-page.o
 gimple-fold.o
 gimple-iterator.o
 gimple-low.o

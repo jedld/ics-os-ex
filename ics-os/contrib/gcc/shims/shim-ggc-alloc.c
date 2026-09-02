@@ -33,6 +33,33 @@ ggc_alloc_stack_local_entry (void)
                                      MEM_STAT_INFO);
 }
 
+/* gengtype ran without the i386 machine_function type, so gtype-desc.c
+   emits `gcc_assert (!cfun->machine)` instead of walking it.  On a host
+   gcc ≥ 4.5 that assert is __builtin_unreachable when machine is set.
+   Walk the i386 GC pointers ourselves. */
+void
+gt_ggc_mx_machine_function (void *x_p)
+{
+  struct machine_function *x = (struct machine_function *)x_p;
+  struct shim_stack_local_entry *s;
+
+  if (!x)
+    return;
+  if (!ggc_test_and_set_mark (x))
+    return;
+
+  s = (struct shim_stack_local_entry *)x->stack_locals;
+  while (s)
+    {
+      struct shim_stack_local_entry *next = s->next;
+      if (ggc_test_and_set_mark (s) && s->rtl)
+        gt_ggc_mx_rtx_def (s->rtl);
+      s = next;
+    }
+  if (x->split_stack_varargs_pointer)
+    gt_ggc_mx_rtx_def (x->split_stack_varargs_pointer);
+}
+
 /* c-common.c calls mudflap_init() under a runtime `if (flag_mudflap)` guard.
    Mudflap is not built here, so provide a no-op to satisfy the link. */
 void

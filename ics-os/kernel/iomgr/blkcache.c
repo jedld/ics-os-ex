@@ -275,25 +275,38 @@ static int pc_dev_rw(int deviceid, int write, u64 lba, DWORD nsect, void *buf,
 {
    devmgr_block_desc *b = (devmgr_block_desc *)devmgr_getdevice_ref(deviceid);
    int retval=0;
+   int last_context;
    DWORD generation;
    if (b == (devmgr_block_desc *)-1 || b->hdr.type != DEVMGR_BLOCK) {
+      if (write)
+         printf("pcache: write device lookup failed dev=%d ptr=%p type=%d\n",
+                deviceid,b,b == (devmgr_block_desc *)-1 ? -1 : b->hdr.type);
       devmgr_putdevice((devmgr_generic *)b);
       return 0;
    }
    generation=devmgr_get_generation(deviceid);
    if (!generation || (device_generation && *device_generation &&
                        *device_generation!=generation)) {
+      if (write)
+         printf("pcache: write generation rejected dev=%d expected=%u current=%u\n",
+             deviceid,device_generation ? (unsigned)*device_generation : 0,
+             (unsigned)generation);
       devmgr_putdevice((devmgr_generic *)b);
       return 0;
    }
    if (device_generation)
       *device_generation=generation;
+   last_context=devmgr_getcontext();
+   devmgr_setcontext(b->hdr.id);
    if (write) {
       if (b->write_block)
-         retval=b->write_block(lba, (char *)buf, nsect) > 0;
+         retval=b->write_block(lba,(char *)buf,nsect) > 0;
+      else
+         printf("pcache: device has no write callback dev=%d\n",deviceid);
    } else if (b->read_block) {
-      retval=b->read_block(lba, (char *)buf, nsect) > 0;
+      retval=b->read_block(lba,(char *)buf,nsect) > 0;
    }
+   devmgr_setcontext(last_context);
    devmgr_putdevice((devmgr_generic *)b);
    return retval;
 }
@@ -511,6 +524,10 @@ int blkcache_flush(void)
 
       blk_mq_lock(dev);
       if (!pc_dev_rw(dev, 1, lba, nsect, copy, &device_generation)) {
+         printf("pcache: flush failed dev=%d lba=%llu nb=%u page_gen=%u dev_gen=%u current_gen=%u\n",
+                dev, (unsigned long long)lba, (unsigned)nsect,
+                (unsigned)generation, (unsigned)device_generation,
+                (unsigned)devmgr_get_generation(dev));
          blk_mq_unlock(dev);
          return 0;
       }

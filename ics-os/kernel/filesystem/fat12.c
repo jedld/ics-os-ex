@@ -316,14 +316,21 @@ void loadfat(BPB *bpbblock,void *fat,int id)
       {
          DWORD i;
          DWORD start_of_fat = bpbblock->num_boot_sectors;
+         DWORD fat_sectors = fat_sectors_per_fat(bpbblock);
          
          #ifdef DEBUG_FAT12
          printf("loading fat size %d..",fat_sectors_per_fat(bpbblock));
          #endif
          
-         DWORD handle=dex32_requestIO(id,IO_READ,start_of_fat,fat_sectors_per_fat(bpbblock),fat);
-         fat_wait_io(handle);
-         dex32_closeIO(handle);     
+         for (i=0;i<fat_sectors;i+=0xF0)
+         {
+            DWORD count = fat_sectors-i > 0xF0 ? 0xF0 : fat_sectors-i;
+            DWORD handle;
+            handle=dex32_requestIO(id,IO_READ,start_of_fat+i,count,
+                  (BYTE*)fat+i*512);
+            fat_wait_io(handle);
+            dex32_closeIO(handle);
+         };
          
          #ifdef DEBUG_FAT12
          printf("done.\n");
@@ -887,17 +894,20 @@ DWORD update_fats(BPB *bpbblock,BYTE *fat,int id)
    int fat_start_sector   = bpbblock->num_boot_sectors;
    int total_fat_clusters = fat_sectors_per_fat(bpbblock);
 
-   //write the file allocation table to the disk
-   //there are two identical FAT, so we must also write to the other..
-   for (i=0;i<2;i++)
+   //write every configured copy of the file allocation table to disk
+   for (i=0;i<bpbblock->num_fats;i++)
    {
-   DWORD handle=dex32_requestIO(id,IO_WRITE,fat_start_sector,
-                 total_fat_clusters,(void*)fat);
-                 
-   fat_wait_io(handle);
-   dex32_closeIO(handle);
+      for (i2=0;i2<total_fat_clusters;i2+=0xF0)
+      {
+         DWORD count = total_fat_clusters-i2 > 0xF0 ? 0xF0 :
+                       total_fat_clusters-i2;
+            DWORD handle=dex32_requestIO(id,IO_WRITE,fat_start_sector+i2,
+                       count,(void*)(fat+i2*512));
+         fat_wait_io(handle);
+         dex32_closeIO(handle);
+      };
    
-   fat_start_sector+=fat_sectors_per_fat(bpbblock);
+      fat_start_sector+=fat_sectors_per_fat(bpbblock);
    };
       
 };

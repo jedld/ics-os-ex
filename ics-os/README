@@ -8,10 +8,11 @@ This checkout is the **x86-64 long-mode** instructional kernel:
 
 - **x86-64 long mode** (`Kernel64.bin`, Multiboot2) — see `docs/smp-longmode.md`
 - **Software context switch** + priority round-robin scheduler
-- **LAPIC / SMP** (`make test-smp` with QEMU `-smp 2`)
-- **ELF64 user exec** (`make test-exec`) and **in-OS x86_64 TinyCC** (`make test-selfhost`)
+- **LAPIC / SMP** (`make test-smp` defaults to four vCPUs;
+	`make test-smp-matrix` validates 1/2/4/8)
+- **In-OS GCC kernel rebuild/kexec** (`make test-kbuild`; compiler closure certification pending), **ELF64 user exec** (`make test-exec`), and optional **x86_64 TinyCC** (`make test-selfhost`)
 - FAT16 **ramdisk** at `/ramdisk`; ISO9660 CD root; 8.3 `tccsrc.tar` staging for `tccboot`
-- Console tests: `selfhost`, `exectest`, `tccboot`, `iobench`, `cc`
+- Console tests: `kbuild` (GCC), `tcckbuild` (optional), `selfhost`, `exectest`, `tccboot`, `iobench`, `cc`
 - Faster FAT/IDE/USB I/O (extents, block cache, mmap-style exec load)
 - Staging: `scripts/stage-selfhost.sh`, `scripts/stage-tcc-short.sh`
 

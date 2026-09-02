@@ -164,6 +164,12 @@ static int ext4_load_super(ext4_dev *d, int id)
     memcpy(s->uuid, sb + 0x68, 16);
     s->checksum = rd32(sb + 0x3fc);
 
+    s->want_extra_isize = rd16(sb + 0x15e);
+    if (s->want_extra_isize == 0 && s->inode_size > 128)
+        s->want_extra_isize = 32;
+    if (s->want_extra_isize > s->inode_size - 128)
+        s->want_extra_isize = s->inode_size - 128;
+
     s->has_csum = !!(s->feature_ro_compat & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM);
     s->has_extents = !!(s->feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS);
     s->has_64bit = !!(s->feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT);
@@ -444,12 +450,13 @@ static int ext4_write_extent_leaf(ext4_dev *d, int id, u32 phys,
     ext4_sb *s = &d->sb;
     u8 blkbuf[4096];
     ext4_extent_header *hdr;
-    u32 i;
+    u32 i, max_entries;
+    max_entries = (s->blocksize - 12) / 12;
     memset(blkbuf, 0, s->blocksize);
     hdr = (ext4_extent_header *)blkbuf;
     hdr->eh_magic = EXT4_EXTENT_MAGIC;
     hdr->eh_entries = (u16)count;
-    hdr->eh_max = 0;
+    hdr->eh_max = (u16)max_entries;
     hdr->eh_depth = 0;
     hdr->eh_unused = 0;
     hdr->eh_generation = gen;
@@ -471,8 +478,8 @@ static int ext4_write_extent_leaf(ext4_dev *d, int id, u32 phys,
         le32buf(seedbuf, ino);
         le32buf(seedbuf + 4, gen);
         c = ext4_crc32c(seedbuf, s->csum_seed, 8);
-        c = ext4_crc32c(blkbuf, c, 12 + count * 12);
-        wr32(blkbuf + 12 + count * 12 + 2, c);
+        c = ext4_crc32c(blkbuf, c, 12 + max_entries * 12 + 2);
+        wr32(blkbuf + 12 + max_entries * 12 + 2, c);
     }
     if (ext4_write_blocks(d, id, phys, 1, blkbuf) != 0) return -1;
     return 0;
@@ -521,7 +528,7 @@ static int ext4_write_extents(ext4_dev *d, int id, ext4_ino *c)
         ext4_extent_header *hdr = (ext4_extent_header *)(raw + 0x28);
         hdr->eh_magic = EXT4_EXTENT_MAGIC;
         hdr->eh_entries = (u16)nruns;
-        hdr->eh_max = 0;
+        hdr->eh_max = EXT4_INLINE_EXTENT_MAX;
         hdr->eh_depth = 0;
         hdr->eh_unused = 0;
         hdr->eh_generation = c->generation;
@@ -547,7 +554,7 @@ static int ext4_write_extents(ext4_dev *d, int id, ext4_ino *c)
         if (nleaf > 4) return -1; /* would need 3-level; not handled */
         hdr->eh_magic = EXT4_EXTENT_MAGIC;
         hdr->eh_entries = (u16)nleaf;
-        hdr->eh_max = 0;
+        hdr->eh_max = EXT4_INLINE_EXTENT_MAX;
         hdr->eh_depth = 1;
         hdr->eh_unused = 0;
         hdr->eh_generation = c->generation;
@@ -1053,7 +1060,9 @@ static ext4_dirent *ext4_alloc_entry(ext4_dev *d, u8 *img, u32 *bytes,
     u32 need = (8 + nl + 3) & ~3u;
     u32 nblocks = *bytes / bs;
     u32 blk, boff;
+    u32 seen;
     if (need > bs) return 0;
+    seen = 0;
     for (blk = 0; blk < nblocks; blk++)
     {
         u8 *base = img + blk * bs;
@@ -1063,8 +1072,22 @@ static ext4_dirent *ext4_alloc_entry(ext4_dev *d, u8 *img, u32 *bytes,
             u32 rl = e->rec_len;
             if (rl < 8) break;
             if (e->inode == 0) break;  /* stop at tail / free slot */
-            /* split this entry only if the remainder still fits its name */
-            if (rl >= need + 8 + e->name_len)
+            if (blk == 0 && seen == 1)
+            {
+                /* `..` must remain the second entry; insert after it. */
+                if (rl >= 12 + need)
+                {
+                    ext4_dirent *ne = (ext4_dirent *)(base + boff + 12);
+                    e->rec_len = 12;
+                    ne->inode = ino;
+                    ne->rec_len = (u16)(rl - 12);
+                    ne->name_len = (u8)nl;
+                    ne->file_type = file_type;
+                    memcpy(ne->name, name, nl);
+                    return ne;
+                }
+            }
+            else if (rl >= need + 8 + e->name_len)
             {
                 u32 rem = rl - need;
                 /* shift the existing entry (header + name) forward */
@@ -1078,6 +1101,7 @@ static ext4_dirent *ext4_alloc_entry(ext4_dev *d, u8 *img, u32 *bytes,
                 memcpy(e->name, name, nl);
                 return e;
             }
+            seen++;
             boff += rl;
         }
     }
@@ -1544,7 +1568,9 @@ static int ext4_createfile(vfs_node *f, int id)
         wr16(raw + 0x00, EXT4_S_IFDIR | 00755);
     else
         wr16(raw + 0x00, EXT4_S_IFREG | 00644);
-    wr16(raw + 0x1a, 1); /* links */
+    wr16(raw + 0x1a, (u16)(is_dir ? 2 : 1)); /* links */
+    if (d->sb.inode_size > 128 && d->sb.want_extra_isize)
+        wr16(raw + 0x80, (u16)d->sb.want_extra_isize);
     if (d->sb.has_extents)
         wr32(raw + 0x20, EXT4_EXTENTS_FL); /* inode uses extent tree */
     {
@@ -1607,6 +1633,7 @@ static int ext4_createfile(vfs_node *f, int id)
             ext4_extent *ext = (ext4_extent *)(raw + 0x28 + 12);
             hdr->eh_magic = EXT4_EXTENT_MAGIC;
             hdr->eh_entries = 1;
+            hdr->eh_max = EXT4_INLINE_EXTENT_MAX;
             hdr->eh_depth = 0;
             hdr->eh_generation = 0;
             ext->ee_block = 0;
@@ -1660,6 +1687,14 @@ static int ext4_createfile(vfs_node *f, int id)
         u32 dg = (ino - 1) / d->sb.inodes_per_group;
         ext4_gd *dgd = &d->gdt[dg];
         u8 *ddesc = d->gdt_raw + dg * d->sb.desc_size;
+        if (pc && pc->inode_loaded)
+        {
+            pc->links = (u16)(pc->links + 1);
+            wr16(pc->inode_raw + 0x1a, pc->links);
+            if (d->sb.has_csum)
+                ext4_ino_set_csum(d, pc->ino, pc->generation, pc->inode_raw);
+            ext4_write_ino(d, id, pc->ino, pc->generation, pc->inode_raw);
+        }
         dgd->bg_used_dirs = (u16)(dgd->bg_used_dirs + 1);
         if (d->sb.desc_size >= 64) {
             wr16(ddesc + 0x10, (u16)(dgd->bg_used_dirs & 0xFFFF));

@@ -120,6 +120,7 @@ typedef struct __attribute__((packed)) {
    hundred runs; build paths return -1 if a run list overflows. */
 #define EXT4_MAX_RUNS   256
 #define EXT4_MAX_LEAVES 512
+#define EXT4_INLINE_EXTENT_MAX 4
 
 typedef struct {
     u32 log_block;   /* first logical block */
@@ -186,6 +187,7 @@ typedef struct {
     u8  uuid[16];
     u32 checksum;
     u32 csum_seed;
+    u32 want_extra_isize;
     int has_csum;
     int has_extents;
     int has_64bit;

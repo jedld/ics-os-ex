@@ -129,11 +129,18 @@ int main(void)
       sqe->addr = (uint64_t)(unsigned long)pa;
       sqe->len = 512;
       sqe->user_data = 10;
-      if (io_uring_submit_and_wait(&ring, 1) != 1)
+      if (io_uring_submit(&ring) != 1)
          return fail("vblk uring write submit");
-      if (io_uring_wait_cqe(&ring, &cqe) != 0 || cqe->res != 512)
-         return fail("vblk uring write");
-      io_uring_cqe_seen(&ring, cqe);
+      /* Closing with a DMA request in flight must drain the callback before
+         freeing its ring. Verify the write after close as concrete evidence. */
+      io_uring_queue_exit(&ring);
+      memset(pb, 0, sizeof(pb));
+      if (pread(fd, pb, 512, 4096) != 512 || memcmp(pa, pb, 512) != 0)
+         return fail("vblk uring close drain");
+      printf("URING_CLOSE_DRAIN_PASS\n");
+
+      if (io_uring_queue_init(8, &ring, 0) != 0)
+         return fail("vblk uring reopen");
 
       memset(pb, 0, sizeof(pb));
       memset(pc, 0, sizeof(pc));
@@ -165,6 +172,15 @@ int main(void)
       close(fd);
       printf("URING_VBLK_PASS\n");
    }
+
+   /* The target starts this executable again under a new PID. The second
+      run proves this rejected create did not strand the global VFS lock. */
+   fd = open("/ramdisk/bad name", O_RDWR | O_CREAT, 0666);
+   if (fd >= 0) {
+      close(fd);
+      return fail("invalid filename accepted");
+   }
+   printf("VFS_CREATE_UNLOCK_PASS\n");
 
    printf("POSIXIO_PASS\n");
    printf("URING_PASS\n");

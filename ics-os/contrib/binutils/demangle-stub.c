@@ -19,6 +19,34 @@ char *cplus_demangle (const char *mangled, int options)
   return (char *) 0;
 }
 
+const char *cplus_mangle_opname (const char *opname, int options)
+{
+  (void) opname;
+  (void) options;
+  return (const char *) 0;
+}
+
+struct demangle_component *
+cplus_demangle_v3_components (const char *mangled, int options, void **mem)
+{
+  (void) mangled;
+  (void) options;
+  if (mem) *mem = (void *) 0;
+  return (struct demangle_component *) 0;
+}
+
+char *cplus_demangle_print (int options,
+                            const struct demangle_component *tree,
+                            int estimated_length,
+                            size_t *allocated_size)
+{
+  (void) options;
+  (void) tree;
+  (void) estimated_length;
+  if (allocated_size) *allocated_size = 0;
+  return (char *) 0;
+}
+
 enum demangling_styles current_demangling_style = no_demangling;
 
 enum demangling_styles

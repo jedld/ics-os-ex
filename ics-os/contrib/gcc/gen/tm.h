@@ -41,4 +41,14 @@
 # include "flags.h"
 #endif
 # include "defaults.h"
+/* ICS-OS: prototypes for the GGC alloc shims (contrib/gcc/shims/shim-ggc-alloc.c).
+   Stock GCC provides ggc_alloc_cleared_machine_function()/ggc_alloc_stack_local_entry()
+   as macros; the ICS-OS build provides them as real functions. Without prototypes
+   here, callers (e.g. i386.c) fall back to an implicit int-returning declaration
+   and sign-extend the 64-bit pointer result (cltq), corrupting any pointer whose
+   high 32 bits are set. Masked in-OS only because all pointers sit in the low 4GiB. */
+struct machine_function;
+struct stack_local_entry;
+extern struct machine_function *ggc_alloc_cleared_machine_function (void);
+extern struct stack_local_entry *ggc_alloc_stack_local_entry (void);
 #endif /* GCC_TM_H */

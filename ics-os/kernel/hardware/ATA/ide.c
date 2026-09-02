@@ -591,8 +591,16 @@ int ide_write_block_partition(u64 block, char *blockbuff,DWORD numblocks)
                       //check if the device still exists
                       if (myblock==-1) return -1;
                       //read the required block after adjusting
-                      return bridges_call(myblock,&myblock->write_block, 
-                             block+ide_partitions[i].startlba, blockbuff,numblocks);             
+                             {
+                                    int result=bridges_call(myblock,&myblock->write_block,
+                                        block+ide_partitions[i].startlba,blockbuff,numblocks);
+                                    if (result<=0)
+                                         printf("IDE: partition write failed part=%d disk=%d lba=%llu nb=%u rc=%d\n",
+                                                  device_context,ide_partitions[i].hd_deviceid,
+                                                  (unsigned long long)(block+ide_partitions[i].startlba),
+                                                  (unsigned)numblocks,result);
+                                    return result;
+                             };
                  };   
         };    
         

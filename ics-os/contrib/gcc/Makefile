@@ -204,7 +204,7 @@ CC1_OBJS := $(addprefix $(CC1_OBJDIR)/,$(CC1_O))
 # relied on the quotes already living inside a bash variable, which is not the
 # case for a make variable expanded onto the command line).
 VERDEFS := -DBASEVER=\"4.7.4\" -DBUGURL=\"\" -DDATESTAMP=\"20260830\" -DDEVPHASE=\"\" -DREVISION=\"\" -DPKGVERSION=\"4.7.4\" -DTARGET_NAME=\"x86_64-ics-os\"
-GASDEFS := -DHAVE_GAS_CFI_PERSONALITY_DIRECTIVE=1 -DHAVE_GAS_CFI_DIRECTIVE=1 -DHAVE_COMDAT_GROUP=1 -DHAVE_GAS_SHF_MERGE=1 -DHAVE_GAS_CFI_SECTIONS_DIRECTIVE=1 -DHAVE_GAS_HIDDEN=1 -DHAVE_GAS_MAX_SKIP_P2ALIGN=65535 -DHAVE_AS_GOTOFF_IN_DATA=1 -DHAVE_AS_IX86_CMOV_SUN_SYNTAX=1 -DHAVE_AS_IX86_FFREEP=1 -DHAVE_AS_IX86_FILDQ=1 -DHAVE_AS_IX86_FILDS=1 -DHAVE_AS_IX86_REP_LOCK_PREFIX=1 -DHAVE_AS_TLS=1 -DHAVE_AS_GOTTPLTPCALL=1 -DHAVE_AS_TLSDIRECT=1 -DHAVE_AS_CFI_SECTIONS=1 -DHAVE_AS_X86_CMPXCHG16B=1
+GASDEFS := -DHAVE_GAS_CFI_PERSONALITY_DIRECTIVE=1 -DHAVE_GAS_CFI_DIRECTIVE=1 -DHAVE_COMDAT_GROUP=1 -DHAVE_GAS_SHF_MERGE=1 -DHAVE_GAS_CFI_SECTIONS_DIRECTIVE=1 -DHAVE_GAS_HIDDEN=1 -DHAVE_GAS_MAX_SKIP_P2ALIGN=65535 -DHAVE_AS_GOTOFF_IN_DATA=1 -DHAVE_AS_IX86_FFREEP=1 -DHAVE_AS_IX86_FILDQ=1 -DHAVE_AS_IX86_FILDS=1 -DHAVE_AS_IX86_REP_LOCK_PREFIX=1 -DHAVE_AS_TLS=1 -DHAVE_AS_GOTTPLTPCALL=1 -DHAVE_AS_TLSDIRECT=1 -DHAVE_AS_CFI_SECTIONS=1 -DHAVE_AS_X86_CMPXCHG16B=1
 # Generated headers (gen/) come FIRST; SDK libc headers come before GCC's
 # include/ so <stdio.h> etc. still resolve to the SDK set.
 CC1_INC := -I$(GEN) -I$(CONFDIR) -I$(SDK)/include \
@@ -223,6 +223,15 @@ $(CC1_OBJDIR)/%.o: $(CONF)
 	@src=$$(for cand in $(GEN)/$*.c $(SHIMSDIR)/$*.c $(SRC)/gcc/$*.c $(SRC)/gcc/config/i386/$*.c $(SRC)/gcc/config/$*.c; do if [ -f "$$cand" ]; then printf '%s' "$$cand"; break; fi; done); \
 	if [ -z "$$src" ]; then echo "CC1_MISSING_SRC $*.o"; exit 1; fi; \
 	$(CC) $(CC1_CFLAGS) -c "$$src" -o $@ 2>$(CC1_OBJDIR)/$*.err || { echo "CC1_OBJ_FAIL $*.o"; sed -n '1,40p' $(CC1_OBJDIR)/$*.err; exit 1; }
+
+# ggc-zone requires mmap and was the in-OS corruption vector.  Force the
+# malloc page-group collector (no HAVE_MMAP_*) so GGC objects live in the
+# SDK heap, matching the host harness that already passes this probe.
+$(CC1_OBJDIR)/ggc-page.o: $(CONF) $(SRC)/gcc/ggc-page.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CC1_CFLAGS) -UHAVE_MMAP_ANON -UHAVE_MMAP_DEV_ZERO \
+		-c $(SRC)/gcc/ggc-page.c -o $@ 2>$(CC1_OBJDIR)/ggc-page.err \
+		|| { echo "CC1_OBJ_FAIL ggc-page.o"; sed -n '1,40p' $(CC1_OBJDIR)/ggc-page.err; exit 1; }
 
 CC1         := $(STAGE)/cc1
 CC1_CLINK   := $(APP_CFLAGS) -nostdinc -I$(SDK)/include -I$(CONFDIR) $(DEFS)

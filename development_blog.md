@@ -2,6 +2,30 @@
 
 ## 2026-09-02 (Manila, UTC+8)
 
+### 15:35 — BIOS/UEFI USB image persistence and Intel N150 readiness
+
+**Current problem:** produce a safely flashable image that boots from a thumb
+drive and uses its FAT32 partition as writable working storage, validate it
+without touching the attached SanDisk drive, and identify what prevents use on
+an Intel N150 laptop.
+
+**Activity completed:** added a disposable VirtualBox image gate for BIOS and
+UEFI, serial boot observation, guest file creation, explicit `fsync`, poweroff,
+VDI-to-raw conversion, and host byte comparison. Fixed duplicate GRUB
+`diskboot.img` embedding, recursive app staging, FAT-table I/O requests that
+were too large for the page cache, block-cache callbacks that lost partition
+device context, and `cp.exe` durability/error reporting. The FAT regression
+uses a dedicated `/work` directory and 8.3 names because the current driver has
+limited long-filename/root-directory growth behavior.
+
+**QA delivered:** `make test-vbox-usb-image` and
+`make test-vbox-usb-image-efi` pass with `Root mount [OK]` and byte-identical
+persistent readback. `make test-io-unit` passes TAP 12/12 and
+`make test-buildtools` passes under QEMU. The physical `/dev/sdc` device was not
+written. Added `ics-os/docs/intel-n150-usb-readiness.md`: VirtualBox qualifies
+the image as an IDE-backed BIOS/UEFI disk, while xHCI remains the release
+blocker for continued access to a physical USB root on N150 hardware.
+
 ### Current — intermittent post-fork return corruption
 
 **Current problem:** two-vCPU fork testing intermittently corrupted either the
