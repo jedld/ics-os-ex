@@ -17,12 +17,33 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-high-bar test-usb-storage-xhci-no-device
+.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-termtest test-vim test-dup test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-partition-unit test-gpt-unit test-gpt test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-multi-controller test-usb-storage-xhci-sg test-usb-storage-xhci-bounce test-usb-storage-xhci-vtd-discovery test-usb-storage-xhci-msix test-usb-storage-xhci-msix-recovery test-usb-storage-xhci-vector-reservation test-usb-storage-xhci-poll test-usb-storage-xhci-high-bar test-usb-storage-xhci-recovery test-usb-storage-xhci-stall-recovery test-usb-storage-xhci-disconnect test-usb-storage-xhci-mounted-disconnect test-usb-storage-xhci-mounted-reconnect test-usb-storage-xhci-mounted-remount test-usb-storage-xhci-hotplug test-usb-storage-xhci-hotplug-identity-mismatch test-usb-storage-xhci-late-attach test-usb-storage-xhci-reconnect test-usb-storage-xhci-reconnect-mismatch test-usb-storage-xhci-reconnect-identity-mismatch test-usb-storage-xhci-no-device
 
 test-io-unit:
 	@mkdir -p /tmp/icsos-tests
 	@gcc -std=gnu89 -Wall -Wextra -Werror -I. tests/io_p0_unit.c -o /tmp/icsos-tests/io_p0_unit
 	@/tmp/icsos-tests/io_p0_unit
+
+test-partition-unit:
+	@mkdir -p /tmp/icsos-tests
+	@gcc -std=gnu89 -Wall -Wextra -Werror -I. tests/partition_unit.c -o /tmp/icsos-tests/partition_unit
+	@/tmp/icsos-tests/partition_unit
+
+test-gpt-unit:
+	@mkdir -p /tmp/icsos-tests
+	@gcc -std=gnu89 -Wall -Wextra -Werror -I. tests/gpt_unit.c -o /tmp/icsos-tests/gpt_unit
+	@/tmp/icsos-tests/gpt_unit
+
+# Deterministic 64 MiB GPT disk (slot 0: 32 MiB FAT32, slot 1: 16 MiB ext4).
+ics-os-gpt.img: scripts/mkgpt.sh
+	@chmod +x scripts/mkgpt.sh
+	@scripts/mkgpt.sh
+
+# In-kernel GPT detection + per-partition registration + durable FAT partition
+# I/O through QEMU IDE. Boots from the CD; the GPT disk is attached as -hda.
+test-gpt: vmdex apps/cp.exe ics-os-gpt.img
+	@chmod +x scripts/test-qemu-gpt.sh
+	@QEMU_X64=$(QEMU_X64) scripts/test-qemu-gpt.sh ics-os-gpt.img
 
 test-vbox-usb-image: ics-os-usb.img
 	@chmod +x scripts/test-vbox-usb-image.sh
@@ -34,7 +55,7 @@ test-vbox-usb-image-efi: ics-os-usb.img
 
 clean:
 	rm -f vmdex
-	rm -f ics-os-livecd.iso ics-os-usb.img
+	rm -f ics-os-livecd.iso ics-os-usb.img ics-os-gpt.img
 	rm -fr tmp/* tmp-usb
 	make -C kernel/ clean
 
@@ -85,6 +106,8 @@ apps:
 	-$(MAKE) -C contrib/hello install
 	-$(MAKE) -C contrib/posixio
 	-$(MAKE) -C contrib/posixio install
+	-$(MAKE) -C contrib/termtest
+	-$(MAKE) -C contrib/termtest install
 	-$(MAKE) -C contrib/spawntest
 	-$(MAKE) -C contrib/spawntest install
 	-$(MAKE) -C contrib/forktest
@@ -184,15 +207,124 @@ test-usb-storage-xhci: vmdex ics-os-usb.img
 	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
 		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
 
+test-usb-storage-xhci-multi-controller: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_XHCI_SECONDARY_TEST=1 QEMU_KERNEL_CMDLINE=xhci-msix-test QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-sg: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE="xhci-msix-test xhci-sg-test" QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-bounce: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE="xhci-msix-test xhci-bounce-test" QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-vtd-discovery: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci QEMU_VTD_TEST=1 \
+		QEMU_KERNEL_CMDLINE="vtd-discovery-test xhci-msix-test" QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-msix: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE=xhci-msix-test QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-msix-recovery: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE="xhci-msix-test xhci-recovery-test" QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-vector-reservation: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE="xhci-msix-test xhci-recovery-test xhci-vector-reservation-test" QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-poll: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE=xhci-poll-test QEMU_SMP=4 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
 test-usb-storage-xhci-high-bar: vmdex ics-os-usb.img
 	@chmod +x scripts/test-qemu-uhci-storage.sh
 	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
 		QEMU_KERNEL_CMDLINE=xhci-high-bar-test QEMU_SMP=4 \
 		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
 
+test-usb-storage-xhci-recovery: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE=xhci-recovery-test QEMU_SMP=2 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-stall-recovery: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-uhci-storage.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_USB_HCD=xhci \
+		QEMU_KERNEL_CMDLINE=xhci-stall-recovery-test QEMU_SMP=2 \
+		scripts/test-qemu-uhci-storage.sh ics-os-usb.img
+
+test-usb-storage-xhci-disconnect: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-mounted-disconnect: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=mounted-disconnect \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-mounted-reconnect: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=mounted-reconnect \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-mounted-remount: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=mounted-remount \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-hotplug: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=hotplug \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-hotplug-identity-mismatch: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=hotplug-identity-mismatch \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-reconnect: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=reconnect \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-reconnect-mismatch: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=reconnect-mismatch \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
+test-usb-storage-xhci-reconnect-identity-mismatch: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-disconnect.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_XHCI_TEST_MODE=reconnect-identity-mismatch \
+		scripts/test-qemu-xhci-disconnect.sh ics-os-usb.img
+
 test-usb-storage-xhci-no-device: vmdex
 	@chmod +x scripts/test-qemu-xhci-no-device.sh
 	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 scripts/test-qemu-xhci-no-device.sh
+
+test-usb-storage-xhci-late-attach: vmdex ics-os-usb.img
+	@chmod +x scripts/test-qemu-xhci-no-device.sh
+	@QEMU_X64=$(QEMU_X64) QEMU_MACHINE=q35 QEMU_XHCI_LATE_ATTACH=1 \
+		scripts/test-qemu-xhci-no-device.sh ics-os-usb.img
 
 test-smp: vmdex
 	@echo "Building Multiboot2 ISO for SMP test..."
@@ -273,7 +405,7 @@ test-iobench: kernel/Kernel64.bin apps/tcc.exe
 
 # virtio-blk DMA round-trip (modern PCI + MSI-X). ATA-only boots stay on
 # "virtio-blk: none"; this target attaches a QEMU virtio disk.
-test-virtio: kernel/Kernel64.bin
+test-virtio: vmdex
 	@echo "Building Multiboot2 ISO for virtio-blk..."
 	@mkdir -p /tmp/icsos-virtio-iso/boot/grub
 	@cp kernel/Kernel64.bin /tmp/icsos-virtio-iso/vmdex
@@ -290,6 +422,7 @@ test-virtio: kernel/Kernel64.bin
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-virtio.log
 	@grep -aq "VIRTIO_BLK_OK" /tmp/icsos-virtio.log
 	@grep -aq "VIRTIO_IRQ_OK" /tmp/icsos-virtio.log
+	@grep -aEq "virtio-blk: MSI-X vector=[0-9]+" /tmp/icsos-virtio.log
 	@grep -aq "pipelined reads \[OK\]" /tmp/icsos-virtio.log
 	@grep -aq "VIRTIO_RESET_RECOVERY_OK" /tmp/icsos-virtio.log
 	@! grep -aq "VIRTIO_RESET_RECOVERY_FAIL" /tmp/icsos-virtio.log
@@ -453,6 +586,83 @@ test-posixio: kernel/Kernel64.bin apps/posixio.exe
 	@test "$$(grep -ac "POSIXIO_PASS" /tmp/icsos-posixio.log)" -eq 2
 	@! grep -aq "POSIXIO_FAIL" /tmp/icsos-posixio.log
 	@echo "test-posixio PASS"
+
+# Terminal / VT100 stack: termios, TIOCGWINSZ, clock_gettime, select/poll,
+# and end-to-end DSR-6 cursor-position reporting.
+apps/termtest.exe: contrib/termtest/termtest.c contrib/termtest/Makefile
+	$(MAKE) -C contrib/termtest install
+
+test-termtest: kernel/Kernel64.bin apps/termtest.exe
+	@$(MAKE) -C kernel all
+	@echo "Building Multiboot2 ISO for terminal test..."
+	@rm -rf /tmp/icsos-termtest-iso
+	@mkdir -p /tmp/icsos-termtest-iso/boot/grub /tmp/icsos-termtest-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-termtest-iso/vmdex
+	@cp apps/termtest.exe /tmp/icsos-termtest-iso/apps/termtest.exe
+	@printf '%s\n' 'termtest' 'reboot' > /tmp/icsos-termtest-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-termtest-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-termtest.iso /tmp/icsos-termtest-iso >/dev/null 2>&1
+	@echo "Running terminal test (TCG)..."
+	@-timeout 60 $(QEMU_X64) -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-termtest.iso -boot d \
+		< /dev/null > /tmp/icsos-termtest.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-termtest.log
+	@grep -aq "TERMTEST_PASS" /tmp/icsos-termtest.log
+	@! grep -aq "TERMTEST_FAIL" /tmp/icsos-termtest.log
+	@echo "test-termtest PASS"
+
+# vim (FEAT_TINY) smoke test: `vim --version` must print the banner and exit
+# cleanly, proving the ELF64 TUI loader + tty/dup stack run a real editor.
+apps/vim.exe: contrib/vim/Makefile contrib/vim/config.icsos.h
+	$(MAKE) -C contrib/vim install
+
+test-vim: kernel/Kernel64.bin apps/vim.exe
+	@echo "Building Multiboot2 ISO for vim smoke test..."
+	@rm -rf /tmp/icsos-vim-iso
+	@mkdir -p /tmp/icsos-vim-iso/boot/grub /tmp/icsos-vim-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-vim-iso/vmdex
+	@cp apps/vim.exe /tmp/icsos-vim-iso/apps/vim.exe
+	@printf '%s\n' 'vimtest' 'reboot' > /tmp/icsos-vim-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-vim-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-vim.iso /tmp/icsos-vim-iso >/dev/null 2>&1
+	@echo "Running vim --version smoke test (TCG)..."
+	@-timeout 55 $(QEMU_X64) -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-vim.iso -boot d \
+		< /dev/null > /tmp/icsos-vim.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-vim.log
+	@grep -aq "vimtest: running" /tmp/icsos-vim.log
+	@grep -aq "VIM - Vi IMproved" /tmp/icsos-vim.log
+	@grep -aq "9.2" /tmp/icsos-vim.log
+	@! grep -aq "VIM_RUN_FAIL" /tmp/icsos-vim.log
+	@echo "test-vim PASS"
+
+# dup(2) syscall self-test: proves the kernel dup() (0xC5) works at runtime
+# (tty fd clone + write THROUGH the new fd), not merely that vim links it.
+apps/duptest.exe: contrib/duptest/duptest.c contrib/duptest/Makefile
+	$(MAKE) -C contrib/duptest install
+
+test-dup: kernel/Kernel64.bin apps/duptest.exe
+	@echo "Building Multiboot2 ISO for dup syscall self-test..."
+	@rm -rf /tmp/icsos-dup-iso
+	@mkdir -p /tmp/icsos-dup-iso/boot/grub /tmp/icsos-dup-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-dup-iso/vmdex
+	@cp apps/duptest.exe /tmp/icsos-dup-iso/apps/duptest.exe
+	@printf '%s\n' 'duptest' 'reboot' > /tmp/icsos-dup-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-dup-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-dup.iso /tmp/icsos-dup-iso >/dev/null 2>&1
+	@echo "Running dup(2) syscall self-test (TCG)..."
+	@-timeout 55 $(QEMU_X64) -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-dup.iso -boot d \
+		< /dev/null > /tmp/icsos-dup.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-dup.log
+	@grep -aq "duptest: running" /tmp/icsos-dup.log
+	@grep -aq "DUPT_PASS" /tmp/icsos-dup.log
+	@! grep -aq "DUPT_FAIL" /tmp/icsos-dup.log
+	@! grep -aq "DUPT_RUN_FAIL" /tmp/icsos-dup.log
+	@echo "test-dup PASS"
 
 # posix_spawn + waitpid of hello.exe, plus FAT /work on virtio-blk.
 test-spawn: kernel/Kernel64.bin apps/spawn.exe apps/hello.exe
@@ -878,7 +1088,7 @@ test-gcc-kbuild: vmdex apps/as.exe apps/ld.exe apps/hello.exe apps/make.exe apps
 	@grep -aq "GKBUILD_TEST_PASS" /tmp/icsos-gkbuild.log
 	@grep -aq "KEXEC_BOOT_OK" /tmp/icsos-gkbuild.log
 	@grep -aq "SMP: 2 CPUs online" /tmp/icsos-gkbuild.log
-	@grep -aq "SMP: AP work-steal OK" /tmp/icsos-gkbuild.log
+	@grep -aq "SMP_RESULT work-steal=ok cpus=2" /tmp/icsos-gkbuild.log
 	@(grep -aq "EXEC_TEST_PASS" /tmp/icsos-gkbuild.log || \
 	  (grep -aq "Hello World from ICS-OS!" /tmp/icsos-gkbuild.log && \
 	   ! grep -aq "EXEC_TEST_FAIL" /tmp/icsos-gkbuild.log))

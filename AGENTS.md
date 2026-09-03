@@ -41,6 +41,27 @@ Useful individual targets (from `ics-os/`):
 | `test-iobench` | CD sequential map; 4KiB page cache hits; `IOBENCH_PASS` + `IOBENCH_CACHE_OK` |
 | `test-usb-storage` | UHCI USB root; guest write + SCSI cache sync + host readback |
 | `test-usb-storage-xhci` | q35 xHCI USB root; guest write + SCSI cache sync + host readback |
+| `test-usb-storage-xhci-multi-controller` | Empty HCD 0 is skipped; HCD 1 delivers MSI-X and persists USB-root writes |
+| `test-usb-storage-xhci-sg` | Chained multi-segment xHCI bulk TDs with MSI-X and persistent write |
+| `test-usb-storage-xhci-bounce` | Bidirectional xHCI bounce DMA with MSI-X and persistent write |
+| `test-usb-storage-xhci-vtd-discovery` | ACPI DMAR/DRHD discovery with QEMU VT-d and persistent xHCI write |
+| `test-usb-storage-xhci-msix` | xHCI MSI-X vector delivery, IRQ-assisted wait, and persistent write |
+| `test-usb-storage-xhci-msix-recovery` | MSI-X vector release/reclaim across controller recovery |
+| `test-usb-storage-xhci-vector-reservation` | Reserved vector exclusion across xHCI MSI-X recovery |
+| `test-usb-storage-xhci-poll` | Forced xHCI polling fallback with persistent write |
+| `test-usb-storage-xhci-high-bar` | q35 xHCI persistence with its 64-bit BAR relocated above 4 GiB |
+| `test-usb-storage-xhci-recovery` | q35 xHCI timeout/reset/re-enumeration, failed recovery initialization, and persistent-write recovery |
+| `test-usb-storage-xhci-stall-recovery` | q35 BOT stall/reset and endpoint recovery with bounded controller-reset fallback |
+| `test-usb-storage-xhci-disconnect` | QMP removal during active xHCI I/O; bounded cancellation and fail-closed storage |
+| `test-usb-storage-xhci-mounted-disconnect` | Mounted USB root removal invalidates cache, quarantines device names, and rejects stale reads |
+| `test-usb-storage-xhci-mounted-reconnect` | Replacement USB generation is published while stale mounted callbacks remain offline |
+| `test-usb-storage-xhci-mounted-remount` | Same-media replacement rejects busy descendant workdirs, then remounts a quiescent non-root namespace |
+| `test-usb-storage-xhci-hotplug` | Runtime monitor performs two automatic remove/add generation cycles |
+| `test-usb-storage-xhci-hotplug-identity-mismatch` | Automatic same-size replacement with a changed volume identity remains latched offline |
+| `test-usb-storage-xhci-late-attach` | Empty xHCI controller accepts and publishes its first device after boot |
+| `test-usb-storage-xhci-reconnect` | QMP remove/add; full re-enumeration, geometry check, and sector equality |
+| `test-usb-storage-xhci-reconnect-mismatch` | Re-enumerated replacement with different geometry remains offline |
+| `test-usb-storage-xhci-reconnect-identity-mismatch` | Same-size replacement with a different FAT volume serial remains offline |
 | `test-usb-storage-xhci-no-device` | q35 xHCI no-device path reaches console without registering USB storage |
 | `test-posixio` | POSIX fds + preadv/pwritev/fsync + io_uring; ramdisk `POSIXIO_PASS`/`URING_PASS`; virtio `/dev/vblk` `URING_VBLK_PASS` |
 | `test-virtio` | QEMU virtio-blk DMA; MSI-X completions; `VIRTIO_BLK_OK` + `VIRTIO_IRQ_OK` |
@@ -50,6 +71,9 @@ Useful individual targets (from `ics-os/`):
 | `test-fork-matrix` | COW fork pressure gate on `-smp 1/2/4/8` |
 | `test-make` | In-OS TinyCC builds GNU make 3.82 onto `/work`; `make -f t.mk` spawns `hello.exe` (`MAKE_PASS`) |
 | `test-bintools` | In-OS GNU binutils: `as` assembles, `ar` archives, `ld` links a default-script ELF64, then it execs (`AS_PASS`/`AR_PASS`/`LD_PASS`/`BINTOOLS_PASS`) |
+| `test-vim` | FEAT_TINY vim ELF64 TUI; non-interactive `vim --version` prints the real banner + exits cleanly |
+| `test-dup` | Runtime `dup(2)` (`0xC5`) self-test: dup'd tty fd allocable+closable; dup'd file fd write read back through the original (`DUPT_PASS`) |
+| `test-partition-unit` | Host-native TAP unit tests for partition-layer logic: IEEE CRC-32 vectors/chunking and ATA LBA28/LBA48 capacity decode (`tests/partition_unit.c`) |
 | `test-integration` | `test-boot` + `test-smp` + `test-exec` |
 
 Do **not** use QEMU `-kernel` for the ELF64 image; boot via GRUB `multiboot2` (ISO/USB helpers in the Makefile).

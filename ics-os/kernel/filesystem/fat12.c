@@ -855,9 +855,14 @@ DWORD update_dirs(BPB *bpbblock,vfs_node *tdir,BYTE *fat,int id)
             BPB32 *bpb32 = bpbblock;
             DWORD root_cluster = bpb32->rootcluster;
             blockloc = clustertoblock(bpbblock,root_cluster);
-            sector = get_sector_fromcluster(root_cluster,&bpbblock,0,fat,id);
+            sector = get_sector_fromcluster(root_cluster,bpbblock,0,fat,id);
+            //queue the WRITE request (root is a cluster chain; dir holds the
+            //full chain, sized by get_sector_fromcluster * bytes_per_sector)
+            DWORD handle=dex32_requestIO(id,IO_WRITE,blockloc,sector,dir);
+            fat_wait_io(handle);
+            dex32_closeIO(handle);
       }
-      else      
+      else
       //For a FAT12/16 volume
       {
           blockloc=fat_sectors_per_fat(bpbblock)*bpbblock->num_fats+

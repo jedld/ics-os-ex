@@ -1,6 +1,722 @@
 # Development blog
 
+## 2026-09-03 (Manila, UTC+8)
+
+### 00:30–02:00 — GPT Phase 0 complete: u64 partition metadata, CRC-32, IDE LBA capacity, MBR validation
+
+**Current problem:** GPT support (plan: `ics-os/docs/gpt-support-plan.md`)
+needs 64-bit partition metadata before any GPT code can exist: MBR LBA fields
+are 32-bit, the `total_blocks` devmgr vtable is `int`, IDE capacity comes only
+from CHS geometry, and `ide_registerpartitions` parses an MBR without
+validating the `0x55AA` signature. Phase 0 is the prerequisite pass; it must
+change no observable behavior except a new capacity print.
+
+**Activity:**
+- Added `kernel/partition/crc32.h/.c` (table-driven IEEE CRC-32, chunkable
+  `crc32_ieee(data, crc, len)`), wired into the `kernel32.c` TU and
+  `kernel/Makefile`.
+- Added `kernel/hardware/ATA/ata_capacity.h`: pure
+  `ata_capacity_sectors(identify_words)` — LBA48 words 100-103 preferred,
+  LBA28 words 60-61 (12-bit field of w[61]) fallback. `ide.c` identify struct
+  extended to word 103, `ide_drive_info` gained `u64 total_sectors`, and
+  `ide_uni_get_total_sectors` prefers LBA over CHS (CD-ROMs correctly report
+  0 and keep the existing CHS/CD path). `ide_registerpartitions` now rejects
+  an MBR without `0x55AA`.
+- Widened `total_blocks` to `u64` across the block layer: `dex32_devmgr.h`
+  vtable, `ide.c`, `uhci.c` (`usb_drive_info`, `usb_part_info`,
+  `usb_scsi_capacity`, identity capture), `virtio_blk.c` (dropped the INT_MAX
+  clamp), `ramdisk.c`, `floppy.c`, `devfs.c` (node sizing), and the `df`
+  command.
+
+**Difficulties and solutions:**
+- *Bridge ABI hazard:* the legacy devmgr bridges call module functions
+  through a `DWORD`-returning function pointer; on x86-64 that silently
+  truncates a `u64` return to 32 bits (and reading an `int` return as `u64`
+  leaves the upper 32 bits of `rax` undefined). Added
+  `bridges_call64`/`bridges_link64` (`u64` fn-pointer variant, same
+  `function_number` offset math) used only for `total_blocks`; everything
+  else keeps the 32-bit bridge.
+- *Kernel printf:* `do_printf` has no native `%llu`, but the `l` modifier
+  reads a 64-bit `unsigned long`, which on the sole active target (x86-64)
+  is the same type as `unsigned long long` — `%llu` is correct there.
+- *Unit-test vectors:* `table[255] = 0x2D02EF8D` while CRC-32 of a single
+  `0x00` byte is `0xD202EF8D` — cross-checked with python `zlib` and an
+  independent bit-level implementation before trusting either. Also caught an
+  invalid test constant (0x1678 does not fit the 12-bit word-61 field).
+- *Two xHCI gates regressed* (`test-usb-storage-xhci-reconnect-mismatch`,
+  `-identity-mismatch`): `XHCI_DISCONNECT_FAIL` where the pre-change boot
+  logs show correct rejection. Root cause is a pre-existing WIP defect, not
+  the Phase 0 edits: `usb_xhci_reconnect` computed "first attach" as
+  `!usb_media_established` (publish state), but the disconnect/reconnect
+  self-tests enumerate the device without ever publishing it, so the
+  geometry/identity check was skipped and a smaller replacement disk was
+  accepted. Fixed to key on `old_blocks == 0` (no previously-enumerated
+  media), which preserves the late-attach skip and all mounted/hotplug
+  check paths.
+
+**Verification (all green, QEMU 8.2.2):**
+- `make test-partition-unit` — TAP 13, 15/15 ok (CRC vectors, chunking,
+  single byte, LBA28/LBA48 decode, 2^28-1 saturation, 2^32 round-trip,
+  precedence, word-61 masking).
+- `test-boot`, `test-integration` (boot+SMP4+exec), `test-iobench`,
+  `test-ext4`, `test-spawn`, `test-posixio`, `test-virtio` — PASS.
+- Full USB family: `test-usb-storage` (UHCI), `test-usb-storage-xhci` + all
+  22 xHCI variants (multi-controller, sg, bounce, vtd, msix×3, poll,
+  high-bar, recovery, stall-recovery, disconnect, mounted-{disconnect,
+  reconnect,remount}, hotplug×2, late-attach, reconnect×3, no-device) —
+  PASS.
+- Boot log now prints `Capacity = 0 sectors` for the ATAPI CD (expected: no
+  LBA fields); HDD capacity will print the LBA sector count.
+- `-Wall -Wextra` compile of the `kernel32.c` TU shows no warnings from any
+  Phase 0 file (only pre-existing legacy warnings).
+
+**Next:** GPT Phase 1 — `kernel/partition/gpt.h/.c` (`gpt_detect`/
+`gpt_parse` with primary→backup fallback and fail-closed CRC handling), the
+shared read-only partition device, per-disk 32-entry tables, the `partitions`
+console command, `tests/gpt_unit.c` + `test-partition-unit` expansion, and
+the `test-gpt` QEMU gate with the `scripts/mkgpt.sh` fixture builder.
+
+### 00:00 — VT-d legacy activation in progress
+
+**Current problem:** firmware discovery identifies DMA-remapping units, but the
+kernel does not yet program root/context state, invalidate stale translations,
+or enable translation. Generic translated IOVAs therefore remain software-only.
+
+**Activity in progress:**
+- Verified legacy register, root/context-entry, pass-through, and invalidation
+  encodings against the Intel VT-d model used by QEMU.
+- Adding host-tested capability checks and table encoders before introducing
+  live MMIO sequencing. The first runtime mode will cover every requester with
+  pass-through contexts and prove activation plus persistent xHCI I/O; it does
+  not claim DMA isolation.
+
 ## 2026-09-02 (Manila, UTC+8)
+
+### 23:59 — VT-d firmware discovery without translation
+
+**Current problem:** generic IOMMU domains could describe translated ownership,
+but the kernel could not discover Intel DMA-remapping hardware or safely identify
+the DRHD units and requester scopes supplied by firmware.
+
+**Activity completed:**
+- Added Multiboot2 ACPI RSDP capture and bounded, checksum-validated RSDT/XSDT,
+  DMAR, DRHD, and device-scope parsing. ACPI tables use the existing low-4-GiB
+  identity mapping; unsupported high physical addresses fail closed.
+- Expanded `test-io-unit` to 98 passing assertions, including valid DRHD/scope
+  parsing and checksum, truncation, malformed-scope, and unaligned-base failures.
+- Added `test-usb-storage-xhci-vtd-discovery`. QEMU q35 with `intel-iommu`
+  reports a valid DMAR/DRHD, completes xHCI MSI-X I/O, mounts USB root, syncs the
+  cache, and preserves the guest write in host readback.
+- Translation remains disabled. Root/context/page tables, invalidation ordering,
+  fault handling, and physical Intel N150 qualification are the next blockers.
+
+### 23:59 — generic IOMMU domain ownership foundation
+
+**Current problem:** bounce DMA mediates constrained buffers, but the kernel had
+no backend-neutral way to represent private translated domains, blocked DMA, PCI
+requester ownership, least-privilege mappings, or fault-closed policy.
+
+**Activity completed:**
+- Added identity, translated, and blocked IOMMU domains with one-requester
+  attachment, a bounded 64-entry mapping table, page-aligned first-fit IOVA
+  allocation, read/write permissions, exact owner/range unmap, and
+  detach-after-drain.
+- Added a latched fault gate that rejects new mappings after a requester fault.
+  Expanded `test-io-unit` to 93 passing assertions covering translated address
+  separation and reuse, wrong-owner/range rejection, blocked policy, identity
+  policy, alignment, active-map detach rejection, and fault closure.
+- The kernel build passes. This is a control-plane API, not hardware isolation:
+  no translated IOVA is submitted to xHCI until VT-d discovery, page tables,
+  invalidation, and fault handling exist. Physical Intel N150 remains unqualified.
+
+### 23:59 — device-scoped xHCI bounce DMA
+
+**Current problem:** xHCI streaming mappings still exposed caller buffers
+directly to the device. Devices with constrained masks had no mediated
+non-identity fallback, and direction-specific copy ownership was undefined.
+
+**Activity completed:**
+- Added HCD-owned DMA policy and aligned bounce mappings. Mapping copies
+  `TO_DEVICE` data before submission; unmapping copies `FROM_DEVICE` data back,
+  releases the allocation, and transactionally unwinds mask or SG failures.
+- Expanded `test-io-unit` to 79 passing assertions covering invalid buffers,
+  distinct device
+  addresses, both copy directions, release, mask rejection, and multi-segment
+  device-scoped mappings.
+- Added `test-usb-storage-xhci-bounce`. It forces bounce mapping for control and
+  bulk buffers, requires completed bulk traffic in both directions, MSI-X, root
+  mount, cache sync, and host-visible persistence. The SG, MSI-X recovery, and
+  disconnect regressions also pass. Translated IOVAs and IOMMU isolation remain
+  open, and physical Intel N150 hardware is still unqualified.
+
+### 23:59 — bounded xHCI scatter/gather bulk transfers
+
+**Current problem:** streaming DMA and xHCI bulk submission accepted only one
+linear mapping and emitted one logical buffer chain, leaving the scatter/gather
+part of the USB readiness blocker open.
+
+**Activity completed:**
+- Added a 32-segment streaming DMA mapping contract with direction ownership,
+  reverse unmap, and transactional cleanup when any segment fails. The first
+  host test exposed stale aggregate count after partial failure; clearing it made
+  all 71 `test-io-unit` assertions pass.
+- Added xHCI SG bulk submission with a preflighted transfer-ring bound and one
+  chained Normal-TRB sequence per mapped segment. The existing linear API now
+  uses the same path as a one-segment wrapper.
+- Added `test-usb-storage-xhci-sg`, which splits real BOT transfers into two
+  segments and requires `XHCI_SG_OK`, MSI-X, USB root mount, SCSI cache sync, and
+  host-visible persistence. It passes, as do normal xHCI persistence, MSI-X
+  recovery, and in-flight disconnect regressions. Non-identity DMA, IOMMU
+  isolation, concurrent devices, and physical Intel N150 qualification remain.
+
+### 23:55 — selectable secondary xHCI storage owner
+
+**Current problem:** xHCI PCI discovery and MSI-X routing represented multiple
+controllers, but the singleton MSC/BOT frontend always initialized HCD 0. A
+thumb drive attached to another controller was therefore unusable.
+
+**Activity completed:**
+- Added ordered frontend probing of every discovered HCD. Failed or empty
+  controllers are fully stopped before the next candidate, and all enumeration,
+  recovery, hotplug, fault, and teardown paths retain the selected HCD owner.
+- Changed the two-controller QEMU topology to leave HCD 0 empty and attach the
+  USB root device to HCD 1. The gate asserts both probes, HCD 1 selection, MSI-X,
+  root mount, cache synchronization, and host-visible persistence.
+- `make -C kernel bzImage`, `make test-usb-storage-xhci-multi-controller`, and
+  the MSI-X recovery, hotplug, and disconnect regression gates pass. The frontend
+  remains intentionally singleton; concurrent active HCD/device ownership is the
+  next architectural boundary, and physical Intel N150 hardware is unqualified.
+
+### 23:30 — runtime `dup(2)` self-test + closable dup'd tty fd
+
+**Current problem:** `test-vim` only *link-verifies* `dup()`: `vim --version`
+exits at `main.c:2224` before vim's startup `close(0); dup(2)` at `main.c:3010`,
+and `fileio.c:2471` is compiled out under `FEAT_TINY`. So the new `0xC5` syscall
+had no proof it actually works at runtime, which the QA policy does not accept.
+
+**Activity completed:**
+- Added `contrib/duptest/duptest.c` + a `test-dup` QEMU gate (console handler
+  `duptest`, ISO/log under `/tmp/icsos-dup-*`). It asserts: `dup(1)` returns a new
+  fd >= 3 that is closable (the tty path vim uses), and `dup(file)` returns a
+  distinct fd whose write-through-the-duplicate is visible reading back through the
+  original after `fsync()` (the sharing contract).
+- That test exposed a real defect: `sys_close()` returned `-EBADF` for *any*
+  `FD_TTY`, so a dup'd tty fd (fd >= 3) could not be closed. Fixed `sys_close()`
+  in `kernel/vfs/posixfd.c` to release the slot for dup'd `FD_TTY` fds instead of
+  treating them like the reserved 0/1/2 fds; it still does not destroy the shared
+  tty.
+- Design note: the observable had to be a *file* fd, not a tty write. The console
+  attaches a DDL-backed tty (no `TTY_SERIAL`), so a `write()` to it renders through
+  the DDL rather than the serial port, while SDK `printf` uses `charputc` (syscall
+  6, direct serial). A tty-write marker is therefore not reliably greppable on the
+  serial log; the on-disk file read-back is deterministic. Also, buffered VFS writes
+  do not update the node size until committed, so the test `fsync()`s before
+  reading back (matching `test-posixio`).
+
+**QA delivered:** `test-dup` passes (tty dup+close OK, file dup distinct fd,
+dup'd-fd write read back). Regression `test-integration` (boot+smp+exec) and
+`test-vim` still pass. Docs updated: `AGENTS.md` table, developer-guide `sys_dup()`
+note, and the QA-plan Process/ABI row.
+
+### 22:53 — multi-HCD discovery and IRQ routing
+
+**Current problem:** PCI discovery returned only the first xHCI function, and
+every dynamically allocated MSI-X vector entered one singleton assembly wrapper.
+
+**Activity completed:** PCI scanning now creates up to eight stable HCD records.
+Eight assembly stubs pass a route index to `xhci_irq`; MSI-X setup atomically
+binds an HCD before unmasking, and teardown unbinds only after handler drain and
+successful vector release. The shared USB frontend still initializes HCD 0.
+
+**QA delivered:** added `test-usb-storage-xhci-multi-controller`, which discovers
+two QEMU xHCI functions and validates HCD 0 MSI-X plus durable USB-root writes.
+The MSI-X recovery gate now asserts four route binds, three unbinds, stable route
+reuse, and no exhaustion; both gates pass. Concurrent controller initialization,
+per-controller USB devices, and physical Intel N150 routing remain unqualified.
+
+### 22:44 — complete xHCI helper parameterization
+
+**Current problem:** command, control, bulk, endpoint recovery, context,
+scratchpad, port, and controller setup helpers still depended on compatibility
+macros that silently selected `xhci_primary_hcd`.
+
+**Activity completed:** threaded `xhci_hcd *` through every xHCI helper and
+legacy USB dispatch point, removed the unused device-context accessor, and
+deleted all 35 singleton field aliases. Discovery, assembly IRQ routing, and the
+shared USB frontend still intentionally select one primary HCD, so independent
+multi-controller operation is the next blocker.
+
+**QA delivered:** kernel builds after each implementation slice.
+`test-usb-storage-xhci-msix-recovery`,
+`test-usb-storage-xhci-stall-recovery`,
+`test-usb-storage-xhci-hotplug`, and
+`test-usb-storage-xhci-disconnect` pass after alias removal. Physical Intel N150
+support and multi-controller isolation remain unqualified.
+
+### 22:28 — explicit xHCI lifecycle and event ownership
+
+**Current problem:** xHCI state had one HCD owner, but lifecycle, recovery,
+hotplug, event, IRQ, and DMA allocation paths still selected it through
+no-argument wrappers or compatibility aliases.
+
+**Activity completed:** passed `xhci_hcd *` through initialization, teardown,
+recovery, reconnect, probe failures, connection checks, event consumption, IRQ
+admission, and coherent DMA allocation. Removed the no-argument lifecycle
+wrappers and the unused IRQ/MSI aliases. Command, control, bulk, context, and
+scratchpad helpers still select `xhci_primary_hcd` and remain the next
+parameterization boundary.
+
+**QA delivered:** kernel builds after each slice.
+`test-usb-storage-xhci-vector-reservation`,
+`test-usb-storage-xhci-hotplug`, and
+`test-usb-storage-xhci-disconnect` pass. This validates recovery vector reuse,
+automatic remove/add cycles, and in-flight disconnect teardown; it does not
+claim independent multi-controller operation or physical Intel N150 support.
+
+### 22:20 — singleton xHCI HCD state ownership
+
+**Current problem:** xHCI controller registers, rings, DMA regions, recovery
+flags, and IRQ resources were dozens of independently declared file-scope
+globals with no single lifetime owner.
+
+**Activity completed:** introduced `xhci_hcd` and moved all controller-owned
+state into the singleton `xhci_primary_hcd`. Transitional field aliases preserve
+the legacy text-included call paths while making allocation, teardown, recovery,
+and future per-controller parameterization operate on one coherent object.
+
+**QA delivered:** kernel build and the four-vCPU vector-reservation/recovery,
+automatic hotplug, and in-flight disconnect gates pass. This proves no observed
+regression across the broadest state transitions, but it does not prove
+multi-controller isolation. Explicit HCD parameters, multiple controller
+instances, URBs, hubs, and general cancellation remain open.
+
+### 22:14 — centralized xAPIC MSI message translation
+
+**Current problem:** xHCI and virtio-blk duplicated raw xAPIC MSI address/data
+encoding, bypassing the new IRQ domain boundary and offering no validation of
+the selected vector or destination width.
+
+**Activity completed:** added domain-scoped xAPIC MSI message composition and
+migrated both MSI-X drivers to it. Composition validates domain membership and
+the 8-bit xAPIC destination before returning address-low, address-high, and data
+fields; both driver failure paths release their newly allocated vector.
+
+**QA delivered:** host TAP coverage increased from 62 to 66 with exact message,
+maximum-destination, out-of-domain, and unencodable-destination cases. Kernel
+build, `test-usb-storage-xhci-vector-reservation`, and `test-virtio` pass through
+the composer. x2APIC/remapped MSI, affinity migration, IOAPIC domains, and
+physical N150 routing remain open.
+
+### 22:05 — IRQ domain bounds and platform reservations
+
+**Current problem:** first-fit MSI-X allocation could skip driver-owned vectors,
+but it could not distinguish platform reservations or constrain allocation
+through an explicit domain boundary.
+
+**Activity completed:** added the bounded `device` IRQ domain and owner-checked
+reserve/unreserve state. Reserved vectors reject handler admission and normal
+driver release, while domain allocation skips them. The xHCI reservation test
+holds vector 66 under a separate owner, forcing initial setup and all three
+recovery allocations onto vector 67.
+
+**QA delivered:** host TAP coverage increased from 54 to 62 with reservation,
+exclusion, handler rejection, wrong-release, reuse, and protected-range boundary
+cases.
+`test-usb-storage-xhci-vector-reservation` passes on four vCPUs with durable USB
+writeback and exact vector reuse. Firmware/ACPI reservation discovery, hardware
+interrupt-domain translation, affinity migration, shared IRQs, storm handling,
+and physical N150 routing remain open.
+
+### 22:01 — dynamic MSI-X vector allocation
+
+**Current problem:** managed IRQ ownership still required xHCI and virtio-blk to
+claim fixed vectors, preventing safe growth beyond the two hard-coded devices.
+
+**Activity completed:** added locked first-fit allocation over device vectors
+`0x42..0xEF`. xHCI and virtio-blk now store the assigned vector, program it into
+their MSI-X table and IDT entry, use it for handler accounting, and return it
+after hardware masking and handler drain. The xHCI recovery oracle accepts a
+runtime vector while requiring all four claims to reuse the same released slot.
+
+**QA delivered:** host TAP coverage increased from 50 to 54 with first-fit,
+collision-skip, exhaustion, and invalid-range cases. Kernel build,
+`test-usb-storage-xhci-msix-recovery`, and `test-virtio` pass with vector 66 in
+the current isolated QEMU configurations. The virtio gate now asserts its
+allocated-vector marker and rebuilds through `vmdex` to prevent stale-kernel
+false results. Interrupt domains, platform reservation discovery, shared IRQs,
+affinity migration, storm handling, and physical N150 routing remain open.
+
+### 22:18 — managed MSI-X vector lifecycle
+
+**Current problem:** xHCI and virtio-blk programmed fixed IDT vectors directly,
+with no owner collision detection or proof that a vector could be released only
+after active hard-IRQ handlers drained.
+
+**Activity completed:** added a shared IRQ vector registry with owner-checked
+claim, handler entry/exit accounting, release gating, bounded active-handler
+drain, and vector reuse. xHCI teardown now masks interrupter 0, halts the
+controller, disables PCI MSI-X, masks table entry 0, drains handlers, and then
+releases vector `0x43`; recovery reclaims it. Virtio-blk claims vector `0x42`,
+uses the same entry accounting, and unwinds the claim if queue setup fails.
+
+**QA delivered:** the host TAP suite now has 50 cases, adding duplicate-owner,
+wrong-owner, active-handler, release-gate, drain, and reuse checks. Kernel build,
+virtio MSI-X, xHCI MSI-X, recovery, hotplug, and disconnect pass. The combined
+`test-usb-storage-xhci-msix-recovery` gate requires exactly four successful
+claims (initial plus three recoveries), IRQ-assisted persistence, and no release
+timeout. Dynamic vector allocation, interrupt domains, affinity migration,
+shared interrupts, storm handling, and physical N150 routing remain open.
+
+### 21:58 — xHCI MSI-X event notification
+
+**Current problem:** xHCI completion always pause-polled the event ring, wasting
+CPU and leaving modern hardware interrupt routing unqualified.
+
+**Activity completed:** added guarded PCI MSI-X capability traversal, table entry
+0 programming to the BSP LAPIC on vector `0x43`, xHCI interrupter and global
+interrupt enable, a dedicated assembly wrapper, and a minimal handler that
+acknowledges interrupter 0 and issues LAPIC EOI. Event TRBs remain consumed in
+the waiting context. Interrupt-enabled waits use `hlt`; interrupt-disabled boot
+and MSI-X setup failure retain bounded polling. Controller stop masks the
+interrupter before halting. Initial qualification incorrectly required an
+IRQ-assisted wait during interrupt-disabled boot enumeration; register evidence
+showed 19 delivered IRQs and zero legal waits, so qualification moved to the
+first post-boot xHCI IRQ wake. Timeout injection then caught a second issue:
+sleeping on every iteration expanded the legacy spin timeout into hours. The
+final adaptive wait sleeps once per 65,536 iterations and polls between sleeps,
+preserving bounded disconnect and dropped-doorbell behavior.
+
+**QA delivered:** `test-usb-storage-xhci-msix` requires MSI-X delivery, an
+IRQ-assisted wait, USB-root mount, cache synchronization, and host byte readback.
+`test-usb-storage-xhci-poll` forces MSI-X off and proves the polling fallback
+under the same persistence contract. Both pass on QEMU q35 with four vCPUs.
+Physical Intel N150 interrupt routing, generic IRQ ownership/synchronization,
+hubs, and multi-device operation remain open.
+
+### 21:52 — FEAT_TINY vim port: dup syscall, SDK math/unistd, QEMU smoke test
+
+**Current problem:** porting vim 9.2.1031 (FEAT_TINY, freestanding ELF64) to
+ICS-OS. All 128 objects compiled, but the link failed on `dup`, `log10`,
+`gethostname`, `usleep`, and two feature-gated symbols `get_cmd_output` and
+`term_set_winsize`. The `dup` failure was architectural: vim's startup runs
+`close(0); dup(2)` (main.c:3010) and ICS-OS had no `dup` syscall.
+
+**Activity completed:**
+- Added a real kernel `dup` instead of patching vim. `sys_dup(int oldfd)` in
+  `kernel/vfs/posixfd.c` clones the target fd under `fd_lock`: tty fds map to a
+  new `FD_TTY` slot, `FD_VFS` fds inherit via `vfs_file_inherit` (refcount bump,
+  slot released on failure), `FD_BLK` via `fd_blk_inherit`. Registered syscall
+  `0xC5` plus the Linux `dup` (32) mapping in `kernel/dexapi/dex32API.c`.
+- SDK (`sdk/posix.c`): `dup()` -> `FXN_DUP` (0xC5); `usleep()` -> kernel `delay`
+  (0x9B, rounded up to whole ms, halts/yields); `gethostname()` fills fixed
+  `"icsos"`.
+- SDK math: `log10()` in `sdk/posix.c` (bounded scale-into-[1,10) loop plus per-
+  decade linear interpolation, exact floor, no libm, safe on inf/NaN); declared
+  in `sdk/include/math.h`.
+- Declared `dup`/`usleep`/`useconds_t`/`gethostname` in `sdk/include/unistd.h`.
+- Vim link stubs in `contrib/vim/icsos_stub.c`: `get_cmd_output()` returns NULL
+  (normally in misc1.c under FEAT_EVAL/locale) and `term_set_winsize()` is a
+  no-op (normally in term.c under HAVE_TGETENT); wired into the vim Makefile.
+
+**QA delivered:**
+- Kernel regression gates pass after the `dup` change: `test-boot`,
+  `test-smp SMP_CPUS=4`, `test-exec`.
+- `make -C contrib/vim` now links `vim.exe` (2.25 MB static ELF64); every
+  previously-undefined symbol resolves.
+- New `test-vim` QEMU gate (console handler `vimtest` runs non-interactive
+  `vim --version`): requires `Root mount [OK]`, the real banner
+  `VIM - Vi IMproved 9.2 (2026 Feb 14, ...)`, and no `VIM_RUN_FAIL`. Passes.
+
+### 21:39 — xHCI streaming DMA lifetimes
+
+**Current problem:** coherent controller structures had explicit ownership, but
+bulk and control data buffers still became bus addresses through a stateless
+identity conversion. Direction and the interval during which hardware owned a
+buffer were not represented.
+
+**Activity completed:** added streaming mappings with explicit to-device,
+from-device, and bidirectional direction, complete-range mask validation,
+active-map rejection, ordered ownership transfer, and double-unmap rejection.
+xHCI now maps one data buffer per bulk or control operation and converges success,
+timeout, stall, and disconnect through one unmap path. BOT retries create fresh
+mappings at the existing complete-command retry boundary.
+
+**QA delivered:** the host suite now has 40 TAP cases, adding direction recording,
+double-map rejection, successful ownership return, double-unmap rejection, and
+invalid-direction rejection. Kernel build, durable xHCI persistence,
+timeout/controller recovery, BOT/endpoint stall recovery, in-flight disconnect,
+and repeated automatic hotplug pass. Scatter/gather, non-identity mappings,
+non-coherent architecture cache maintenance, interrupt completion, and IOMMU
+isolation remain open.
+
+### 21:24 — coherent DMA allocation for xHCI storage
+
+**Current problem:** xHCI region metadata described static or manually aligned
+memory but did not own allocation lifetime, zeroing, partial-failure unwind, or
+release of the original heap pointer.
+
+**Activity completed:** added an identity-coherent allocator over the bounded,
+physically contiguous identity-mapped kernel heap. It over-allocates for
+alignment, validates the complete range against the device mask, zeroes storage,
+retains the original allocation, and clears ownership on release. xHCI now
+transactionally allocates all command/event/endpoint rings, DCBAA, ERST,
+input/device contexts, and scratchpads through this API. Failed allocation
+unwinds every region before hardware is programmed; successful storage persists
+across controller reset and late attachment.
+
+**QA delivered:** the host suite now has 34 TAP cases, including deterministic
+mapping-failure unwind. Kernel build and normal persistence, timeout/controller
+recovery, BOT/endpoint recovery, repeated hotplug, high BAR, no-device boot,
+late attach, identity rejection, and mounted remount all pass. Streaming DMA,
+interrupt completion, non-identity mappings, IOMMU isolation, and conversion of
+global single-controller state remain open.
+
+### 21:08 — xHCI-owned DMA regions and coherent ordering
+
+**Current problem:** the first checked DMA helper still validated one-byte
+addresses, while xHCI had no metadata proving that TRBs, contexts, events, or
+scratchpad subranges belonged to a complete device-addressable allocation. It
+also globally flushed every CPU cache around coherent ring operations.
+
+**Activity completed:** the DMA contract now records region CPU/bus bases,
+length, and alignment and validates every translated subrange. xHCI owns regions
+for command and endpoint rings, event ring, ERST, DCBAA, input/device contexts,
+and scratchpads. Transfer buffers are checked at their complete length. All
+xHCI `wbinvd` calls were replaced by ordering barriers appropriate for coherent
+x86 PCIe DMA. A coherent allocator, streaming map lifetimes, interrupts, and
+IOMMU isolation remain open.
+
+**QA delivered:** the host TAP suite now has 29 cases, including owned-region
+subrange success and boundary crossing. Kernel build plus normal xHCI I/O,
+timeout/controller recovery, BOT/endpoint recovery, and two automatic hotplug
+cycles pass both before and after removal of whole-cache flushes.
+
+### 20:52 — checked identity-DMA contract
+
+**Current problem:** USB and xHCI programmed bus addresses through an unchecked
+CPU-pointer cast, leaving the controller mask and address-range assumptions
+implicit.
+
+**Activity completed:** added a shared identity-DMA mapping contract that checks
+null and zero-length input, power-of-two alignment, range overflow, and the
+device DMA mask. The common UHCI/xHCI address path now uses it. This is the first
+DMA migration increment; owned coherent allocation, streaming maps, scoped cache
+maintenance, interrupts, and IOMMU isolation remain open.
+
+**QA delivered:** the host TAP suite now has 26 cases, including aligned success,
+misalignment, invalid alignment, mask crossing, and overflow. Kernel build,
+normal and high-BAR xHCI persistence, repeated automatic hotplug, automatic
+identity rejection, late attach, and empty-controller boot all pass.
+
+### 20:40 — automatic xHCI runtime monitoring
+
+**Current problem:** direct-device reconnect required an explicit test hook, so
+an empty controller could not accept a later first device and ordinary removal
+or reattachment had no bounded background observer.
+
+**Activity completed:** added a BSP-pinned xHCI monitor polling every 100 ms,
+with three-sample attach debounce and a serialized transition latch. It accepts
+late first attachment, automatically quarantines disconnected generations, and
+publishes verified replacements. Failed established-media validation remains
+latched until detach. External callbacks fail during transitions; internal
+identity reads remain available. VFS remount stays explicit.
+
+**QA delivered:** `test-usb-storage-xhci-hotplug` passes two automatic remove/add
+cycles; `test-usb-storage-xhci-hotplug-identity-mismatch` rejects a same-size FAT
+replacement with a changed serial exactly once; and
+`test-usb-storage-xhci-late-attach` publishes storage after an empty-controller
+boot. The original no-device gate also passes.
+
+### 20:26 — controlled non-root USB remount
+
+**Current problem:** same-media xHCI reconnect published a safe replacement
+device generation, but the stale `/icsos` mount remained fail-closed and VFS
+had no serialized recovery operation. Existing workdir checking also used the
+wrong process-list output pointer, leaked its snapshot, and missed descendants.
+
+**Activity completed:** VFS now rejects unmount when any process workdir is the
+mount or a descendant, and provides a controlled remount that keeps mount
+serialization across teardown and replacement mounting. Administrative lookup
+is root-relative, actual `vfs_root` is rejected, and open files or workdirs are
+never forced closed. The operation uses IRQ-save recursive lock acquisition to
+avoid same-CPU timer preemption deadlocks while preserving SMP exclusion.
+
+**QA delivered:** added `make test-usb-storage-xhci-mounted-remount`. It removes
+the mounted USB device during I/O, validates and publishes the same-media
+replacement, proves `/icsos/boot` blocks remount without detaching the namespace,
+then remounts onto the fresh generation and resolves `/icsos/vmdex`.
+
+### 20:24 — stable USB volume identity
+
+**Current problem:** reconnect accepted replacements using capacity and block
+size alone, so a different same-size thumb drive could be published as the old
+media generation.
+
+**Activity completed:** USB reconnect now captures exact partition geometry and
+filesystem-standard identity fields: FAT12/16/32 and exFAT volume serials, ext4
+UUIDs, and ISO9660 volume identifiers. Every recognized partition must match.
+Unknown filesystems can still attach initially as raw storage, but reconnect is
+fail-closed when stable identity is unavailable. Mutable file data is not part
+of identity.
+
+**QA delivered:** the host I/O suite now has 21 TAP cases, including each
+identity format, matching/mismatching comparisons, and invalid signatures.
+Added `make test-usb-storage-xhci-reconnect-identity-mismatch`, which preserves
+image size and partition geometry while changing only the FAT serial and
+requires an explicit identity-mismatch rejection.
+
+### 20:12 — mounted USB replacement generation
+
+**Current problem:** a quarantined mounted USB device could not be safely
+replaced because block callbacks used shared transport presence. Restoring that
+flag after reconnect could revive callbacks pinned by the stale root mount.
+
+**Activity completed:** published USB block callbacks now validate the current
+device-manager context. Disconnect quarantines and forgets the active parent and
+partition IDs. An accepted reconnect publishes fresh registrations; callbacks
+from the old mounted partition remain offline even though the new generation is
+present and readable. Namespace remount remains explicit and unsupported until
+stable volume identity and VFS handle/workdir quiescing are available.
+
+**QA delivered:** added `make test-usb-storage-xhci-mounted-reconnect`. It boots
+from the USB FAT partition, dirties cache, removes storage during I/O, reattaches
+the image, and requires a different partition ID, stale-callback failure, fresh
+device discovery, and a successful read through the replacement operation
+table.
+
+### 20:00 — mounted USB device quarantine
+
+**Current problem:** cache invalidation prevented stale data after xHCI removal,
+but the disconnected `usb0` and partition registrations remained discoverable.
+Removing them through the existing API was blocked by the exclusive mount claim.
+
+**Activity completed:** added an idempotent device-manager quiesce transition
+that rejects new name and referenced lookups without invalidating operation
+tables already pinned by VFS. The xHCI offline transition now invalidates cache
+first and then quarantines the parent and all partition registrations. Explicit
+unmount can still run fail-closed teardown, clear its claim, and let the final
+reference retire the old slot. Reconnect does not yet publish a replacement
+generation or remount the namespace.
+
+**QA delivered:** the host I/O P0 test now covers the lifecycle transition. The
+mounted-disconnect QMP regression additionally requires both `usb0` and
+`usb0p0` to be absent from discovery after removal while the stale cache reread
+and direct device access fail.
+
+### 19:50 — mounted USB cache invalidation and exFAT policy
+
+**Current problem:** raw xHCI disconnect and reconnect were bounded, but a
+mounted FAT root could still satisfy reads from stale block-cache pages after
+removal. Dirty cache loss was not reported, and the default removable-storage
+filesystem policy did not account for exFAT or the other active filesystems.
+
+**Activity completed:** the USB offline transition now invalidates cache keys
+for `usb0` and every registered partition exactly once. Dirty-page discard is
+counted and reported. The mounted namespace deliberately remains fail-closed;
+transparent remount still requires VFS handle/workdir quiescing, a new device
+generation, and stable media identity. Documented a future two-partition USB
+policy: FAT32 for firmware/boot compatibility and exFAT for the interoperable
+work volume, with ext4 retained as the native writable alternative and
+ISO9660, devfs, and the FAT16 RAM disk retaining their existing roles.
+
+**QA delivered:** added `make test-usb-storage-xhci-mounted-disconnect`. The
+test mounts `usb0p0` as root, caches and dirties a partition page, removes the
+device through QMP during active raw I/O, and requires dirty-loss reporting and
+failure of the cached reread without timeout recovery or a kernel fault. The
+kernel build and the new gate pass.
+
+### 19:41 — xHCI direct-device re-enumeration
+
+**Current problem:** disconnect cancellation offlined storage safely, but there
+was no qualified path to discover a replacement device and rebuild controller,
+endpoint, BOT, and SCSI state.
+
+**Activity completed:** added a bounded reconnect path that scans all xHCI root
+ports, because QEMU may attach the replacement on a different port. It resets
+and rebuilds the controller, repeats descriptor and mass-storage enumeration,
+and only restores raw I/O when capacity and block size match the removed device.
+The path is explicit and serialized; it does not silently revive a mounted FAT
+filesystem or preserve stale cache state.
+
+**QA delivered:** added `make test-usb-storage-xhci-reconnect` by extending the
+QMP disconnect runner. The host waits for asynchronous device deletion,
+recreates the raw block node, attaches replacement USB storage, and requires
+full re-enumeration, unchanged geometry, restored raw reads, and sector
+equality. `test-usb-storage-xhci-reconnect-mismatch` attaches a smaller image
+and requires geometry rejection with storage left offline. Reconnect,
+disconnect-only, normal persistence, timeout recovery, BOT stall recovery, and
+no-device xHCI gates pass. Automatic monitoring, repeated cycles, mounted-cache
+invalidation/remount, stable media identity, hubs, and physical N150
+qualification remain open.
+
+### 19:33 — xHCI in-flight disconnect cancellation
+
+**Current problem:** removing direct-attached xHCI storage during an active BOT
+transfer was classified as a generic timeout and could trigger an inappropriate
+controller reset/re-enumeration attempt.
+
+**Activity completed:** xHCI now checks the selected port's `CCS` state before
+TRB production and while polling for transfer events. Connection loss exits the
+active wait, bypasses stall and controller recovery, and marks USB storage
+offline under the existing serialized block-I/O path. Later reads, writes, and
+flushes fail immediately. The mounted device object is intentionally not
+retired underneath VFS; full removal lifecycle and reconnect remain future work.
+
+**QA delivered:** added `make test-usb-storage-xhci-disconnect`. A bounded test
+hook pauses event consumption after a real bulk doorbell, the host removes the
+named QEMU device over QMP, and the guest requires one offline transition, no
+timeout or controller recovery, immediate rejection of a second read, no block
+device registration, and continued console startup. The new gate and normal,
+timeout-recovery, BOT-stall-recovery, and no-device xHCI lanes pass. Physical
+N150 readiness, hubs, reconnect, repeated hotplug, dirty-cache removal,
+interrupts, shared DMA/IOMMU, and hardware qualification remain open.
+
+### 19:18 — xHCI BOT and endpoint stall recovery
+
+**Current problem:** whole-controller timeout recovery was qualified, but a
+stalled BOT bulk endpoint still lacked protocol reset, endpoint repair, and a
+bounded retry policy.
+
+**Activity completed:** transfer events are matched to the submitted TD span,
+endpoint, and slot. A genuine QEMU stall from an invalid CBW now triggers BOT
+Mass Storage Reset, clear-halt on both bulk endpoints, xHCI Reset Endpoint and
+Set TR Dequeue Pointer commands, and one complete BOT-command retry. A failed
+selective retry escalates once to controller reset and re-enumeration. Interface
+parsing now binds the interface number and endpoints from one complete BOT
+alternate-setting-zero tuple.
+
+**QA delivered:** added `make test-usb-storage-xhci-stall-recovery`. It proves
+two real Stall Error completions, two selective recoveries, one forced retry
+timeout, exactly one controller fallback, sector equality, and durable guest
+write/host readback. The final stall, normal xHCI, controller recovery,
+high-BAR, no-device, UHCI persistence, virtio, and 1/2/4/8-vCPU fork gates pass.
+One UHCI cache-sync run failed and its immediate isolated rerun passed, so that
+legacy polling lane retains an intermittent timing risk. Physical N150
+readiness remains unclaimed; hubs, unplug safety, interrupts, shared DMA/IOMMU,
+sustained contention, and hardware qualification remain blockers.
+
+### 17:15 — xHCI timeout and controller recovery
+
+**Current problem:** an xHCI transfer timeout left ring and BOT state owned by
+an unknown hardware state, so later I/O could not safely continue.
+
+**Activity completed:** added one-shot recovery at the complete BOT-command
+boundary. A failed command, control, or bulk event now requests recovery; the
+USB layer stops and resets the controller, rebuilds rings and contexts,
+re-enumerates the mass-storage device, and retries the complete SCSI command
+once. Failed reinitialization stops and offlines the device. USB block and flush
+callbacks now serialize access to shared DMA buffers. Repeated low-MMIO mapping
+registrations use pending/ready/failed states so recovery cannot exhaust the
+registry or observe an incomplete TLB shootdown.
+
+**QA delivered:** added `make test-usb-storage-xhci-recovery`. It drops three
+bulk doorbells, proves two repeat recoveries, forces one initialization failure
+and fail-closed device state, restores the controller, compares sector data,
+then requires the normal FAT guest-write, cache-sync, and host byte-comparison
+oracle. The new gate, normal/high-BAR/no-device xHCI, UHCI persistence,
+`test-virtio`, and the 1/2/4/8-vCPU fork matrix pass. Physical N150 readiness
+remains unclaimed; hubs, unplug safety, endpoint/BOT reset policy, DMA/IOMMU,
+interrupts, and hardware qualification remain blockers.
 
 ### 16:35 — xHCI BAR mapping above 4 GiB
 

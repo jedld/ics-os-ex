@@ -41,15 +41,55 @@ create/write/`fsync`, synchronous SCSI cache flush, VM termination, and
 byte-for-byte host readback. The QEMU gates boot from a separate CD and assert
 the selected HCD plus `usb0p0` root selection. An xHCI no-device lane checks
 bounded failure, no accidental USB registration, and continued console startup.
+The MSI-X lane requires delivery on a dynamically allocated device vector and an
+interrupt-enabled waiter woken by an xHCI IRQ; the forced-poll lane disables
+MSI-X and preserves the same
+mount, flush, and durable host-readback contract. The MSI-X recovery lane also
+requires exact vector release/reclaim across three successful controller
+recoveries and rejects any handler-drain timeout.
+The vector-reservation lane holds the first device-domain vector under a
+separate owner and requires xHCI to skip it through initial setup and three
+recovery allocations.
+Host IRQ tests verify exact xAPIC MSI address/data composition, the largest
+encodable destination ID, and rejection of vectors outside the selected domain
+or destination IDs that require x2APIC/remapping support.
+xHCI controller registers, rings, DMA ownership, recovery flags, and IRQ
+resources have explicit HCD owners. PCI discovery creates up to eight records;
+dedicated assembly routes dispatch MSI-X by HCD and unbind after handler drain.
+The two-controller gate leaves HCD 0 empty and verifies clean fallback, HCD 1
+selection, MSI-X, and durable storage. Concurrent active controllers and
+per-controller USB frontend isolation remain untested and unsupported.
+The high-BAR lane relocates the controller BAR above 4 GiB. The recovery lane
+injects repeat transfer timeouts and failed recovery initialization, then requires fail-closed
+device state, successful restoration, sector equality, and durable host readback.
+The BOT stall lane induces real QEMU Stall Error completions with malformed
+CBWs, requires BOT reset plus endpoint reset/dequeue recovery, and verifies one
+bounded escalation to full-controller recovery when the selective retry times out.
+The QMP disconnect lane removes storage during an active bulk transfer and
+requires bounded cancellation, fail-closed later I/O, no reset attempt, no
+offline-device registration, and continued console startup.
+The mounted-disconnect lane runs after FAT root mount, dirties one cache page,
+and requires parent/partition cache invalidation, explicit dirty-page loss
+reporting, and rejection of a stale cached reread.
+The mounted-remount lane rejects recovery while a process workdir is below the
+mount, preserves the namespace on that rejection, then remounts the verified
+replacement generation and resolves a file through the rebuilt namespace.
+The reconnect lane recreates the block backend, attaches replacement storage,
+allows a different root port, repeats full controller and BOT enumeration,
+checks unchanged geometry, and requires sector equality after raw I/O resumes.
+Its mismatch variant requires a different-capacity replacement to remain
+offline after enumeration.
 Modern xHCI hardware still requires physical qualification.
 
 The first incremental host-unit foothold now exists: `make test-io-unit` emits
-TAP 13 for block-cache generation decisions. `test-posixio` runs twice under
+TAP 13 for cache/device lifecycle, DMA, IRQ, media identity, generic IOMMU
+domain decisions, and bounded ACPI DMAR parsing. `test-posixio` runs twice under
 distinct PIDs on two vCPUs and verifies VFS create-failure cleanup plus io_uring
 close with DMA in flight; `test-virtio` also uses two vCPUs. This remains a
 small increment, not the general runner, CI, coverage, or fault framework.
 
-The same host target now also checks device reference/quiesce/retire decisions,
+The same host target now also checks the idempotent live-to-quiescing transition
+and device reference/quiesce/retire decisions,
 cache rejection after a device-generation change,
 and completion-before-wait ordering. The virtio focused gate deterministically
 holds completion harvesting, resets with an in-flight descriptor, requires the
@@ -77,12 +117,12 @@ multi-vCPU repeated clone/close/exit stress remain Phase 4 requirements.
 |---|---:|---|
 | Reproducible developer environment | Partial | Ubuntu container and dependency script exist, but packages and emulator behavior are not pinned to immutable versions. |
 | Compile and link validation | Partial | Canonical builds work, but kernel and SDK flags suppress all warnings and several app builds are non-fatal. |
-| Host-native unit tests | Emerging | `test-io-unit` is the first TAP pure-logic regression; no general runner, fixture API, or coverage gate exists yet. |
+| Host-native unit tests | Emerging | `test-io-unit` has 98 TAP cases covering cache/device lifecycle, completion retention, USB media identity, coherent/streaming/SG/bounce DMA ownership, IRQ domains, generic IOMMU requester/mapping/fault policy, and valid/malformed DMAR structures; `test-partition-unit` adds 15 TAP cases for the partition layer (IEEE CRC-32 vectors/chunking, ATA LBA28/LBA48 capacity decode); no general runner, fixture API, translating hardware-IOMMU backend, or coverage gate exists yet. |
 | In-kernel unit tests | Missing | No suite/case registration or assertion runner; the common kernel `assert()` is a no-op. |
 | Guest API selftests | Emerging | Several user programs test real APIs, but each invents marker strings and orchestration. |
 | QEMU functional tests | Good foundation | Twenty-five `test-*` targets cover important vertical slices. |
 | SMP/concurrency validation | Weak/emerging | Boot, scheduler, POSIX I/O, and virtio smoke use two CPUs; broader contention, lifecycle, spawn, and tool matrices remain. |
-| Fault and recovery tests | Missing | No general allocation, IRQ, DMA, timeout, reset, hot-unplug, storage-error, or crash injection framework. |
+| Fault and recovery tests | Emerging | Virtio reset plus xHCI timeout, BOT stall, endpoint/controller reset, QMP in-flight removal, direct-device re-enumeration, repeated automatic hotplug, late attachment, replacement-identity rejection, and host-level coherent-allocation unwind cover narrow paths; no integrated allocation, IRQ, DMA, storage-error, or crash injection framework exists. |
 | Fuzzing and malformed-input tests | Missing | No persistent corpus, coverage-guided fuzzing, or parser harness was found. |
 | Dynamic analysis | Missing | No sanitizer, race detector, kernel memory checker, or systematic lock validator lane. |
 | Coverage | Missing | No source, branch, syscall, device-state, or requirement coverage is reported. |
@@ -115,10 +155,10 @@ timeouts, crashes, skips, and artifacts.
 | Group | Current targets | What they prove | Principal limitation |
 |---|---|---|---|
 | Boot and scheduler | `test-boot`, `test-smp` | GRUB/Multiboot2 boot, root mount, AP startup, basic work stealing, no observed GPF | Small fixed scenario; no topology, hotplug, preemption, lock, or long-run matrix |
-| Process and ABI | `test-exec`, `test-spawn` | ELF64 load/execute, `posix_spawn()`, `waitpid()`, writable work disk | Smoke cases only; spawn test does not assert decoded child status or abnormal exits |
+| Process and ABI | `test-exec`, `test-spawn`, `test-vim`, `test-dup` | ELF64 load/execute (`hello`, `spawn`, and the FEAT_TINY vim TUI via non-interactive `vim --version`), `posix_spawn()`, `waitpid()`, writable work disk, and `dup(2)` (`0xC5`) runtime semantics | Smoke cases only; vim gate checks the version banner and clean exit, not editor behavior; spawn test does not assert decoded child status or abnormal exits; `test-dup` proves `dup()` allocates a distinct slot, that a dup'd tty fd is closable, and that a dup'd file fd shares the open description (write-through-duplicate visible after `fsync()`) |
 | Fork | `test-fork`, `test-fork-matrix` | COW return ABI and isolation, one-owner fast path, immutable text, injected COW OOM, inherited fd, wait/exit semantics, and ten-child delayed reap on 1/2/4/8 vCPUs | Active CPL0 user/syscall stacks are eager-copied; no shootdown-loss, DMA-pin, unmap-race, multithread rejection, or in-flight io_uring rejection case yet |
 | Storage and async I/O | `test-iobench`, `test-virtio`, `test-posixio` | CD/page-cache behavior, virtio-blk DMA/MSI-X, selected POSIX and io_uring operations | Mostly one vCPU; no saturation, cancellation, reset, ENOSPC, corruption, or durability matrix |
-| USB devices | `test-usb-storage`, `test-usb-storage-xhci`, `test-usb-storage-xhci-no-device`; `test-usb`, `test-usb-amd64` launch helpers | UHCI/q35 xHCI enumeration, USB-root selection, SCSI cache sync, durable FAT readback, and xHCI no-device failure | Polling single-device backend; no hubs, hot-unplug, recovery, contention, high-BAR, or physical-hardware lane |
+| USB devices | `test-usb-storage`, `test-usb-storage-xhci`, `test-usb-storage-xhci-multi-controller`, `test-usb-storage-xhci-sg`, `test-usb-storage-xhci-bounce`, `test-usb-storage-xhci-msix`, `test-usb-storage-xhci-poll`, `test-usb-storage-xhci-high-bar`, `test-usb-storage-xhci-recovery`, `test-usb-storage-xhci-stall-recovery`, `test-usb-storage-xhci-disconnect`, `test-usb-storage-xhci-mounted-disconnect`, `test-usb-storage-xhci-mounted-reconnect`, `test-usb-storage-xhci-mounted-remount`, `test-usb-storage-xhci-hotplug`, `test-usb-storage-xhci-hotplug-identity-mismatch`, `test-usb-storage-xhci-late-attach`, `test-usb-storage-xhci-reconnect`, `test-usb-storage-xhci-reconnect-mismatch`, `test-usb-storage-xhci-reconnect-identity-mismatch`, `test-usb-storage-xhci-no-device`; `test-usb`, `test-usb-amd64` launch helpers | UHCI/q35 xHCI enumeration, two-controller PCI/HCD discovery and secondary-HCD selection, bounded scatter/gather bulk TDs, bidirectional bounce DMA, USB-root persistence, MSI-X delivery and IRQ-assisted waiting, polling fallback, high BAR, timeout/controller recovery, BOT/endpoint stall recovery, in-flight disconnect cancellation, mounted-cache invalidation and dirty-loss reporting, replacement-generation isolation from stale mounted callbacks, controlled quiescent non-root remount with busy-workdir rejection, standard FAT/exFAT/ext4/ISO9660 volume identity comparison, direct-device re-enumeration with sector equality, two automatic remove/add cycles, late first attachment, changed-identity/geometry rejection, failed recovery initialization state, and no-device failure | The frontend owns only one active HCD/device; no hubs, concurrent controller/device topology, translated-I/O/IOMMU DMA, automatic namespace remount, root replacement, sustained contention, or physical-hardware lane |
 | User toolchain | `test-bintools`, `test-buildtools`, `test-make` | In-OS assembler, archiver, linker, utilities, GNU Make, and generated program execution | Expensive whole-guest tests with ad hoc probes and marker contracts |
 | GCC path | `test-cc1`, `test-gcc`, `test-gccdriver`, `test-gcc-kbuild`, `test-kbuild` | Frontend, driver, toolchain, kernel generation, kexec, and capability checks | KVM/host-CPU dependence for most jobs; long feedback cycle |
 | Strict closure | `test-selfhost-cert` | Intended GCC rebuild, rebuilt Make, provenance, kernel rebuild, kexec, and capability loop | Eight-hour timeout, one vCPU, hard-coded object count, and strict closure not yet a consistently green release gate |

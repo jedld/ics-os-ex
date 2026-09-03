@@ -105,6 +105,16 @@ the POSIX descriptor syscalls, not raw VFS calls. Positioned block operations,
 async submissions, and flush submission share the block description's I/O gate
 so virtqueue submission order is preserved. `make test-spawn` verifies that a
 child can use an inherited VFS descriptor after the parent closes its copy.
+`sys_dup()` (syscall `0xC5`) clones a live descriptor under the same `fd_lock`:
+ a tty source installs a new `FD_TTY` slot, a VFS source inherits through
+ `vfs_file_inherit()`, and a block source through `fd_blk_inherit()`; the reserved
+ slot is released if the typed reference cannot be taken. It backs SDK `dup()` and
+ interactive editors (vim starts by `dup()`-ing the console tty). Closing a dup'd
+ tty descriptor (`FD_TTY` at fd >= 3) releases only the slot; it must not return
+ `EBADF` and must not destroy the shared tty. `make test-dup` verifies `dup()` at
+ runtime: a dup'd tty fd is allocable and closable, and a dup'd file fd's write is
+ visible reading back through the original after `fsync()` (buffered VFS writes do
+ not update the node size until committed).
 
 On x86-64, syscall `0x90` implements synchronous COW `fork()` directly from the
 saved interrupt frame; do not route it through `pdispatch`. Use
@@ -150,12 +160,102 @@ and wait for object/module references. Never cast a CPU pointer to a DMA address
 free a timed-out descriptor still owned by hardware, invoke driver callbacks under
 a global registry lock, or force-unload active in-kernel driver text.
 
+The current USB compatibility path uses `kernel/hardware/dma.h` to validate its
+identity-mapped bus addresses against alignment, overflow, the 32-bit DMA mask,
+and region ownership. xHCI derives all controller-programmed addresses from
+these regions, dynamically allocates aligned and zeroed coherent controller
+storage with transactional unwind, and uses ordering barriers rather than
+`wbinvd`. Bulk and control data stages use direction-aware streaming mappings
+whose lifetime ends on every completion, timeout, stall, and disconnect path.
+When available, xHCI programs MSI-X table entry 0 for a dynamically allocated
+device vector targeting the BSP, enables
+interrupter 0, acknowledges it in a minimal hard-IRQ handler, and consumes event
+TRBs in the waiting context. Sparse `hlt` wakeups retain polling between sleeps,
+so a missing completion does not turn the existing spin timeout into millions of
+timer interrupts. Polling alone remains active during interrupt-disabled boot
+and when MSI-X setup is unavailable.
+MSI-X drivers allocate vectors from the bounded device domain through
+`hardware/irq_lifecycle.h`; owner-checked reservations exclude platform vectors,
+and wrappers enter and exit the owner contract. Teardown must mask the device source before
+`irq_vector_release()`, which blocks new entries and waits for active handlers
+to drain.
+The same domain composes validated xAPIC MSI address/data messages. Drivers must
+not encode `0xFEE00000` directly; x2APIC and interrupt-remapped destinations are
+not yet supported.
+xHCI controller registers, rings, DMA regions, device/recovery state, and IRQ
+resources are owned by `xhci_hcd`. New state belongs in that object, not in
+another file-scope variable. Discovery and IRQ routing support up to eight HCDs,
+and the singleton storage frontend selects one; concurrent active devices are
+not yet supported.
+The implementation relies on the bounded identity-mapped kernel heap. Streaming
+DMA supports up to 32 scatter/gather segments with transactional map unwind, and
+xHCI emits bounded chained bulk TDs. Device-scoped bounce mappings provide
+non-identity caller/device buffers with directional copy and mask enforcement.
+Translated IOVAs, non-coherent cache maintenance, and IOMMU isolation remain
+unsupported. New drivers must not infer general DMA safety from this initial
+contract.
+`hardware/iommu.h` provides the initial backend-neutral identity, translated,
+and blocked domain ownership model. Its translated mappings are control-plane
+records only until a VT-d/AMD-IOMMU/SMMU backend programs and invalidates real
+hardware tables; drivers must not submit those IOVAs yet.
+`hardware/vtd.c` discovers ACPI DMAR, DRHD units, and requester scopes with
+checksum and bounds validation. Discovery does not enable translation. Do not set
+VT-d `GCMD.TE` until root/context/page tables, cache invalidation, rollback, and
+fault handling are implemented and tested.
+
 For USB storage changes, run `make test-usb-storage`. It boots from a separate
 CD and requires the image attached through QEMU UHCI to enumerate as `usb0p0`,
 mount as root, issue SCSI cache synchronization, and survive guest `fsync` plus
 host byte readback. `make test-usb-storage-xhci` applies the same contract on
-q35 xHCI. `make test-usb-storage-xhci-no-device` requires bounded probe failure,
-no `usb0` registration, and continued console operation.
+q35 xHCI. `make test-usb-storage-xhci-sg` forces multi-segment chained bulk TDs
+through that same durable contract. `make test-usb-storage-xhci-bounce` forces
+bidirectional bounce mappings. `make test-usb-storage-xhci-vtd-discovery` adds
+QEMU Intel-IOMMU DMAR discovery while retaining identity DMA and durable storage.
+`make test-usb-storage-xhci-high-bar` repeats it with the controller
+BAR above 4 GiB. `make test-usb-storage-xhci-recovery` injects three transfer
+timeouts and requires repeat controller reset/re-enumeration, fail-closed reset
+failure, sector equality, and durable host readback.
+`make test-usb-storage-xhci-msix` requires delivery on an allocated device vector and an
+IRQ-assisted event wait. `make test-usb-storage-xhci-poll` forces MSI-X off and
+requires the same durable storage behavior through polling fallback.
+`make test-usb-storage-xhci-msix-recovery` additionally requires exact vector
+release and reclaim across three successful controller recoveries.
+`make test-usb-storage-xhci-vector-reservation` reserves the first device vector
+under a separate owner and requires xHCI to skip it across those recoveries.
+`make test-usb-storage-xhci-stall-recovery` induces BOT stalls and requires
+BOT reset, clear-halt on both bulk endpoints, stalled-endpoint reset/dequeue
+repair, successful command retry, and bounded controller-reset fallback.
+`make test-usb-storage-xhci-disconnect` uses QMP removal during an active bulk
+transfer and requires bounded cancellation, offline subsequent I/O, no reset
+attempt, and continued console startup.
+`make test-usb-storage-xhci-mounted-disconnect` runs after FAT root mount and
+requires parent/partition cache invalidation, dirty-page loss reporting, and
+failure of a cached reread after removal. It also requires the quiescing parent
+and partition registrations to disappear from new device discovery while VFS
+retains its pinned references for teardown.
+`make test-usb-storage-xhci-mounted-reconnect` reattaches the image and requires
+a fresh discoverable parent/partition generation to read successfully while the
+old mounted partition callback stays offline.
+`make test-usb-storage-xhci-mounted-remount` additionally requires a descendant
+workdir to block remount without detaching the old namespace, then explicitly
+remounts the quiescent non-root `/icsos` namespace on the verified replacement
+generation and resolves `/icsos/vmdex`. It does not replace `vfs_root`, close
+open files, relocate workdirs, or provide automatic namespace recovery.
+`make test-usb-storage-xhci-hotplug` runs two automatic remove/add cycles through
+the BSP-pinned polling monitor. The identity-mismatch variant requires a changed
+FAT serial to be rejected once and remain latched offline until detach.
+`make test-usb-storage-xhci-late-attach` boots an empty controller and requires
+the first device attached after console startup to publish `usb0` and `usb0p0`.
+The monitor publishes raw device generations only and never remounts VFS.
+`make test-usb-storage-xhci-reconnect`
+then re-adds storage, requires full controller/BOT re-enumeration with unchanged
+geometry, and verifies sector equality through restored raw I/O. The mismatch
+variant requires a different-capacity replacement to remain offline. The
+identity-mismatch variant preserves geometry, changes only the FAT volume
+serial, and requires rejection. Reconnect identity also recognizes exFAT volume
+serials, ext4 UUIDs, and ISO9660 volume identifiers. The no-device target
+requires bounded probe failure, no `usb0` registration, and continued console
+operation.
 
 The first implementation target is a virtual bus/device and sample async driver,
 followed by the IRQ and DMA foundations and a complete virtio-blk lifecycle. Do not

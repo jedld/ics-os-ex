@@ -246,7 +246,7 @@ void partdev_format_guid(const unsigned char *guid, char *buf, int buflen)
         if (p + 2 >= buflen) break;
         buf[p++] = hex[guid[n[i]] >> 4];
         buf[p++] = hex[guid[n[i]] & 0xf];
-        if (i == 3 || i == 5 || i == 7) { if (p + 1 < buflen) buf[p++] = '-'; }
+        if (i == 3 || i == 5 || i == 7 || i == 9) { if (p + 1 < buflen) buf[p++] = '-'; }
     }
     buf[p] = 0;
 }
