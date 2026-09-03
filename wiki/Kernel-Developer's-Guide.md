@@ -142,6 +142,26 @@ machine-consumed tests must emit one atomic `SMP_RESULT` record with
 MADT/x2APIC discovery, NUMA, and CPU hotplug are not implemented and must not be
 claimed.
 
+The FAT cluster-chain walk is bounded and fail-closed. `get_sector_fromcluster`
+(`filesystem/fat12.c`) advances a file's clusters one step at a time and must not
+trust the FAT table: each step is validated by `fat_chain_step()`
+(`filesystem/fat_chain.h`, a pure host-testable function) against the volume's
+real capacity (`fat_cluster_count()`). A next pointer that is a valid FAT32
+marker ends the chain; one outside the data-cluster range is a corrupt volume;
+and a chain that has taken more steps than the volume has clusters is a loop. In
+both failure cases the walk stops and returns 0 (the read fails closed) instead
+of spinning or reading out of bounds. Do not re-introduce an unbounded `while`
+over `obtain_next_cluster()`; if you change the walk, add a case to
+`tests/fat_chain_unit.c` (`make test-fatchain-unit`).
+
+Kernel builds are versioned and the kernel log is inspectable. `kernel/Makefile`
+generates `kernel/build_info.h` (release id, git short hash, dirty flag, UTC
+timestamp) at build time and `dex_init` prints a release banner at boot. Console
+commands `version`, `uname [-a|-r|-m|-v]`, and `dmesg [-c|-n <lvl>|-l <lvl>]`
+expose the build identity and a fixed-record kernel log (every `printf`/console
+character is captured, gated live by a console-max level). Use `make test-klog`
+for the boot gate and `make test-klog-unit` for the ring unit test.
+
 ## 3.3 Device-driver architecture and lifecycle
 
 Before adding a physical driver, changing PCI/USB discovery, introducing driver

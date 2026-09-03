@@ -18,6 +18,8 @@
 
 //May 19, 2003 - Added support for virtual consoles
 
+#include "klog.h"
+
 void io_setscroll(int value)
 {
     Dex32SetScroll(Dex32GetProcessDevice(),value);
@@ -123,9 +125,18 @@ void putc(char x)
 void putcEX(char x)
  {
   /* Always mirror user/kernel putc to serial so nographic boots see output
-     even when the process DDL is not the active console. */
-  extern void serial_putc(char c);
-  if (x && x!='\t') serial_putc(x);
+      even when the process DDL is not the active console. */
+   extern void serial_putc(char c);
+   /* Kernel-log capture: while a kernel printf() is in progress, record every
+      character into the ring (always) and suppress the live console echo when
+      the message severity is below the console log-level threshold. User-space
+      output never sets klog_capturing, so it is neither captured nor gated. */
+   if (klog_capturing_active()) {
+      klog_line_char(x);
+      if (klog_current_level() > (int)klog_console_max_get())
+         return;
+   }
+   if (x && x!='\t') serial_putc(x);
   #ifdef USE_CONSOLEDDL
   {
      DEX32_DDL_INFO *d;
@@ -473,9 +484,13 @@ int printf(const char *fmt, ...)
 	va_list args;
 	int ret_val;
 
+	/* Capture this kernel message as one timestamped klog record; the per-char
+	   console echo (and its log-level gating) happens inside putcEX. */
+	klog_line_begin(KLOG_INFO);
 	va_start(args, fmt);
 	ret_val = vprintf(fmt, args);
 	va_end(args);
+	klog_line_end();
 	return ret_val;
 }
 

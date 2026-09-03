@@ -2,6 +2,113 @@
 
 ## 2026-09-03 (Manila, UTC+8)
 
+### 12:51–13:51 — test-kbuild regression fix: shell-free warncheck recipe, real `-w` strip, in-OS skip
+
+**Current problem:** The new `warncheck` gate broke `make test-kbuild` (the
+in-OS GCC self-host gate). Two independent bugs, both found by running the
+gate — not by reading it.
+
+**Root causes + fixes:**
+- **In-OS make can't run a shell for-loop.** The in-OS `make.exe` (GNU make
+  3.82 + `contrib/gnumake/job-icsos.patch`) direct-execs *simple* recipe lines
+  via `posix_spawn` and has no `/bin/sh` for recipes containing shell
+  metacharacters. The original `warncheck` used a `for f in …; do … || exit 1;
+  done` line, so the in-OS build failed with `make.exe: posix_spawn/bin/sh:
+  error` → `GKBUILD_TEST_FAIL make spawn`. Rewrote `warncheck` as one *simple*
+  recipe line per hardened TU (no `;`/`||`/quotes); make stops at the first
+  failing line, preserving fail-on-error.
+- **`$(CFLAGS: -w=)` silently did nothing.** The gate intended to drop `-w`
+  before adding `-Werror=…`, but make's substitution reference does not strip a
+  bare `-w` word (verified: it left `-w` in place, so `-Werror` was a no-op and
+  the "gate" never actually gated). Replaced with `$(filter-out -w,$(CFLAGS))`,
+  which does strip it. A `char*` passed to an `int*` param now fails the gate
+  under `-Werror=incompatible-pointer-types`; a `void*` case is correctly *not*
+  flagged (void* is universally convertible in C).
+- **In-OS gcc driver can't do `-fsyntax-only`.** Even with simple recipe lines,
+  the in-OS gcc driver always expects assembly output, so `-fsyntax-only`
+  produced an empty `.s` → `GCC_DRV_FAIL cc1: no asm`. The strict gate is a
+  *host* QA gate and the in-OS kbuild is a build-capability cert, so `warncheck`
+  is now a no-op when `INOS=1`; `gmake_kbuild_run` (`console/selfhost.c`) passes
+  `INOS=1` to the in-OS `make`. The host build still enforces the gate.
+
+**Verification:**
+- `make -C kernel warncheck` (host) — 2 strict lines run, pass.
+- `make -C kernel warncheck INOS=1` — no-op (0 lines).
+- `make -C kernel all` — full host build, only the pre-existing RWX ld warning.
+- `make test-kbuild` — **PASS** (in-OS make now skips the gate; `GKBUILD_LINK_OK`,
+  `GKBUILD_TEST_PASS`, `KEXEC_BOOT_OK`, `GCC_E2E_OK`, `KEXEC_SMP_OK cpus=2`,
+  `KEXEC_CAPABILITY_PASS`; zero FAIL/`posix_spawn` markers).
+
+**Next:** commit + push the hardening, then begin the UEFI thumbdrive boot path.
+
+### 02:00–12:51 — Post-GPT hardening: bounded FAT chain walk, warncheck ratchet, dmesg/versioning, host unit tests
+
+**Current problem:** Per the QA policy ("QA is part of every feature"), the
+freshly-landed GPT feature (commit 91ae5b1) and the kernel needed three
+hardening passes before they can be trusted in production: (1) the FAT
+cluster-chain walk (`get_sector_fromcluster`) was unbounded — a corrupt or
+looping FAT table could make it spin forever or read out of range; (2) the
+kernel was compiled with `-w` (warnings suppressed), so type-unsafe pointer
+patterns could silently regress; (3) there was no way to identify a running
+build or inspect the kernel log after the fact.
+
+**Activity:**
+- **Bounded fail-closed FAT walk.** Added `kernel/filesystem/fat_chain.h`, a
+  pure host-testable decision function `fat_chain_step(next, eoc, maxent,
+  steps)` returning `FCH_OK/EOC/CORRUPT/LOOP`. `get_sector_fromcluster`
+  (`filesystem/fat12.c`) now bounds each step with `fat_cluster_count()`
+  (the real max data-cluster count) and routes the decision through
+  `fat_chain_step`; a corrupt out-of-range next pointer or a chain longer than
+  the volume has clusters fails closed (returns 0, prints
+  `fat: corrupt cluster chain`) instead of looping or reading OOB.
+- **Warning ratchet.** A blanket `-Werror=incompatible-pointer-types` is not
+  viable: a strict trial compile of the `kernel32.c` unity TU surfaced 153
+  pre-existing `incompatible-pointer-types` errors (mostly
+  `hardware/chips/irqhandlers.c` IRQ-handler signatures and
+  `hardware/vga/dexvga.c`; `filesystem/fat12.c` alone has 24). Added a
+  `warncheck` make target in `kernel/Makefile` that strict-synthesizes the
+  new/hardened TUs (`partition/gpt.c`, `console/klog.c`) with
+  `-Werror=incompatible-pointer-types` and is a prerequisite of `obj`, while
+  the legacy unity build keeps `-w`. This ratchets the gate forward without
+  blocking on the legacy backlog. Fixed `console/klog.c` to `#include
+  <stdarg.h>` (it uses `va_list`/`va_start`).
+- **Build versioning + kernel log.** `kernel/Makefile` now generates
+  `kernel/build_info.h` (release id, git short hash, dirty flag, UTC build
+  timestamp) idempotently (rewritten only when the build key changes). Added a
+  fixed-record kernel-log ring (`kernel/console/klog_ring.h`, 96-byte records
+  × 128, ~13 KiB to stay under the 4 MiB ceiling) and `kernel/console/klog.c`
+  (levels, capture hooks, dump). `kernel printf` and `putcEX`
+  (`console/dexio.c`) feed the ring; live console echo is gated by a
+  console-max level. New console commands: enhanced `ver`, plus `version`,
+  `uname [-a|-r|-m|-v]`, and `dmesg [-c|-n <lvl>|-l <lvl>]`. `dex_init`
+  prints the release banner at boot.
+- **Host unit tests + QEMU gate.** `tests/klog_unit.c` (19 TAP assertions:
+  init/empty, append, wrap-around eviction, text truncation, clear) and
+  `tests/fat_chain_unit.c` (10 TAP assertions: valid step, EOC, corrupt
+  next pointer, loop detection, degenerate `maxent=0`). New top-level targets
+  `test-klog-unit` and `test-fatchain-unit`. New `test-klog` QEMU target boots
+  the ISO and runs `version`/`uname`/`uname -a`/`dmesg` via `autoexec.bat`,
+  asserting the release banner, the `x86_64` uname output, and timestamped
+  `[ +… ]` dmesg records.
+
+**Verification (all green):**
+- `make test-klog-unit` — TAP 13, 19/19 ok.
+- `make test-fatchain-unit` — TAP 13, 10/10 ok.
+- `make -C kernel warncheck` — gpt.c + klog.c pass the strict gate.
+- `make -C kernel all` — builds (only the pre-existing RWX LOAD-segment ld
+  warning).
+- `make test-klog` — PASS (banner `release=0.01-dev build=<hash>-dirty`,
+  `uname` x86_64, 128 timestamped dmesg records; no GPF).
+
+**Known follow-up:** the klog ring also captures formatting-only `printf`
+calls (e.g. `printf("\n")`) as near-empty records; a whitespace-only filter in
+`klog_line_end` would tighten it but was left out of this pass. The 153 legacy
+`incompatible-pointer-types` sites are catalogued as the next ratchet batch (see
+`docs/testing-and-qa-modernization-plan.md`).
+
+**Next:** run the full test suite, commit + push, then begin the UEFI
+thumbdrive boot path.
+
 ### 00:30–02:00 — GPT Phase 0 complete: u64 partition metadata, CRC-32, IDE LBA capacity, MBR validation
 
 **Current problem:** GPT support (plan: `ics-os/docs/gpt-support-plan.md`)

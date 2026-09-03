@@ -100,6 +100,7 @@ extern void textcolor(unsigned char c);
 #include "hardware/hardware.h"
 #include "hardware/chips/serial.h"
 #include "memory/kheap.h"
+#include "build_info.h"
 #include "hardware/chips/ports.c"
 #include "hardware/chips/serial.c"
 #include "hardware/vga/dexvga.c"
@@ -172,6 +173,7 @@ extern int cpu_count;
 #include "process/pdispatch.c"
 #include "console/console.c"
 #include "console/dexio.c"
+#include "console/klog.c"
 #include "stdlib/stdlib.c"
 #include "process/dex_taskmgr.c"
 #include "hardware/keyboard/keyboard.c"
@@ -666,12 +668,17 @@ void dex_init(){
    devmgr_block_desc *myblock;
    dex32_datetime date;
     
-   textcolor(GREEN);
-   printf("\n");
-   printf("\t\t");printf(OS_NAME);printf(" ");printf(OS_VERSION);
-   printf(" (Build: %s)\n\n",build_id);
-   textcolor(WHITE);
-   printf("Starting dex_init()...\n");
+   /* Start capturing the kernel log (dmesg) before any further console I/O. */
+    klog_init();
+    textcolor(GREEN);
+    printf("\n");
+    printf("\t\t");printf(OS_NAME);printf(" ");printf(OS_VERSION);
+    printf(" (Build: %s)\n",build_id);
+    printf("  release=%s build=%s%s %s\n",ICSOS_RELEASE,ICSOS_GIT_HASH,
+           (ICSOS_GIT_DIRTY[0]=='1')?"-dirty":"",ICSOS_BUILD_TS);
+    printf("\n");
+    textcolor(WHITE);
+    printf("Starting dex_init()...\n");
    printf("Press space to skip autoexec.bat processing\n");
 
    printf("dex_init address: 0x%x\n",(unsigned)dex_init);

@@ -26,6 +26,7 @@
 */
 
 #include "console.h"
+#include "klog.h"
 
 static int cc1_window_contains(const char *hay, int hlen, const char *needle)
 {
@@ -890,10 +891,56 @@ int console_execute(const char *str){
       printf("New console thread created.\n");                   
    }else  
    if (strcmp(u,"ver") == 0) {         //-- Shows version information.
-      printf("%s\n",dex32_versionstring);
-      printf("%s\n",OS_VERSION);
-   }else
-   if (strcmp(u,"cpuid") == 0){        //-- Displays CPU information. 
+       printf("%s\n",dex32_versionstring);
+       printf("%s\n",OS_VERSION);
+       printf("release=%s build=%s%s %s\n",ICSOS_RELEASE,ICSOS_GIT_HASH,
+              (ICSOS_GIT_DIRTY[0]=='1')?"-dirty":"",ICSOS_BUILD_TS);
+    }else
+    if (strcmp(u,"version") == 0) {     //-- Full version banner.
+       printf("%s %s\n",OS_NAME,OS_VERSION);
+       printf("release=%s build=%s%s %s\n",ICSOS_RELEASE,ICSOS_GIT_HASH,
+              (ICSOS_GIT_DIRTY[0]=='1')?"-dirty":"",ICSOS_BUILD_TS);
+    }else
+    if (strcmp(u,"uname") == 0) {       //-- Kernel build info: -a -r -m -v (no arg = name+release)
+       char *a = strtok(0," ");
+       if (a != 0 && a[0]=='-' && a[1]=='r') {
+          printf("%s\n",ICSOS_RELEASE);
+       } else if (a != 0 && a[1]=='m') {
+          printf("x86_64\n");
+       } else if (a != 0 && a[1]=='v') {
+          printf("%s %s build=%s%s %s\n",OS_NAME,OS_VERSION,ICSOS_GIT_HASH,
+                 (ICSOS_GIT_DIRTY[0]=='1')?"-dirty":"",ICSOS_BUILD_TS);
+       } else if (a != 0 && a[1]=='a') {
+          printf("%s %s %s %s %s x86_64 build=%s%s\n",OS_NAME,OS_VERSION,
+                 ICSOS_RELEASE,KERNEL_NAME,ICSOS_BUILD_TS,ICSOS_GIT_HASH,
+                 (ICSOS_GIT_DIRTY[0]=='1')?"-dirty":"");
+       } else {
+          printf("%s %s %s x86_64\n",OS_NAME,OS_VERSION,ICSOS_RELEASE);
+       }
+    }else
+    if (strcmp(u,"dmesg") == 0) {       //-- Dump kernel log: -c | -n <0-7> | -l <0-7> (no arg = all)
+       char *a = strtok(0," ");
+       if (a != 0 && a[0]=='-' && a[1]=='c') {
+          klog_clear();
+          printf("dmesg: log cleared\n");
+       } else if (a != 0 && a[0]=='-' && a[1]=='n') {
+          char *v = strtok(0," ");
+          if (v != 0) {
+             klog_console_max_set((unsigned char)atoi(v));
+             printf("dmesg: console log level set to %d\n",klog_console_max_get());
+          } else
+             printf("dmesg: usage: dmesg -n <0-7>\n");
+       } else if (a != 0 && a[0]=='-' && a[1]=='l') {
+          char *v = strtok(0," ");
+          if (v != 0)
+             klog_dump(atoi(v));
+          else
+             printf("dmesg: usage: dmesg -l <0-7>\n");
+       } else {
+          klog_dump(-1);
+       }
+    }else
+    if (strcmp(u,"cpuid") == 0){        //-- Displays CPU information.
       hardware_cpuinfo mycpu;
       hardware_getcpuinfo(&mycpu);
       hardware_printinfo(&mycpu);

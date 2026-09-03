@@ -16,6 +16,7 @@ ics-os/kernel/Kernel64.bin
 ics-os/kernel/Kernel64.sym
 ics-os/kernel/*.o
 ics-os/kernel/cpu/*.o
+ics-os/kernel/build_info.h
 ics-os/tmp/
 ics-os/tmp-usb/
 ics-os/contrib/**/*.exe

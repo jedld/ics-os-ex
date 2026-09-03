@@ -737,10 +737,10 @@ static int gmake_kbuild_run(const char *make, const char *root, const char *cc,
    free(tar);
 
    sprintf(cmd,
-         "%s -C %s -f Makefile bzImage "
-         "CC=%s LD=%s OBJCOPY=/icsos/apps/objcopy.exe "
-           "CP=/icsos/apps/cp.exe DEBUGFLAGS= MAPFLAGS= TOOLPREFIX=%s",
-           make, root, cc, ld, toolprefix ? toolprefix : "");
+          "%s -C %s -f Makefile bzImage INOS=1 "
+          "CC=%s LD=%s OBJCOPY=/icsos/apps/objcopy.exe "
+            "CP=/icsos/apps/cp.exe DEBUGFLAGS= MAPFLAGS= TOOLPREFIX=%s",
+            make, root, cc, ld, toolprefix ? toolprefix : "");
    printf("GKBUILD_ORCHESTRATOR GNU_MAKE_3_82\n");
    printf("GKBUILD_COMPILER_PROVENANCE %s\n", provenance);
    if (!user_execp((char *)make, 0, cmd)) {

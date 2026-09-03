@@ -28,6 +28,7 @@
 
 #include "../dextypes.h"
 #include "fat12.h"
+#include "fat_chain.h"
 #include "../devmgr/dex32_devmgr.h"
 #include "../iomgr/iosched.h"
 #include "../vfs/vfs_core.h"
@@ -811,27 +812,53 @@ DWORD getdirsectorsize(fatdirentry *dir,BPB *bpbblock,int func,BYTE *fat,int id)
 
 DWORD get_sector_fromcluster(DWORD cluster,BPB *bpbblock,int func,BYTE *fat, int id)
 {
-   DWORD i,x,b,cur = cluster; //obtain starting cluster
-   WORD index,*temp;
-   int ret=0;
-   int fat_type;
-      
-   if (cluster==0) return 0;
-   
-   fat_type = fat_get_fat_type(id, bpbblock);
-   
-   do {
-   
-      cur = cluster;
-      cluster = obtain_next_cluster(cluster, fat, fat_type, bpbblock,id);
-      ret++;
-   }
-   while (cluster<fat_get_eoc(fat_type));
-   
-   if (func==1) //function 1: return last cluster
-      return cur;
-   else
-      return (ret * bpbblock->sectors_per_cluster); //function 2: return total *sectors*
+    DWORD cur = cluster; //obtain starting cluster
+    int ret=0;
+    int fat_type;
+    int maxent;
+
+    if (cluster==0) return 0;
+
+    fat_type = fat_get_fat_type(id, bpbblock);
+
+    /* Fail-closed bound on the chain walk. A valid chain has at most one
+       entry per data cluster, so a walk longer than the volume's cluster count
+       is a loop, and a next-pointer above that count is out of range. Abort
+       instead of running forever. This is the regression guard for the GPT
+       FAT32 pointer-arity hang (a corrupt/mis-read FAT used to cycle the
+       walker unboundedly). */
+    maxent = fat_cluster_count(bpbblock);
+    if (maxent <= 0)
+       maxent = 1;
+
+    for (;;) {
+       DWORD next;
+       int rc;
+       cur = cluster;
+       next = (DWORD)obtain_next_cluster(cluster, fat, fat_type, bpbblock,id);
+       ret++;
+       rc = fat_chain_step((unsigned)next, (unsigned)fat_get_eoc(fat_type),
+                           (unsigned)maxent, (unsigned)ret);
+       if (rc == FCH_CORRUPT) {
+          printf("fat: corrupt cluster chain at %u (next=%u > max=%d)\n",
+                 (unsigned)cluster,(unsigned)next,maxent);
+          return 0;
+       }
+       if (rc == FCH_LOOP) {
+          printf("fat: corrupt cluster chain from %u (bounded after %d)\n",
+                 (unsigned)cluster,maxent);
+          return 0;
+       }
+       if (rc == FCH_EOC)
+          break;
+       /* FCH_OK: advance to the next cluster */
+       cluster = next;
+    }
+
+    if (func==1) //function 1: return last cluster
+       return cur;
+    else
+       return (ret * bpbblock->sectors_per_cluster); //function 2: return total *sectors*
 };
 
 DWORD update_dirs(BPB *bpbblock,vfs_node *tdir,BYTE *fat,int id)

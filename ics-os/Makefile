@@ -17,7 +17,7 @@ QEMU_KERNEL=-kernel kernel/Kernel64.bin
 vmdex:
 	make -C kernel/
 
-.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-integration test-posixio test-termtest test-vim test-dup test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-partition-unit test-gpt-unit test-gpt test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-multi-controller test-usb-storage-xhci-sg test-usb-storage-xhci-bounce test-usb-storage-xhci-vtd-discovery test-usb-storage-xhci-msix test-usb-storage-xhci-msix-recovery test-usb-storage-xhci-vector-reservation test-usb-storage-xhci-poll test-usb-storage-xhci-high-bar test-usb-storage-xhci-recovery test-usb-storage-xhci-stall-recovery test-usb-storage-xhci-disconnect test-usb-storage-xhci-mounted-disconnect test-usb-storage-xhci-mounted-reconnect test-usb-storage-xhci-mounted-remount test-usb-storage-xhci-hotplug test-usb-storage-xhci-hotplug-identity-mismatch test-usb-storage-xhci-late-attach test-usb-storage-xhci-reconnect test-usb-storage-xhci-reconnect-mismatch test-usb-storage-xhci-reconnect-identity-mismatch test-usb-storage-xhci-no-device
+.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-klog test-integration test-posixio test-termtest test-vim test-dup test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-partition-unit test-gpt-unit test-klog-unit test-fatchain-unit test-gpt test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-multi-controller test-usb-storage-xhci-sg test-usb-storage-xhci-bounce test-usb-storage-xhci-vtd-discovery test-usb-storage-xhci-msix test-usb-storage-xhci-msix-recovery test-usb-storage-xhci-vector-reservation test-usb-storage-xhci-poll test-usb-storage-xhci-high-bar test-usb-storage-xhci-recovery test-usb-storage-xhci-stall-recovery test-usb-storage-xhci-disconnect test-usb-storage-xhci-mounted-disconnect test-usb-storage-xhci-mounted-reconnect test-usb-storage-xhci-mounted-remount test-usb-storage-xhci-hotplug test-usb-storage-xhci-hotplug-identity-mismatch test-usb-storage-xhci-late-attach test-usb-storage-xhci-reconnect test-usb-storage-xhci-reconnect-mismatch test-usb-storage-xhci-reconnect-identity-mismatch test-usb-storage-xhci-no-device
 
 test-io-unit:
 	@mkdir -p /tmp/icsos-tests
@@ -33,6 +33,16 @@ test-gpt-unit:
 	@mkdir -p /tmp/icsos-tests
 	@gcc -std=gnu89 -Wall -Wextra -Werror -I. tests/gpt_unit.c -o /tmp/icsos-tests/gpt_unit
 	@/tmp/icsos-tests/gpt_unit
+
+test-klog-unit:
+	@mkdir -p /tmp/icsos-tests
+	@gcc -std=gnu89 -Wall -Wextra -Werror -I. tests/klog_unit.c -o /tmp/icsos-tests/klog_unit
+	@/tmp/icsos-tests/klog_unit
+
+test-fatchain-unit:
+	@mkdir -p /tmp/icsos-tests
+	@gcc -std=gnu89 -Wall -Wextra -Werror -I. tests/fat_chain_unit.c -o /tmp/icsos-tests/fat_chain_unit
+	@/tmp/icsos-tests/fat_chain_unit
 
 # Deterministic 64 MiB GPT disk (slot 0: 32 MiB FAT32, slot 1: 16 MiB ext4).
 ics-os-gpt.img: scripts/mkgpt.sh
@@ -197,6 +207,27 @@ test-boot: vmdex
 	@grep -aq "AP scheduling enabled" /tmp/icsos-boot.log
 	@! grep -aq "General Protection fault" /tmp/icsos-boot.log
 	@echo "test-boot PASS"
+
+test-klog: vmdex
+	@echo "Building Multiboot2 ISO for version/dmesg boot test..."
+	@rm -rf /tmp/icsos-klog-iso
+	@mkdir -p /tmp/icsos-klog-iso/boot/grub
+	@cp kernel/Kernel64.bin /tmp/icsos-klog-iso/vmdex
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-klog-iso/boot/grub/grub.cfg
+	@printf '%s\n' '@echo off' 'version' 'uname' 'uname -a' 'dmesg' \
+		> /tmp/icsos-klog-iso/autoexec.bat
+	@grub-mkrescue -o /tmp/icsos-klog.iso /tmp/icsos-klog-iso >/dev/null 2>&1
+	@echo "Running version/dmesg boot test..."
+	@-timeout 40 $(QEMU_X64) -smp 2 -nographic -no-reboot -m $(QEMU_MEM) \
+		-cdrom /tmp/icsos-klog.iso -boot d < /dev/null > /tmp/icsos-klog.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-klog.log
+	@grep -aq "release=0.01-dev build=" /tmp/icsos-klog.log
+	@grep -aq "ICS Operating System (master)" /tmp/icsos-klog.log
+	@grep -aq "x86_64" /tmp/icsos-klog.log
+	@grep -aq "\[ +" /tmp/icsos-klog.log
+	@! grep -aq "General Protection fault" /tmp/icsos-klog.log
+	@echo "test-klog PASS"
 
 test-usb-storage: vmdex ics-os-usb.img
 	@chmod +x scripts/test-qemu-uhci-storage.sh

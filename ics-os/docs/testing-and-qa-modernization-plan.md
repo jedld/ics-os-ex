@@ -116,8 +116,8 @@ multi-vCPU repeated clone/close/exit stress remain Phase 4 requirements.
 | Capability | Current rating | Evidence and consequence |
 |---|---:|---|
 | Reproducible developer environment | Partial | Ubuntu container and dependency script exist, but packages and emulator behavior are not pinned to immutable versions. |
-| Compile and link validation | Partial | Canonical builds work, but kernel and SDK flags suppress all warnings and several app builds are non-fatal. |
-| Host-native unit tests | Emerging | `test-io-unit` has 98 TAP cases covering cache/device lifecycle, completion retention, USB media identity, coherent/streaming/SG/bounce DMA ownership, IRQ domains, generic IOMMU requester/mapping/fault policy, and valid/malformed DMAR structures; `test-partition-unit` adds 15 TAP cases for the partition layer (IEEE CRC-32 vectors/chunking, ATA LBA28/LBA48 capacity decode); no general runner, fixture API, translating hardware-IOMMU backend, or coverage gate exists yet. |
+| Compile and link validation | Partial | Canonical builds work, but the kernel unity TU is still built with `-w`; a `warncheck` ratchet now strict-gates the hardened TUs (`gpt.c`, `klog.c`) with `-Werror=incompatible-pointer-types` as a prerequisite of `obj` (153 legacy sites remain), and several app builds are non-fatal. |
+| Host-native unit tests | Emerging | `test-io-unit` has 98 TAP cases covering cache/device lifecycle, completion retention, USB media identity, coherent/streaming/SG/bounce DMA ownership, IRQ domains, generic IOMMU requester/mapping/fault policy, and valid/malformed DMAR structures; `test-partition-unit` adds 15 TAP cases for the partition layer (IEEE CRC-32 vectors/chunking, ATA LBA28/LBA48 capacity decode); `test-klog-unit` adds 19 TAP cases for the kernel-log ring (init/empty, append, wrap-around eviction, text truncation, clear) and `test-fatchain-unit` adds 10 TAP cases for the bounded FAT cluster-chain walk (valid step, EOC, corrupt next pointer, loop detection, degenerate maxent); no general runner, fixture API, translating hardware-IOMMU backend, or coverage gate exists yet. |
 | In-kernel unit tests | Missing | No suite/case registration or assertion runner; the common kernel `assert()` is a no-op. |
 | Guest API selftests | Emerging | Several user programs test real APIs, but each invents marker strings and orchestration. |
 | QEMU functional tests | Good foundation | Twenty-five `test-*` targets cover important vertical slices. |
@@ -154,7 +154,7 @@ timeouts, crashes, skips, and artifacts.
 
 | Group | Current targets | What they prove | Principal limitation |
 |---|---|---|---|
-| Boot and scheduler | `test-boot`, `test-smp` | GRUB/Multiboot2 boot, root mount, AP startup, basic work stealing, no observed GPF | Small fixed scenario; no topology, hotplug, preemption, lock, or long-run matrix |
+| Boot and scheduler | `test-boot`, `test-smp`, `test-klog` | GRUB/Multiboot2 boot, root mount, AP startup, basic work stealing, no observed GPF; `test-klog` adds the build banner plus `version`/`uname`/`dmesg` console-observability gate (timestamped kernel-log records) | Small fixed scenario; no topology, hotplug, preemption, lock, or long-run matrix |
 | Process and ABI | `test-exec`, `test-spawn`, `test-vim`, `test-dup` | ELF64 load/execute (`hello`, `spawn`, and the FEAT_TINY vim TUI via non-interactive `vim --version`), `posix_spawn()`, `waitpid()`, writable work disk, and `dup(2)` (`0xC5`) runtime semantics | Smoke cases only; vim gate checks the version banner and clean exit, not editor behavior; spawn test does not assert decoded child status or abnormal exits; `test-dup` proves `dup()` allocates a distinct slot, that a dup'd tty fd is closable, and that a dup'd file fd shares the open description (write-through-duplicate visible after `fsync()`) |
 | Fork | `test-fork`, `test-fork-matrix` | COW return ABI and isolation, one-owner fast path, immutable text, injected COW OOM, inherited fd, wait/exit semantics, and ten-child delayed reap on 1/2/4/8 vCPUs | Active CPL0 user/syscall stacks are eager-copied; no shootdown-loss, DMA-pin, unmap-race, multithread rejection, or in-flight io_uring rejection case yet |
 | Storage and async I/O | `test-iobench`, `test-virtio`, `test-posixio` | CD/page-cache behavior, virtio-blk DMA/MSI-X, selected POSIX and io_uring operations | Mostly one vCPU; no saturation, cancellation, reset, ENOSPC, corruption, or durability matrix |
@@ -164,6 +164,7 @@ timeouts, crashes, skips, and artifacts.
 | Strict closure | `test-selfhost-cert` | Intended GCC rebuild, rebuilt Make, provenance, kernel rebuild, kexec, and capability loop | Eight-hour timeout, one vCPU, hard-coded object count, and strict closure not yet a consistently green release gate |
 | Optional TinyCC | `test-selfhost`, `test-tccboot`, `test-tcc-kbuild`, `test-tcc-fullhost`, `test-fullhost` aliasing GCC path | Bootstrap experiments and compatibility | Must remain non-blocking for the supported GCC policy |
 | Aggregate | `test-integration` | Runs boot, SMP, and exec | Its name overstates scope: it excludes storage, POSIX, devices, tools, GCC, and self-hosting |
+| Host unit tests | `test-io-unit`, `test-partition-unit`, `test-gpt-unit`, `test-klog-unit`, `test-fatchain-unit` | Pure-logic verification off-target: I/O cache/device lifecycle and DMAR, IEEE CRC-32 and ATA LBA28/LBA48 decode, GPT detection/parsing/CRC, kernel-log ring semantics (init/append/wrap/truncate/clear), and the bounded fail-closed FAT cluster-chain walk | Host-only; no in-kernel or guest execution, no coverage gate |
 
 ### 2.3 Strengths to preserve
 
@@ -594,6 +595,33 @@ Introduce gates in this order:
 
 Warnings are evidence, not style noise. Suppressions require a narrow scope,
 rationale, owner, and expiry or upstream compatibility reason.
+
+**Current state (2026-09-03).** The kernel is still compiled with `-w` for the
+legacy `kernel32.c` unity TU: a strict trial compile
+(`-Werror=incompatible-pointer-types`) surfaces **153** pre-existing
+`incompatible-pointer-types` errors, concentrated in
+`hardware/chips/irqhandlers.c` (IRQ-handler signatures) and
+`hardware/vga/dexvga.c`, with `filesystem/fat12.c` alone carrying 24. Rather
+than block the build on that backlog, `kernel/Makefile` now runs a **warning
+ratchet**: a `warncheck` target strict-synthesizes the new/hardened TUs
+(`partition/gpt.c`, `console/klog.c`) with `-Werror=incompatible-pointer-types`
+and is a prerequisite of `obj`, so the gate only tightens. The 153 legacy
+sites are the next ratchet batch; as each TU is cleaned it is added as a
+recipe line in `warncheck`, and once all are clean `-w` is dropped and the flag
+becomes global.
+
+Three implementation gotchas (all verified by running the gate, 2026-09-03):
+- The gate must strip `-w` before adding the error flag: use
+  `$(filter-out -w,$(CFLAGS))`, not `$(CFLAGS: -w=)` (the substitution
+  reference silently leaves a bare `-w` word in place, making `-Werror` a
+  no-op).
+- Each check is a separate *simple* recipe line (no shell metacharacters): the
+  in-OS kbuild make (`contrib/gnumake/job-icsos.patch`) direct-execs simple
+  lines via `posix_spawn` and has no `/bin/sh` for a `for`-loop recipe.
+- `warncheck` is a no-op when `INOS=1` (passed by the in-OS
+  `gmake_kbuild_run`): the in-OS gcc driver cannot run `-fsyntax-only` (it
+  always expects assembly output) and the in-OS kbuild is a build-capability
+  cert, so the strict gate is enforced by the host build.
 
 ### 6.2 Memory and concurrency diagnostics
 
