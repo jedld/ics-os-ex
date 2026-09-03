@@ -13,11 +13,14 @@ FORK_MATRIX?=1 2 4 8
 QEMU_NET=-net nic,model=rtl8139 -net none
 # QEMU can load the 32-bit multiboot kernel the same way GRUB does.
 QEMU_KERNEL=-kernel kernel/Kernel64.bin
+# UEFI firmware (OVMF) for UEFI thumbdrive/ISO boot tests. Empty if not installed.
+OVMF_FD := $(firstword $(wildcard /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF.fd))
+UEFI_MEM=512M
 
 vmdex:
 	make -C kernel/
 
-.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-klog test-integration test-posixio test-termtest test-vim test-dup test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-partition-unit test-gpt-unit test-klog-unit test-fatchain-unit test-gpt test-vbox-usb-image test-vbox-usb-image-efi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-multi-controller test-usb-storage-xhci-sg test-usb-storage-xhci-bounce test-usb-storage-xhci-vtd-discovery test-usb-storage-xhci-msix test-usb-storage-xhci-msix-recovery test-usb-storage-xhci-vector-reservation test-usb-storage-xhci-poll test-usb-storage-xhci-high-bar test-usb-storage-xhci-recovery test-usb-storage-xhci-stall-recovery test-usb-storage-xhci-disconnect test-usb-storage-xhci-mounted-disconnect test-usb-storage-xhci-mounted-reconnect test-usb-storage-xhci-mounted-remount test-usb-storage-xhci-hotplug test-usb-storage-xhci-hotplug-identity-mismatch test-usb-storage-xhci-late-attach test-usb-storage-xhci-reconnect test-usb-storage-xhci-reconnect-mismatch test-usb-storage-xhci-reconnect-identity-mismatch test-usb-storage-xhci-no-device
+.PHONY: vmdex clean usb floppy livecd apps test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-smp test-smp-matrix test-boot test-klog test-integration test-posixio test-termtest test-vim test-dup test-spawn test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-io-unit test-partition-unit test-gpt-unit test-klog-unit test-fatchain-unit test-gpt test-vbox-usb-image test-vbox-usb-image-efi test-usb-uefi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-multi-controller test-usb-storage-xhci-sg test-usb-storage-xhci-bounce test-usb-storage-xhci-vtd-discovery test-usb-storage-xhci-msix test-usb-storage-xhci-msix-recovery test-usb-storage-xhci-vector-reservation test-usb-storage-xhci-poll test-usb-storage-xhci-high-bar test-usb-storage-xhci-recovery test-usb-storage-xhci-stall-recovery test-usb-storage-xhci-disconnect test-usb-storage-xhci-mounted-disconnect test-usb-storage-xhci-mounted-reconnect test-usb-storage-xhci-mounted-remount test-usb-storage-xhci-hotplug test-usb-storage-xhci-hotplug-identity-mismatch test-usb-storage-xhci-late-attach test-usb-storage-xhci-reconnect test-usb-storage-xhci-reconnect-mismatch test-usb-storage-xhci-reconnect-identity-mismatch test-usb-storage-xhci-no-device
 
 test-io-unit:
 	@mkdir -p /tmp/icsos-tests
@@ -173,14 +176,38 @@ boot-usb-storage:
 		-device piix3-usb-uhci,id=uhci \
 		-device usb-storage,bus=uhci.0,drive=stick
 
-boot-usb-uefi:
-	$(QEMU_X64) $(QEMU_NET) -m $(QEMU_MEM) -bios /usr/share/ovmf/OVMF.fd \
-		-drive file=ics-os-livecd.iso,format=raw,if=ide -boot c
+# Boot the UEFI thumbdrive image from a USB mass-storage device under OVMF.
+# (The realistic thumbdrive path: OVMF loads EFI/BOOT/BOOTX64.EFI, then the
+#  kernel re-detects the USB mass-storage device and mounts it as root.)
+boot-usb-uefi: usb
+	@test -n "$(OVMF_FD)" || { echo "OVMF firmware not found (install ovmf)."; exit 1; }
+	$(QEMU_X64) $(QEMU_NET) -m $(UEFI_MEM) -smp 2 -bios $(OVMF_FD) \
+		-drive if=none,id=stick,format=raw,file=ics-os-usb.img \
+		-device piix3-usb-uhci,id=uhci \
+		-device usb-storage,bus=uhci.0,drive=stick
 
 # Headless emulator smoke tests (serial console, no VGA window).
 test-usb:
 	timeout 45 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(QEMU_MEM) \
 		$(QEMU_DISK_BOOT)
+
+# UEFI thumbdrive boot: OVMF loads EFI/BOOT/BOOTX64.EFI from the USB stick,
+# then the kernel re-detects the USB mass-storage device and mounts it as root.
+test-usb-uefi: usb
+	@echo "Boot-testing USB thumbdrive image via UEFI (OVMF)..."
+	@test -n "$(OVMF_FD)" || { echo "OVMF firmware not found (install ovmf)."; exit 1; }
+	@-timeout 50 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(UEFI_MEM) -smp 2 \
+		-bios $(OVMF_FD) \
+		-drive if=none,id=stick,format=raw,file=ics-os-usb.img \
+		-device piix3-usb-uhci,id=uhci \
+		-device usb-storage,bus=uhci.0,drive=stick \
+		< /dev/null > /tmp/icsos-uefi-usb.log 2>&1
+	@grep -aq "serial console ready" /tmp/icsos-uefi-usb.log
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-uefi-usb.log
+	@grep -aq "Root filesystem is the USB mass-storage device" /tmp/icsos-uefi-usb.log
+	@grep -aq "AP scheduling enabled" /tmp/icsos-uefi-usb.log
+	@! grep -aq "General Protection fault" /tmp/icsos-uefi-usb.log
+	@echo "test-usb-uefi PASS"
 
 test-usb-amd64: vmdex
 	@mkdir -p /tmp/icsos-boot-iso/boot/grub

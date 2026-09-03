@@ -277,6 +277,15 @@ serials, ext4 UUIDs, and ISO9660 volume identifiers. The no-device target
 requires bounded probe failure, no `usb0` registration, and continued console
 operation.
 
+`make test-usb-uefi` is the UEFI thumbdrive boot lane: it boots the thumbdrive
+image itself under OVMF from a USB mass-storage device (the realistic
+removable-media path, not the ISO/IDE path) and requires OVMF firmware handoff
+(`BdsDxe` loading `EFI/BOOT/BOOTX64.EFI`), `usb0p0` root selection, `Root mount
+[OK]`, and AP scheduling with no GPF. `make boot-usb-uefi` is the interactive
+(windowed) variant of the same boot. Both require the OVMF firmware to be
+installed (the Makefile auto-detects `/usr/share/ovmf/OVMF.fd`); the test fails
+clearly if it is absent.
+
 The first implementation target is a virtual bus/device and sample async driver,
 followed by the IRQ and DMA foundations and a complete virtio-blk lifecycle. Do not
 attempt all hardware classes in parallel before those correctness gates pass.

@@ -3588,6 +3588,59 @@ regenerates GMP/MPFR/MPC from `references/` (when a `.a` is missing) and builds
 a link-clean `cc1`.
 
 **Next:** in-OS validation via QEMU — stage `cc1` to `/work`, wire a
-`make test-cc1`, run it in-OS to compile a trivial `.c` and confirm runnable
-output (host `./cc1 --version` is meaningless: the SDK uses the ICS-OS
-`int 0x30` syscall ABI).
+ `make test-cc1`, run it in-OS to compile a trivial `.c` and confirm runnable
+ output (host `./cc1 --version` is meaningless: the SDK uses the ICS-OS
+ `int 0x30` syscall ABI).
+
+## 2026-09-03 (Manila, UTC+8)
+
+### 19:30–21:00 — UEFI thumbdrive boot: first-class `make` target + automated test, and a kernel-build default-goal bug fix
+
+Continuing the UEFI thumbdrive boot objective. The proof-of-concept (OVMF loads
+`EFI/BOOT/BOOTX64.EFI` from a USB stick, then the kernel re-detects the USB
+mass-storage device and mounts it as root) was already verified by hand; this
+session turned it into a maintained build target and a regression test, and
+fixed a real build-pipeline bug found along the way.
+
+**Build-pipeline bug (root-caused & fixed):** the earlier "kernel log + build
+versioning" change added a `build_info.h:` target to the top of `kernel/Makefile`,
+which made it the new *default goal*. So `make -C kernel/` (what the top-level
+`vmdex:` target runs) only regenerated the header and silently shipped a stale
+kernel image — kernel `.c` edits were never recompiled by the normal build.
+Fixed with an explicit `.DEFAULT_GOAL := bzImage` so the full kernel image is
+always the default build goal.
+
+**UEFI thumbdrive targets (`ics-os/Makefile`):**
+- `boot-usb-uefi` now boots the *thumbdrive* image (`ics-os-usb.img`) from a USB
+  mass-storage device under OVMF (it was booting the ISO via IDE, which does not
+  represent a real thumbdrive). It depends on `usb` so the image always reflects
+  the current kernel, and fails clearly if OVMF is not installed.
+- New `test-usb-uefi`: headless QEMU + OVMF (`/usr/share/ovmf/OVMF.fd`) + UHCI
+  `usb-storage`, serial oracle. Asserts `serial console ready`, `usb: registered
+  usb0p0`, `Root filesystem is the USB mass-storage device.`, `Root mount [OK]`,
+  `AP scheduling enabled`, and no GPF. Added to `.PHONY`.
+- Added an auto-detected `OVMF_FD` path variable and `UEFI_MEM=512M`.
+
+**Boot-device diagnostic (documented, not changed):** under UEFI, GRUB leaves the
+multiboot2 `boot_device` field unset, so the kernel's BIOS-era "assume CD"
+heuristic reports `boot_device_name=cds0` for a USB/disk UEFI boot. This is
+cosmetic only — the root-mount scan still prefers the USB mass-storage device, so
+the actual root is identified correctly. Setting it to empty would break the
+existing `test-usb-storage` assertion (`boot_device_name=cds0`), so it is left
+as-is and documented in `kernel32.c`.
+
+**IDE MBR note (pre-existing, not fixed):** booting the thumbdrive via *IDE*
+(BIOS or UEFI) fails with `PART_SCAN hdp0 bad MBR signature` even though the host
+image MBR is valid; the IDE sector-read/init path needs separate work. The UEFI
+thumbdrive path uses USB mass storage, so this does not block the feature.
+
+Verification (all green, serial oracle):
+- `make test-usb-uefi` → PASS (OVMF USB-mass-storage thumbdrive root).
+- `make test-boot` → PASS (ISO CD root; `Root filesystem is the CD-ROM`).
+- `make test-klog` → PASS; `make test-smp` (4 CPU) → PASS; `make test-exec` → PASS.
+- `make test-usb-storage` (UHCI, persistent write + host readback) → PASS.
+- Kernel host build clean; the `kernel32.c` change is comment-only.
+
+**Next:** IDE MBR partition-scan fix (so the thumbdrive also boots via IDE), and
+optionally a split-OVMF (pflash) variant in the test for hosts without the
+combined `OVMF.fd`.

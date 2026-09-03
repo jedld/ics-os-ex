@@ -401,7 +401,10 @@ void main(){
    }
 
    /* Floppy (BIOS 0) is unreliable under Multiboot2/QEMU ISO; prefer CD.
-      Real Multiboot1 floppy boots can still force fd0 via an explicit image. */
+      Real Multiboot1 floppy boots can still force fd0 via an explicit image.
+      Note: under UEFI GRUB also leaves this field unset, so a USB/disk UEFI
+      boot reports the "cds0" default here; the root-mount scan still prefers
+      the USB mass-storage device, so the actual root is identified correctly. */
    if (kernel_systeminfo.boot_device == 0 || kernel_systeminfo.boot_device >= 0xE0){
       strcpy(boot_device_name,"cds0");
    }else{ //hard disk or USB presented as a BIOS disk

@@ -41,6 +41,10 @@ create/write/`fsync`, synchronous SCSI cache flush, VM termination, and
 byte-for-byte host readback. The QEMU gates boot from a separate CD and assert
 the selected HCD plus `usb0p0` root selection. An xHCI no-device lane checks
 bounded failure, no accidental USB registration, and continued console startup.
+A `test-usb-uefi` lane boots the thumbdrive image itself under OVMF from a USB
+mass-storage device (the realistic removable-media path, not the ISO/IDE path)
+and asserts UEFI firmware handoff (`BdsDxe` loading `BOOTX64.EFI`), `usb0p0` root
+selection, `Root mount [OK]`, and AP scheduling with no GPF.
 The MSI-X lane requires delivery on a dynamically allocated device vector and an
 interrupt-enabled waiter woken by an xHCI IRQ; the forced-poll lane disables
 MSI-X and preserves the same
@@ -154,7 +158,7 @@ timeouts, crashes, skips, and artifacts.
 
 | Group | Current targets | What they prove | Principal limitation |
 |---|---|---|---|
-| Boot and scheduler | `test-boot`, `test-smp`, `test-klog` | GRUB/Multiboot2 boot, root mount, AP startup, basic work stealing, no observed GPF; `test-klog` adds the build banner plus `version`/`uname`/`dmesg` console-observability gate (timestamped kernel-log records) | Small fixed scenario; no topology, hotplug, preemption, lock, or long-run matrix |
+| Boot and scheduler | `test-boot`, `test-smp`, `test-klog`, `test-usb-uefi` | GRUB/Multiboot2 boot, root mount, AP startup, basic work stealing, no observed GPF; `test-klog` adds the build banner plus `version`/`uname`/`dmesg` console-observability gate (timestamped kernel-log records); `test-usb-uefi` boots the USB thumbdrive under OVMF from a USB mass-storage device and asserts UEFI firmware handoff, `usb0p0` root selection, and AP scheduling | Small fixed scenario; no topology, hotplug, preemption, lock, or long-run matrix |
 | Process and ABI | `test-exec`, `test-spawn`, `test-vim`, `test-dup` | ELF64 load/execute (`hello`, `spawn`, and the FEAT_TINY vim TUI via non-interactive `vim --version`), `posix_spawn()`, `waitpid()`, writable work disk, and `dup(2)` (`0xC5`) runtime semantics | Smoke cases only; vim gate checks the version banner and clean exit, not editor behavior; spawn test does not assert decoded child status or abnormal exits; `test-dup` proves `dup()` allocates a distinct slot, that a dup'd tty fd is closable, and that a dup'd file fd shares the open description (write-through-duplicate visible after `fsync()`) |
 | Fork | `test-fork`, `test-fork-matrix` | COW return ABI and isolation, one-owner fast path, immutable text, injected COW OOM, inherited fd, wait/exit semantics, and ten-child delayed reap on 1/2/4/8 vCPUs | Active CPL0 user/syscall stacks are eager-copied; no shootdown-loss, DMA-pin, unmap-race, multithread rejection, or in-flight io_uring rejection case yet |
 | Storage and async I/O | `test-iobench`, `test-virtio`, `test-posixio` | CD/page-cache behavior, virtio-blk DMA/MSI-X, selected POSIX and io_uring operations | Mostly one vCPU; no saturation, cancellation, reset, ENOSPC, corruption, or durability matrix |

@@ -40,6 +40,7 @@ Useful individual targets (from `ics-os/`):
 | `test-tcc-kbuild` | Optional TinyCC kernel experiment; not a supported-path gate |
 | `test-iobench` | CD sequential map; 4KiB page cache hits; `IOBENCH_PASS` + `IOBENCH_CACHE_OK` |
 | `test-usb-storage` | UHCI USB root; guest write + SCSI cache sync + host readback |
+| `test-usb-uefi` | OVMF UEFI boot of the USB thumbdrive image via USB mass-storage; USB root + AP scheduling |
 | `test-usb-storage-xhci` | q35 xHCI USB root; guest write + SCSI cache sync + host readback |
 | `test-usb-storage-xhci-multi-controller` | Empty HCD 0 is skipped; HCD 1 delivers MSI-X and persists USB-root writes |
 | `test-usb-storage-xhci-sg` | Chained multi-segment xHCI bulk TDs with MSI-X and persistent write |

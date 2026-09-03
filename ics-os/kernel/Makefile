@@ -17,6 +17,11 @@ MAPFLAGS=-Map mapfile.txt
 # Release identifier (override on the make command line, e.g. RELEASE_ID=1.0).
 RELEASE_ID ?= 0.01-dev
 
+# Explicit default goal: the full kernel image. build_info.h is listed below
+# but must NOT shadow the default goal, or `make -C kernel/` (used by the
+# top-level vmdex target) would only regenerate the header and ship a stale image.
+.DEFAULT_GOAL := bzImage
+
 # Generate build_info.h (release id + git short hash + dirty flag + UTC build
 # timestamp). The recipe always runs but only rewrites the file when the
 # (hash, dirty, release) triple changes, so the timestamp is stable across
