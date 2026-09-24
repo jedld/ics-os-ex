@@ -1,6 +1,64 @@
 # Development blog
 
+## 2026-09-25 (Manila, UTC+8)
+
+### 00:55 — GUI shell input/echo fixed; absent COM1 no longer floods the tty
+**Current problem / activity:** The manual GUI boot now reached the shell, but typed characters were not echoed and Enter triggered `execp: loading /icsos/apps...` / `Command or executable not found.` with no visible command line.
+
+- Diagnosed the live QEMU instance with QMP `screendump` and font-based OCR of the guest framebuffer; the screen showed repeated failed exec attempts for the current `/icsos/apps` path, consistent with invisible bytes being entered at the shell.
+- Root cause:
+  - `console_main()` marked the console tty `TTY_SERIAL` for every non-legacy DDL. A UEFI GOP/framebuffer DDL uses a malloced shadow buffer, so a COM1-less GUI boot was treated as a serial console.
+  - With `-serial none`, `tty_read()` raw-polled COM1. An absent 16550 receiver reads `0xFF`, which the old ready-bit test treated as forever-ready, injecting invisible `0xFF` bytes into the canonical line buffer.
+  - `vt_feed()` with `TTY_SERIAL` sent echo bytes to `serial_putc()` and returned, so the DDL/framebuffer path never received key echo.
+- Fix:
+  - `ics-os/kernel/console/tty.c`: `serial_getc_poll()` now calls `serial_getc()`, which checks `uart1.ready` and uses the normal UART lock instead of probing `0x3F8` directly.
+  - `ics-os/kernel/console/console.c`: set `TTY_SERIAL` only when `serial_com1_present()` is true and the DDL is not legacy VGA. A COM1-less GUI/framebuffer boot uses the keyboard/DDL path; headless serial boots still use COM1.
+- Verified:
+  - GUI: QEMU `-display gtk -serial none`, QMP key injection typed `echo consoleinputfixok`; `screendump` OCR showed the echoed command and the output `consoleinputfixok`.
+  - Headless serial: QEMU `-display none -serial socket`, sent `echo headlessserialfixok` to COM1; the serial stream returned `headlessserialfixok`.
+  - `make test-usb-uefi-gpt PASS`, `make test-boot PASS`, and `make test-ttycanon-unit` all passed.
+- Regenerated `ics-os/ics-os-uefi.img` with the kernel fix. Changes are not committed yet.
+- Current state: the GUI shell should echo input and execute typed commands; rerun `ics-os/scripts/boot-dist.sh ics-os-uefi.img uefi` after closing any QEMU instance holding the image lock.
+
 ## 2026-09-24 (Manila, UTC+8)
+
+### 23:05 — manual GUI boot no longer appears stuck at `STAGE 16`
+**Current problem / activity:** `scripts/boot-dist.sh ics-os-uefi.img uefi` opened a QEMU GTK window but the panel stayed on `STAGE 16: taskswitcher`, making it look like the kernel had hung.
+
+- Root cause: the script originally attached QEMU’s COM1 with `-serial null`. The kernel treats any present 16550 UART as the headless serial path and deliberately leaves `fb_live_render` off after the framebuffer selftest. With a UEFI/OVMF GOP and no serial console, the bottom-row stage badge remained visible while the actual console output was not blitted to the panel.
+- Verified with a QMP `screendump` of a copy of `ics-os-uefi.img`:
+  - With the default serial port present, the guest still reached the shell, but the GUI framebuffer did not show the live console.
+  - With `-serial none`, the same image booted to the distribution shell and the framebuffer rendered the shell correctly.
+- Updated `ics-os/scripts/boot-dist.sh`:
+  - `SERIAL=none` is now the default for visible displays (`gtk`, `sdl`, `cocoa`, `spice`, `vnc`).
+  - `SERIAL=stdio` is now the default for `DISPLAY_TYPE=none`.
+  - Explicit `SERIAL=file`, `SERIAL=stdio`, or `SERIAL=null` still override the default.
+  - The script prints a note when a serial device is attached while a visible display is requested, because that combination can leave the framebuffer console inactive.
+- Verified the updated script with `DRY_RUN=1` and a headless QMP screenshot run of a copy of the UEFI image using the script’s new `SERIAL=none` path. The screenshot decoded to the distribution shell prompt.
+- To use the GUI: close any existing QEMU instance holding the image lock and rerun `ics-os/scripts/boot-dist.sh ics-os-uefi.img uefi`.
+
+### 14:30 — manual distribution thumb-drive QEMU boot script
+**Current problem / activity:** Adding a repeatable local script for manually booting the ICS-OS distribution thumb-drive image with display output.
+
+- Added `ics-os/scripts/boot-dist.sh` to boot `ics-os-dist.img` or `ics-os-uefi.img` in QEMU with a GUI display by default.
+- The script supports `auto`, `bios`, and `uefi` modes. Auto mode selects UEFI for `*uefi*` image names or images with a GPT `EFI PART` header, and BIOS/IDE otherwise.
+- Missing known images are built automatically by default: `ics-os-dist.img` uses `make dist`, `ics-os-usb.img` uses `make usb`, and `ics-os-uefi.img` uses `make usb-uefi`; `AUTO_BUILD=0` disables this.
+- UEFI mode uses OVMF on q35 with xHCI USB mass storage, matching the N150/Etcher thumb-drive path. BIOS mode attaches the image as an IDE drive and boots with GRUB i386-pc.
+- Display output defaults to GTK on Linux and Cocoa on macOS; `DISPLAY_TYPE=vnc` is supported for headless hosts, and `SERIAL=file` / `SERIAL=stdio` remain available for debugging.
+- Verified with `DRY_RUN=1` command construction and a 30-second headless `DISPLAY_TYPE=none SERIAL=stdio` boot of `ics-os-uefi.img`; the guest reached `Root mount [OK]`, `FBCONSOLE_PASS`, `CONSOLE_READY`, and the distribution shell.
+
+### 10:10 — `ics-os-contrib` licensing compliance
+**Current problem / activity:** Auditing and remediating third-party licenses in the standalone `ics-os-contrib` repository.
+
+- Added `LICENSE` (GPLv2) for original ICS-OS contrib code.
+- Added `THIRD-PARTY.md` with package-by-package license attribution for pinned tarballs and vendored component files.
+- Added `docs/licenses/` copies of GPLv2, GPLv3, LGPLv3, the GCC Runtime Exception, TCC LGPL 2.1, NetHack GPL, Vim License, and the Realtek firmware redistribution license.
+- Added `components/lzozip/COPYING` for the MiniLZO GPLv2 files.
+- Repackaged `nethack-3.6.7-icsos.tar.gz` with modification notices in `include/config.h`, `include/unixconf.h`, and `sys/share/unixtty.c`, plus `NOTICE-ICSOS.txt`.
+- Repackaged `rtw8821c-firmware.tar.gz` with `LICENCE.rtlwifi_firmware.txt` and updated `sources/MANIFEST.sha256`.
+- Repackaged `rtw88-icsos-reference.tar.gz` with `NOTICE-ICSOS.txt` documenting the file-specific SPDX identifiers.
+- Verified `scripts/extract.sh` for the changed tarballs, rebuilt `components/nethack`, and ran `make all` successfully.
+- Pushed `ics-os-ex/ics-os-contrib` `main` to `2b62789`.
 
 ### 07:52 — `make test-nethack` PASS; NetHack startup GPF fixed
 **Current problem / activity:** None for NetHack; committing and pushing `ics-os-v2`.

@@ -30,6 +30,8 @@
 #include "../process/sync.h"
 #include "../net/wifi.h"
 
+extern int serial_com1_present(void);
+
 /* COM2 shell (shell2) line-discipline echo flag. Telnet clients typically
    perform local echo themselves, so echo defaults ON but can be disabled with
    'stty noecho' to avoid double-echoing. See shell2_main() below. */
@@ -1790,15 +1792,18 @@ void console_main(){
    {
       int tflags = TTY_ECHO | TTY_ICANON | TTY_ISIG;
       struct _dex32_direct_device_hdl *tdl = (struct _dex32_direct_device_hdl *)myddl;
-      /* Headless oracle: when there is no real VGA framebuffer (a QEMU
-         -nographic boot, or a laptop with no VGA), the DDL's hardware
-         pointer is a malloc'd shadow buffer, not 0xB8000.  In that case the
-         console tty must be serial-backed so full-screen applications
-         (e.g. NetHack, which writes to the tty rather than the serial log)
-         are visible on the serial console.  vt_feed() routes TTY_SERIAL
-         bytes straight to COM1; a real VGA console keeps the DDL path. */
-      if (myddl && (myddl->hdw_ptr == 0 || (void *)myddl->hdw_ptr != (void *)0xB8000))
-         tflags |= TTY_SERIAL;
+      /* Headless oracle: when there is no legacy VGA text console, the DDL's
+          hardware pointer is a malloc'd shadow buffer, not 0xB8000.  If a
+          real COM1 is present, the console tty must be serial-backed so
+          full-screen applications (e.g. NetHack, which writes to the tty
+          rather than the serial log) are visible on the serial console.
+          vt_feed() routes TTY_SERIAL bytes straight to COM1; a real VGA
+          console keeps the DDL path.  A COM1-less GUI/framebuffer boot must
+          not be serial-backed: TTY_SERIAL would send key echo to a missing
+          UART and make tty_read() poll an absent 16550 receiver. */
+       if (serial_com1_present() &&
+           myddl && (myddl->hdw_ptr == 0 || (void *)myddl->hdw_ptr != (void *)0xB8000))
+          tflags |= TTY_SERIAL;
       tty_t *t = tty_alloc(tdl, tflags);
       tty_set_fg(t);
       tty_attach_proc(current_process, t);
