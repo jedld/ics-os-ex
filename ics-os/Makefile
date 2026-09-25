@@ -483,7 +483,7 @@ test-screenshot: usb
 	@printf '%s\n' '@echo off' 'screenshot /icsos/screenshot.ppm' 'reboot' \
 		> /tmp/icsos-screenshot-autoexec.bat
 	@mcopy -o -i "ics-os-usb.img@@$$((2048 * 512))" /tmp/icsos-screenshot-autoexec.bat ::autoexec.bat
-	@-timeout 120 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(UEFI_MEM) -smp 2 \
+	@-timeout 180 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(UEFI_MEM) -smp 2 \
 		$(QEMU_DISK_BOOT) \
 		< /dev/null > /tmp/icsos-screenshot.log 2>&1
 	@grep -aq "serial console ready" /tmp/icsos-screenshot.log
@@ -1359,6 +1359,33 @@ test-termtest: kernel/Kernel64.bin apps/termtest.exe
 	@grep -aq "TERMTEST_PASS" /tmp/icsos-termtest.log
 	@! grep -aq "TERMTEST_FAIL" /tmp/icsos-termtest.log
 	@echo "test-termtest PASS"
+
+apps/htop.exe: contrib/htop/htop.c contrib/htop/Makefile
+	$(MAKE) -C contrib/htop install
+
+test-htop: kernel/Kernel64.bin apps/htop.exe
+	@$(MAKE) -C kernel all
+	@echo "Building Multiboot2 ISO for htop..."
+	@rm -rf /tmp/icsos-htop-iso
+	@mkdir -p /tmp/icsos-htop-iso/boot/grub /tmp/icsos-htop-iso/apps
+	@cp kernel/Kernel64.bin /tmp/icsos-htop-iso/vmdex
+	@cp apps/htop.exe /tmp/icsos-htop-iso/apps/htop.exe
+	@printf '%s\n' 'htop --version' 'htop --selftest' 'htop --frame' 'htop --dump' 'reboot' \
+		> /tmp/icsos-htop-iso/autoexec.bat
+	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
+		> /tmp/icsos-htop-iso/boot/grub/grub.cfg
+	@grub-mkrescue -o /tmp/icsos-htop.iso /tmp/icsos-htop-iso >/dev/null 2>&1
+	@echo "Running htop test (TCG)..."
+	@-timeout 60 $(QEMU_X64) -nographic -no-reboot -m 256M \
+		-cdrom /tmp/icsos-htop.iso -boot d \
+		< /dev/null > /tmp/icsos-htop.log 2>&1
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-htop.log
+	@grep -aq "htop 0.1 (ICS-OS)" /tmp/icsos-htop.log
+	@grep -aq "HTOP_SELFTEST_PASS" /tmp/icsos-htop.log
+	@grep -aq "HTOP_PASS" /tmp/icsos-htop.log
+	@grep -aq "HTOP_DUMP_OK" /tmp/icsos-htop.log
+	@! grep -aq "HTOP_FAIL" /tmp/icsos-htop.log
+	@echo "test-htop PASS"
 
 # vim (FEAT_TINY) smoke test: `vim --version` must print the banner and exit
 # cleanly, proving the ELF64 TUI loader + tty/dup stack run a real editor.

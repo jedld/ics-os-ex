@@ -581,6 +581,18 @@ The target writes `/tmp/icsos-ext4-e2fsck.log` and
   write pointer so repeated appends do not re-walk the cluster chain from
   the first cluster on every call.
 
+   The `htop` userland monitor (`ics-os/contrib/htop/`) uses the safe
+   process-observability syscalls `0xD1` (`sys_icsos_proc_list`), `0xD2`
+   (`sys_icsos_sysinfo`), and `0xD3` (`sys_icsos_kill`). `icsos_proc_list`
+   returns a bounded snapshot of PID, name, state, priority, CPU, CPU ticks,
+   and RSS pages. `icsos_sysinfo` reports CPU count, uptime, total CPU ticks,
+   and frame totals/free counts. `icsos_kill` is restricted: signal `0` is an
+   existence check, signals `1..15` request termination of user non-thread
+   processes, signals `>=16` are no-ops, and kernel/non-thread targets return
+   `EPERM`. `make test-htop` runs `--version`, `--selftest`, `--frame`, and
+   `--dump` headlessly and asserts `HTOP_SELFTEST_PASS`, `HTOP_PASS`, and
+   `HTOP_DUMP_OK`.
+
  The tmux-style multiplexer (`console/foreground.c`, `console_mux.h`)
  paints a blue status bar on row 24. The painter stops at NUL; a previous
  80-byte read showed stack garbage after `3:console(0)`. Each DDL keeps

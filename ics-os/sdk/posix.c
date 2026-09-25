@@ -25,6 +25,7 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/poll.h>
+#include <sys/icsos.h>
 #include <sys/socket.h>
 #include <net/if.h>
 #include <regex.h>
@@ -84,6 +85,9 @@ extern void exit(int status);
 #define FXN_RECVFROM 0xCE
 #define FXN_NETCFG   0xCF
 #define FXN_DUP2     0xD0
+#define FXN_ICSOS_PROCLIST 0xD1
+#define FXN_ICSOS_SYSINFO  0xD2
+#define FXN_ICSOS_KILL     0xD3
 #define FXN_DELAY 0x9B
 #define FXN_PRECISTIME 0x96
 
@@ -1769,13 +1773,59 @@ int atexit(void (*fn)(void))
    return 0;
 }
 
+int icsos_proc_list(struct icsos_procinfo *buf, int max)
+{
+   long r;
+   if (max < 0) {
+      errno = EINVAL;
+      return -1;
+   }
+   r = (long)dexsdk_systemcall(FXN_ICSOS_PROCLIST, (long)buf, max, 0, 0, 0);
+   if (r < 0) {
+      errno = (int)(-r);
+      return -1;
+   }
+   return (int)r;
+}
+
+int icsos_sysinfo(struct icsos_sysinfo *info)
+{
+   if (!info) {
+      errno = EINVAL;
+      return -1;
+   }
+   return (int)ics_sys(FXN_ICSOS_SYSINFO, (long)info, 0, 0, 0, 0);
+}
+
+int icsos_kill(int pid, int sig)
+{
+   if (pid <= 0) {
+      errno = ESRCH;
+      return -1;
+   }
+   if (sig < 0 || sig > 255) {
+      errno = EINVAL;
+      return -1;
+   }
+   return (int)ics_sys(FXN_ICSOS_KILL, pid, sig, 0, 0, 0);
+}
+
 int kill(int pid, int sig)
 {
-   if (pid == getpid() || pid <= 0) {
-      _exit(sig ? (128 + (sig & 127)) : 1);
+   if (pid == getpid()) {
+      if (sig == 0)
+         return 0;
+      _exit(128 + (sig & 127));
    }
-   (void)sig;
-   return 0;
+   if (pid <= 0) {
+      errno = ESRCH;
+      return -1;
+   }
+   if (sig < 0 || sig > 255) {
+      errno = EINVAL;
+      return -1;
+   }
+   return icsos_kill(pid, sig);
 }
 
 int fcntl(int fd, int cmd, ...)

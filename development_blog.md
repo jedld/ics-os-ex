@@ -1,5 +1,33 @@
 # Development blog
 
+## 2026-09-26 (Manila, UTC+8)
+
+### 02:45 — ICS-OS `htop` process/system monitor added and verified
+**Current problem / activity:** Implementing a lightweight native `htop` utility that exposes safe kernel process/system statistics to userland and can request termination of user processes, then validating it against the existing boot, SMP, process, terminal, and screenshot/FAT workstreams.
+
+- Added user-visible `struct icsos_procinfo` and `struct icsos_sysinfo` plus `icsos_proc_list()` / `icsos_sysinfo()` / `icsos_kill()` wrappers in `ics-os/sdk/include/sys/icsos.h` and `ics-os/sdk/posix.c`.
+- Added kernel implementations in `ics-os/kernel/process/process.c`:
+  - `0xD1 sys_icsos_proc_list`: bounded snapshot of PID, name, state, priority, CPU, CPU ticks, and RSS pages.
+  - `0xD2 sys_icsos_sysinfo`: CPU count, uptime, total CPU ticks, and frame totals/free counts.
+  - `0xD3 sys_icsos_kill`: safe kill semantics (`sig==0` existence check, `1..15` user non-thread termination, `>=16` no-op, kernel/non-thread `EPERM`).
+- Registered `0xD1`-`0xD3` in `ics-os/kernel/dexapi/dex32API.c` with `API_REQUIRE_INTS`.
+- Added per-CPU tick accounting in `ics-os/kernel/stdlib/time.c` so `cpu_ticks` and per-process CPU percentages are meaningful under SMP.
+- Added `ics-os/contrib/htop/` with an 80x25 TUI, `--version`, `--selftest`, `--frame`, and `--dump` modes, plus a `test-htop` target.
+- Updated SDK `kill()` to preserve self-kill, return `ESRCH` for non-positive PIDs, return `EINVAL` for invalid signals, and forward other PIDs to `icsos_kill()`.
+- Verified:
+  - `make test-htop PASS`
+  - `make test-integration PASS`
+  - `make test-termtest PASS`
+  - `make test-screenshot PASS`
+  - `make test-fatwrite PASS`
+  - `make test-fatwrite-coop PASS`
+  - `make test-fork PASS`
+  - `make test-stress-user-smp PASS`
+  - `make test-spawn PASS`
+- Diagnosed an initial `test-screenshot` timeout as a stale/partial `SCREENSH.PPM` state from a previously interrupted run; the `usb` target rebuilds the image cleanly, and the test timeout was raised from 120s to 180s for slow TCG/FAT write conditions.
+- Updated `AGENTS.md`, `wiki/Kernel-Developer's-Guide.md`, and `ics-os/docs/testing-and-qa-modernization-plan.md` for `test-htop` and the new process-observability ABI.
+- Current state: htop source, test target, and docs are in place; relevant regressions pass and the work is ready to commit.
+
 ## 2026-09-25 (Manila, UTC+8)
 
 ### 22:37 — `test-screenshot` made fast enough for QEMU by fixing FAT sequential writes
