@@ -25,7 +25,9 @@ typedef struct _vt_state {
    char csi[24];
    int sgr;               /* current VGA cell attribute */
    int savx, savy;
-   int savsgr;
+    int savsgr;
+    int serx, sery;        /* lightweight cursor model for TTY_SERIAL output */
+
    int stb_top, stb_bot;  /* DECSTBM region, 0-based inclusive */
    int curhidden;
    int alt;               /* alternate screen active */
@@ -70,5 +72,6 @@ void vt_init(vt_state_t *v);
 void vt_feed(tty_t *t, int c);
 void vt_screen_clear(vt_state_t *v, struct _dex32_direct_device_hdl *ddl, int attr);
 void vt_cursor_set_visible(struct _dex32_direct_device_hdl *ddl, int visible);
+void vt_alt_exit(tty_t *t, int restorecursor);
 
 #endif

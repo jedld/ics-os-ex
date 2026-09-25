@@ -326,6 +326,7 @@ look for `RTL8821CE_PROBE_OK` / `POWER_OK` / `EFUSE_OK` / `FW_OK` / `MAC_OK` /
 file-backed BB/RF tables (`RTL8821CE_PHY_TABLES_TODO`).
 `make test-cdcacm-unit`, `make test-usbdbg-unit`,
 `make test-xhcipolicy-unit`, `make test-ttycanon-unit`,
+`make test-termtest`,
 `make test-usb-cdc-console` (both attach orders), and
 `make test-usb-cdc-pico` (real Pico via QEMU `usb-host`; SKIP if unplugged)
 are the gates.

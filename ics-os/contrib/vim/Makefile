@@ -53,7 +53,7 @@ VIM_C = \
 VIM_OBJS = $(patsubst %.c,$(OBJDIR)/%.o,$(VIM_C))
 
 # Stage the source tree once (re-run when the config or sources change).
-$(STAGE)/.stage: config.icsos.h icsos_stub.c $(VIM_SRC)/vim.h
+$(STAGE)/.stage: config.icsos.h icsos_stub.c pathdef.c $(VIM_SRC)/vim.h
 	rm -rf $(STAGE)
 	mkdir -p $(OBJDIR) $(STAGE)/auto
 	cp -a $(VIM_SRC)/*.c $(VIM_SRC)/*.h $(STAGE)/

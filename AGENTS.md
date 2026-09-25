@@ -95,6 +95,7 @@ Useful individual targets (from `ics-os/`):
 | `test-vim` | FEAT_TINY vim ELF64 TUI; non-interactive `vim --version` prints the real banner + exits cleanly |
 | `test-dup` | Runtime `dup(2)` (`0xC5`) self-test: dup'd tty fd allocable+closable; dup'd file fd write read back through the original (`DUPT_PASS`) |
 | `test-nethack` | NetHack 3.6.7 TTY smoke test: loads `nethack.exe` from the CD, finds `termcap`, reaches the copyright banner and `Who are you?` prompt, and exits cleanly; no GPF/PF |
+| `test-termtest` | Terminal-stack self-test: canonical/raw `termios` round-trip, `TIOCGWINSZ` 25x80, monotonic clock, zero-timeout `select`/`poll`, and end-to-end DSR-6 (`CSI 6 n` → `CSI row;col R`) on both framebuffer and serial-backed ttys |
 | `test-partition-unit` | Host-native TAP unit tests for partition-layer logic: IEEE CRC-32 vectors/chunking and ATA LBA28/LBA48 capacity decode (`tests/partition_unit.c`) |
 | `test-fbconsole-unit` | Host-native TAP for GOP/VBE pitch, late map, PAT-WC, 80x25 origin, and per-axis zoom (`tests/fbconsole_geom_unit.c`) |
 | `test-kbdleds-unit` | Host-native TAP for i8042 boot-stage Caps/Num/Scroll encoding (`tests/kbd_boot_leds_unit.c`) |

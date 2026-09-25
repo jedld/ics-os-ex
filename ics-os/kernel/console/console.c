@@ -298,7 +298,12 @@ int user_execp(char *fname, DWORD mode, char *params){
        dex32_child_faulted = child_status != 0;
 
        fg_setmykeyboard(getprocessid());
-       if (dex32_child_faulted) {
+        {
+           tty_t *t = tty_fg();
+           if (t && t->vt.alt)
+              vt_alt_exit(t, 1);
+        }
+        if (dex32_child_faulted) {
           printf("execp: child faulted\n");
           return 0;
        }
@@ -1452,20 +1457,20 @@ int console_execute(const char *str){
            f = openfilex("/ramdisk/cc1probe.s", FILE_READ);
            if (f) {
               vfs_stat info;
-              static char cc1win[4104];
-              char cc1prev[8];
-              int cc1prevlen = 0;
-              int has_text = 0, has_func = 0;
-              int nr;
-              fstat(f, &info);
-              memset(cc1prev, 0, sizeof(cc1prev));
-              if (info.st_size < 4096) {
-                 printf("CC1_TEST_FAIL output size %lu\n", (unsigned long)info.st_size);
-                 ok = 0;
-              } else {
-                 while (!(has_text && has_func)) {
-                    int wlen;
-                    nr = (int)fread(cc1win + cc1prevlen, 1, 4096, f);
+              static char cc1win[2056];
+               char cc1prev[8];
+               int cc1prevlen = 0;
+               int has_text = 0, has_func = 0;
+               int nr;
+               fstat(f, &info);
+               memset(cc1prev, 0, sizeof(cc1prev));
+               if (info.st_size < 4096) {
+                  printf("CC1_TEST_FAIL output size %lu\n", (unsigned long)info.st_size);
+                  ok = 0;
+               } else {
+                  while (!(has_text && has_func)) {
+                     int wlen;
+                     nr = (int)fread(cc1win + cc1prevlen, 1, 2048, f);
                     if (nr <= 0)
                        break;
                     wlen = cc1prevlen + nr;

@@ -76,5 +76,6 @@ use- Tells the extension manager to use the extension: Args: <extension>
 ver- Shows version information.
 version- Full version banner.
 vimtest- Run FEAT_TINY vim --version (ELF TUI loader smoke test).
+wifidbg- RTL8821CE RX-path diagnostic (HW write-pointer dwell).
 wifiscan- Poll RX for beacons; print SSIDs.
 wifistat- Dump RTL8821CE / wlan0 status (FW, MAC, RX).

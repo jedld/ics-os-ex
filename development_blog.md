@@ -2,6 +2,39 @@
 
 ## 2026-09-25 (Manila, UTC+8)
 
+### 19:35 — `test-termtest` fixed: serial ttys now answer DSR-6 with a lightweight cursor model
+**Current problem / activity:** `test-termtest` timed out after sending DSR-6 (`CSI 6 n`) because headless `-nographic` boots mark the console tty `TTY_SERIAL`, and `vt_feed()` previously passed serial bytes through without interpreting cursor sequences.
+
+- Added a lightweight `serx`/`sery` cursor model to `vt_state_t`.
+- Added `vt_serial_feed()` in `kernel/console/tty_vt.c`:
+  - serial output is still passed through to COM1 unchanged;
+  - basic cursor moves (`H/f`, `A/B/C/D/E/F/G/d`) are tracked;
+  - DSR-6 is answered by injecting `CSI row;col R` into the tty input queue.
+- `vt_dsr_response()` now uses the serial cursor model for `TTY_SERIAL` ttys and the DDL cursor for framebuffer/VGA ttys.
+- Verified:
+  - `make test-termtest PASS`
+  - `make test-vim PASS`
+  - `make test-integration PASS`
+  - `make test-ttycanon-unit`, `test-consolemux-unit`, and `test-fbconsole-unit` pass.
+- Changes committed and pushed.
+
+### 19:10 — Vim full-screen start/exit and console restore verified; `defaults.vim` startup error removed
+**Current problem / activity:** Finishing the `vim` console fix: the alternate-screen termcap shim restored the primary prompt, but Vim still printed `E1187: Failed to source defaults.vim` at startup.
+
+- Added a minimal `ics-os/contrib/vim/defaults.vim` and pointed `default_vimruntime_dir` at `/icsos/share/vim/runtime`.
+- Fixed the Vim staging dependency in `ics-os/contrib/vim/Makefile` so `pathdef.c` changes trigger a restage/rebuild.
+- Deployed the rebuilt `vim.exe` and `defaults.vim` into `ics-os/ics-os-uefi.img` under `::/apps/vim.exe` and `::/share/vim/runtime/defaults.vim`.
+- Booted a copy of the image headlessly with QMP and confirmed:
+  - `vim` starts without the `E1187` prompt.
+  - The Vim splash appears.
+  - `ZZ` exits with status `0`.
+  - The primary console prompt and previous console content are restored.
+  - The prompt accepts further commands after exit.
+- Updated `make test-vim` to install the runtime `defaults.vim` into the smoke-test ISO and to use a longer/larger TCG boot window; `make test-vim PASS`.
+- Ran `make test-integration PASS` after the kernel/Vim changes.
+- `make test-termtest` initially timed out in the `-nographic` serial configuration because `vt_feed()` treated `TTY_SERIAL` as a raw pass-through and did not answer DSR-6 on the serial tty; this was fixed in the 19:35 entry.
+- Changes committed and pushed.
+
 ### 00:55 — GUI shell input/echo fixed; absent COM1 no longer floods the tty
 **Current problem / activity:** The manual GUI boot now reached the shell, but typed characters were not echoed and Enter triggered `execp: loading /icsos/apps...` / `Command or executable not found.` with no visible command line.
 

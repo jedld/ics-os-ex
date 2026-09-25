@@ -1339,21 +1339,22 @@ test-termtest: kernel/Kernel64.bin apps/termtest.exe
 
 # vim (FEAT_TINY) smoke test: `vim --version` must print the banner and exit
 # cleanly, proving the ELF64 TUI loader + tty/dup stack run a real editor.
-apps/vim.exe: contrib/vim/Makefile contrib/vim/config.icsos.h
+apps/vim.exe: contrib/vim/Makefile contrib/vim/config.icsos.h contrib/vim/pathdef.c contrib/vim/defaults.vim
 	$(MAKE) -C contrib/vim install
 
 test-vim: kernel/Kernel64.bin apps/vim.exe
 	@echo "Building Multiboot2 ISO for vim smoke test..."
 	@rm -rf /tmp/icsos-vim-iso
-	@mkdir -p /tmp/icsos-vim-iso/boot/grub /tmp/icsos-vim-iso/apps
+	@mkdir -p /tmp/icsos-vim-iso/boot/grub /tmp/icsos-vim-iso/apps /tmp/icsos-vim-iso/share/vim/runtime
 	@cp kernel/Kernel64.bin /tmp/icsos-vim-iso/vmdex
 	@cp apps/vim.exe /tmp/icsos-vim-iso/apps/vim.exe
+	@cp contrib/vim/defaults.vim /tmp/icsos-vim-iso/share/vim/runtime/defaults.vim
 	@printf '%s\n' 'vimtest' 'reboot' > /tmp/icsos-vim-iso/autoexec.bat
 	@printf '%s\n' 'set timeout=0' 'menuentry "ics" { multiboot2 /vmdex; boot }' \
 		> /tmp/icsos-vim-iso/boot/grub/grub.cfg
 	@grub-mkrescue -o /tmp/icsos-vim.iso /tmp/icsos-vim-iso >/dev/null 2>&1
 	@echo "Running vim --version smoke test (TCG)..."
-	@-timeout 55 $(QEMU_X64) -nographic -no-reboot -m 256M \
+	@-timeout 120 $(QEMU_X64) -nographic -no-reboot -m 512M \
 		-cdrom /tmp/icsos-vim.iso -boot d \
 		< /dev/null > /tmp/icsos-vim.log 2>&1
 	@grep -aq "Root mount \[OK\]" /tmp/icsos-vim.log
