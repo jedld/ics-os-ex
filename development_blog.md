@@ -2,6 +2,33 @@
 
 ## 2026-09-25 (Manila, UTC+8)
 
+### 22:37 — `test-screenshot` made fast enough for QEMU by fixing FAT sequential writes
+**Current problem / activity:** The in-OS `screenshot` builtin and `make test-screenshot` were functionally in place, but FAT-root PPM writes took minutes because `writefile12EX2()` re-walked the file cluster chain from the first cluster for every row/chunk write and re-read BPB geometry on each call.
+
+- Added `screenshot` console builtin support in `kernel/console/console.c`:
+  - captures the active GOP/VBE framebuffer with `fbconsole_geom()` / `fbconsole_rgb_at()`;
+  - writes a binary PPM header plus 32-row chunks to keep kernel BSS small;
+  - calls `iomgr_flushmgr()` after `fclose()` so host readback is deterministic;
+  - prints `SCREENSHOT_OK` or `SCREENSHOT_FAIL` markers.
+- Fixed `make test-screenshot`:
+  - stages `autoexec.bat` with `mcopy -o`;
+  - reads back the FAT short name `::SCREENSH.PPM`;
+  - replaces the broken multi-line Python here-doc with a single `python3 -c` PPM validator.
+- Optimized the FAT write path in `kernel/filesystem/fat12.c`:
+  - computes `bytes_per_cluster` from the already-read BPB instead of calling `fat_getbytesperblock()` per write;
+  - adds a per-volume sequential-write pointer in `fatcache_ent` so consecutive appends start at the expected cluster instead of walking from cluster 0;
+  - invalidates the sequential pointer when the FAT cache is invalidated or freed.
+- Reduced kernel BSS pressure by hashing FAT volume locks into 16 `sync_sharedvar` slots instead of allocating one for every possible `MAXDEVICES` id; unrelated volumes may share a lock, which only adds serialization.
+- Verified:
+  - `make test-screenshot PASS`
+  - `make test-fatwrite PASS`
+  - `make test-fatwrite-coop PASS`
+  - `make test-integration PASS`
+  - `make test-spawn PASS`
+  - `make test-make PASS`
+  - `make test-fatchain-unit` and `make test-vfsgrow-unit` pass.
+- Current state: source, docs, and QA plan are updated; build artifacts are being excluded before commit.
+
 ### 19:35 — `test-termtest` fixed: serial ttys now answer DSR-6 with a lightweight cursor model
 **Current problem / activity:** `test-termtest` timed out after sending DSR-6 (`CSI 6 n`) because headless `-nographic` boots mark the console tty `TTY_SERIAL`, and `vt_feed()` previously passed serial bytes through without interpreting cursor sequences.
 

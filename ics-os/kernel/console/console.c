@@ -29,6 +29,8 @@
 #include "klog.h"
 #include "../process/sync.h"
 #include "../net/wifi.h"
+#include "../hardware/vga/fbconsole.h"
+#include "../iomgr/iosched.h"
 
 extern int serial_com1_present(void);
 
@@ -830,6 +832,59 @@ void console_partitions()
         printf("No partitioned disks.\n");
 }
 
+static int console_screenshot(const char *path)
+{
+    unsigned w, h, x, y, yy, rows, cr = 32;
+    unsigned char hdr[32], *buf, *p, r, g, b;
+    file_PCB *f;
+    int n, ok = 1;
+
+    if (!fbconsole_geom(&w, &h, 0) || !w || !h) {
+        printf("SCREENSHOT_FAIL no-framebuffer path=%s\n", path);
+        return 0;
+    }
+    if (h < cr)
+        cr = h;
+    buf = (unsigned char *)malloc(w * cr * 3u);
+    f = openfilex(path, FILE_WRITE);
+    if (!buf || !f) {
+        if (buf)
+           free(buf);
+        printf("SCREENSHOT_FAIL alloc path=%s\n", path);
+        return 0;
+    }
+    n = sprintf((char *)hdr, "P6\n%u %u\n255\n", w, h);
+    if (n <= 0 || fwrite((char *)hdr, 1, n, f) != n)
+        ok = 0;
+    for (y = 0; ok && y < h; y += cr) {
+        rows = h - y < cr ? h - y : cr;
+        p = buf;
+        for (yy = 0; yy < rows; yy++) {
+            for (x = 0; x < w; x++) {
+                if (!fbconsole_rgb_at(x, y + yy, &r, &g, &b)) {
+                    ok = 0;
+                    break;
+                }
+                p[0] = r; p[1] = g; p[2] = b; p += 3;
+            }
+            if (!ok)
+                break;
+        }
+        if (ok && fwrite((char *)buf, 1, (int)(w * rows * 3u), f) != (int)(w * rows * 3u))
+            ok = 0;
+    }
+    if (fclose(f))
+        ok = 0;
+    free(buf);
+    if (ok)
+        iomgr_flushmgr();
+    if (ok)
+        printf("SCREENSHOT_OK path=%s width=%u height=%u\n", path, w, h);
+    else
+        printf("SCREENSHOT_FAIL write path=%s\n", path);
+    return ok;
+}
+
 /* ==================================================================
    console_execute(const char *str):
    * This command is used to execute a console string.
@@ -1059,10 +1114,14 @@ int console_execute(const char *str){
           else
              printf("dmesg: usage: dmesg -l <0-7>\n");
        } else {
-          klog_dump(-1);
-       }
-    }else
-    if (strcmp(u,"cpuid") == 0){        //-- Displays CPU information.
+           klog_dump(-1);
+        }
+     }else
+     if (strcmp(u,"screenshot") == 0){   //-- Save the framebuffer as PPM. Args: [path]
+        char *p = strtok(0," ");
+        console_screenshot(p ? p : "/icsos/screenshot.ppm");
+     }else
+     if (strcmp(u,"cpuid") == 0){        //-- Displays CPU information.
       hardware_cpuinfo mycpu;
       hardware_getcpuinfo(&mycpu);
       hardware_printinfo(&mycpu);

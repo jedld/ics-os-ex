@@ -60,6 +60,7 @@ rempcut- Removes a path alias. Args: <alias:>
 ren- Renames a file. Args: <oldname> <newname>
 rmdir- Removes a directory and all its subdirectories. Args: <dirname>
 run- Executes a batch file or script. Args: <script>
+screenshot- Save the framebuffer as PPM. Args: [path]
 selfhost- Compile a test program with in-OS tcc and run it.
 set- Sets an environment variable. Args: <key>=<value>
 shutdown- Shuts down the system.

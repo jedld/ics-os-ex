@@ -569,9 +569,17 @@ The target writes `/tmp/icsos-ext4-e2fsck.log` and
  not light until an HID driver exists; Intel laptop internals are
  usually i8042.
  `make test-boot`, `make test-usb-uefi`, `make test-usb-uefi-gpt`, and
- `make test-ide-thumbdrive` all assert `FBCONSOLE_PASS` and cover the GRUB
- paths (BIOS VBE, UEFI GOP on MBR FAT, UEFI GOP on GPT ESP, embedded
- i386-pc core).
+  `make test-ide-thumbdrive` all assert `FBCONSOLE_PASS` and cover the GRUB
+  paths (BIOS VBE, UEFI GOP on MBR FAT, UEFI GOP on GPT ESP, embedded
+  i386-pc core).
+
+  The `screenshot` console command captures the active linear framebuffer as
+  a binary PPM file. It streams 32-row chunks, so kernel memory use stays
+  small even for a large GOP. `make test-screenshot` validates the guest
+  `SCREENSHOT_OK` marker plus host-side PPM header, geometry, and exact
+  byte-count readback. The FAT writer also keeps a per-volume sequential
+  write pointer so repeated appends do not re-walk the cluster chain from
+  the first cluster on every call.
 
  The tmux-style multiplexer (`console/foreground.c`, `console_mux.h`)
  paints a blue status bar on row 24. The painter stops at NUL; a previous

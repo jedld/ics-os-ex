@@ -37,6 +37,7 @@ vmdex:
 	make -C kernel/
 
 .PHONY: usb-uefi usb-etcher test-usb-uefi-gpt test-vbox-uefi-gpt test-vbox-uefi-gpt-bios test-bochs-uefi-gpt test-usb-cdc-pico test-nethack
+.PHONY: test-screenshot
 .PHONY: vmdex clean usb floppy livecd apps dist prep-dist dist-tools test-dist test-selfhost test-tccboot test-kbuild test-tcc-kbuild test-fullhost test-tcc-fullhost test-exec test-iobench test-virtio test-net test-net-unit test-netchecksum-unit test-netarp-unit test-neticmp-unit test-netudp-unit test-nettcp-unit test-netsock-unit test-netdhcp-unit test-net-stress test-smp test-smp-matrix test-boot test-klog test-integration test-posixio test-termtest test-vim test-dup test-spawn test-stress test-stress-user-smp test-apuser test-fatwrite test-fatwrite-coop test-memcorrupt test-asloop test-fork test-fork-matrix test-make test-bintools test-buildtools test-cc1 test-gcc test-gccdriver test-gcc-kbuild test-selfhost-cert test-selfhost-cert-parallel test-selfhost-cert-usb test-io-unit test-partition-unit test-gpt-unit test-klog-unit test-fatchain-unit test-vfsgrow-unit test-smpclaim-unit test-fbconsole-unit test-bridge-console-unit test-kbdleds-unit test-lapicx2-unit test-xhcipolicy-unit test-consolemux-unit test-scriptcomment-unit test-cdcacm-unit test-pciscan-unit test-ttycanon-unit test-usbdbg-unit test-rtwfw-unit test-rtwphy-unit test-gpt test-vbox-usb-image test-vbox-usb-image-efi test-usb-uefi test-usb-storage test-usb-storage-xhci test-usb-storage-xhci-multi-controller test-usb-storage-xhci-sg test-usb-storage-xhci-bounce test-usb-storage-xhci-vtd-discovery test-usb-storage-xhci-msix test-usb-storage-xhci-msix-recovery test-usb-storage-xhci-vector-reservation test-usb-storage-xhci-poll test-usb-storage-xhci-high-bar test-usb-storage-xhci-recovery test-usb-storage-xhci-stall-recovery test-usb-storage-xhci-disconnect test-usb-storage-xhci-mounted-disconnect test-usb-storage-xhci-mounted-reconnect test-usb-storage-xhci-mounted-remount test-usb-storage-xhci-hotplug test-usb-storage-xhci-hotplug-identity-mismatch test-usb-storage-xhci-late-attach test-usb-storage-xhci-reconnect test-usb-storage-xhci-reconnect-mismatch test-usb-storage-xhci-reconnect-identity-mismatch test-usb-storage-xhci-no-device test-usb-cdc-console test-usb-cdc-pico test-ide-thumbdrive
 
 test-io-unit:
@@ -472,6 +473,28 @@ test-ide-thumbdrive: usb
 	@! grep -aq "no root filesystem mounted" /tmp/icsos-ide-thumbdrive.log
 	@! grep -aq "General Protection fault" /tmp/icsos-ide-thumbdrive.log
 	@echo "test-ide-thumbdrive PASS"
+
+# In-OS framebuffer capture: the `screenshot` builtin writes the active GOP/VBE
+# panel to a binary PPM file on the writable FAT root. Host readback validates
+# the PPM header, geometry, and exact byte count.
+test-screenshot: usb
+	@echo "Testing in-OS framebuffer screenshot..."
+	@rm -f /tmp/icsos-screenshot.ppm /tmp/icsos-screenshot-autoexec.bat
+	@printf '%s\n' '@echo off' 'screenshot /icsos/screenshot.ppm' 'reboot' \
+		> /tmp/icsos-screenshot-autoexec.bat
+	@mcopy -o -i "ics-os-usb.img@@$$((2048 * 512))" /tmp/icsos-screenshot-autoexec.bat ::autoexec.bat
+	@-timeout 120 $(QEMU_X64) -display none -serial stdio -no-reboot -m $(UEFI_MEM) -smp 2 \
+		$(QEMU_DISK_BOOT) \
+		< /dev/null > /tmp/icsos-screenshot.log 2>&1
+	@grep -aq "serial console ready" /tmp/icsos-screenshot.log
+	@grep -aq "Root mount \[OK\]" /tmp/icsos-screenshot.log
+	@grep -aq "FBCONSOLE_PASS" /tmp/icsos-screenshot.log
+	@grep -aq "SCREENSHOT_OK path=/icsos/screenshot.ppm width=[1-9][0-9]* height=[1-9][0-9]*" /tmp/icsos-screenshot.log
+	@! grep -aq "SCREENSHOT_FAIL" /tmp/icsos-screenshot.log
+	@! grep -aq "General Protection fault" /tmp/icsos-screenshot.log
+	@mcopy -i "ics-os-usb.img@@$$((2048 * 512))" ::SCREENSH.PPM /tmp/icsos-screenshot.ppm
+	@python3 -c 'import pathlib,re,sys;d=pathlib.Path("/tmp/icsos-screenshot.ppm").read_bytes();m=re.match(rb"P6\n([1-9][0-9]*) ([1-9][0-9]*)\n255\n",d);w,h=(int(m.group(1)),int(m.group(2))) if m else (0,0);assert d[:2]==b"P6" and m and len(d)==m.end()+w*h*3 and w<=8192 and h<=8192, "screenshot: bad PPM"'
+	@echo "test-screenshot PASS"
 
 # UEFI thumbdrive boot: OVMF loads EFI/BOOT/BOOTX64.EFI from the USB stick,
 # then the kernel re-detects the USB mass-storage device and mounts it as root.
