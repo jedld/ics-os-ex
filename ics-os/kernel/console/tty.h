@@ -20,7 +20,7 @@ struct _PCB386;
 
 /* Per-tty VT100/xterm parser state (see console/tty_vt.c). */
 typedef struct _vt_state {
-   int state;             /* 0 ground, 1 esc, 2 csi, 3 osc */
+   int state;             /* 0 ground, 1 esc, 2 csi, 3 osc, 4 osc-esc */
    int csi_n;
    char csi[24];
    int sgr;               /* current VGA cell attribute */

@@ -326,13 +326,16 @@ look for `RTL8821CE_PROBE_OK` / `POWER_OK` / `EFUSE_OK` / `FW_OK` / `MAC_OK` /
 file-backed BB/RF tables (`RTL8821CE_PHY_TABLES_TODO`).
 `make test-cdcacm-unit`, `make test-usbdbg-unit`,
 `make test-xhcipolicy-unit`, `make test-ttycanon-unit`,
-`make test-termtest`,
+`make test-termcap-unit`, `make test-termtest`,
 `make test-usb-cdc-console` (both attach orders), and
 `make test-usb-cdc-pico` (real Pico via QEMU `usb-host`; SKIP if unplugged)
 are the gates.
 Canonical `read()` keeps unread line bytes (`tty_canon.h`); a 1-byte
 userland `read` used to drop the rest of `ls`. DDL output applies ONLCR
-so `\n` returns to column 0.
+so `\n` returns to column 0. `test-termtest` now covers DSR-6, relative
+cursor motion, edge clamping, DECSC/DECRST, bounded `SU`, and OSC `ST`
+termination; serial-backed ttys use a lightweight cursor model that
+supports the same DSR/save/restore subset rather than full VT emulation.
 
 The current USB compatibility path uses `kernel/hardware/dma.h` to validate its
 identity-mapped bus addresses against alignment, overflow, the 32-bit DMA mask,

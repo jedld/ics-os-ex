@@ -2,6 +2,50 @@
 
 ## 2026-09-26 (Manila, UTC+8)
 
+### 23:43 — Kernel VT parser hardened and `test-termtest` expanded to pass
+**Current problem / activity:** The shared SDK termcap work was green, but the follow-up terminal hardening exposed two issues: the new `termtest` DECSC/DECRST stage timed out, and the headless serial lightweight cursor model did not support cursor save/restore. The current activity is fixing the serial VT model, hardening the DDL parser, expanding the guest terminal regression, rerunning the terminal/integration gates, and updating the docs.
+
+- Confirmed the QEMU `-nographic` console uses the serial tty path, so `vt_serial_feed()` must answer DSR-6 and support the same cursor save/restore subset used by the test.
+- Fixed a C string bug in `termtest.c`: `"\x1b7"` and `"\x1b8"` were single hexadecimal characters (`0x1B7` / `0x1B8`) because `7` and `8` are hex digits; the test now uses `"\0337"` and `"\0338"` for `ESC 7` / `ESC 8`.
+- Diagnosed the remaining timeout as a response-length mismatch: the serial model ignored save/restore, reported `CSI 1;1 R` after a restore, and `read_exact(7)` blocked waiting for the seventh byte.
+- Hardened `ics-os/kernel/console/tty_vt.c`:
+  - added `VT_S_OSC_ESC` so `ESC` inside an OSC string is consumed as part of `ST` termination instead of escaping into a new CSI parser;
+  - capped CSI parameter accumulation at `VT_PARAM_MAX`;
+  - ignored unknown `ED`/`EL` modes instead of falling through to clear-all;
+  - clamped `SU`/`SD` to the visible screen height;
+  - extended the serial lightweight cursor model with `ESC 7`/`ESC 8` and `CSI s`/`CSI u` save/restore so DSR-6 works after cursor restore in headless serial boots.
+- Expanded `ics-os/contrib/termtest/termtest.c` with relative cursor motion, screen-edge clamping, DECSC/DECRST, huge `SU` clamping, and an OSC `ST` termination case with embedded CSI.
+- Verified:
+  - `make test-termtest PASS`
+  - `make test-termcap-unit PASS`
+  - `make test-vim PASS`
+  - `make test-htop PASS`
+  - `make test-nethack PASS`
+  - `make test-integration PASS`
+- Updated `AGENTS.md`, `wiki/Kernel-Developer's-Guide.md`, `ics-os/docs/testing-and-qa-modernization-plan.md`, and the local reference indexes.
+- Current state: the terminal hardening work is green and ready for a focused commit if requested.
+
+### 03:20 — Shared SDK termcap module added and Vim termcap output fixed
+**Current problem / activity:** Vim terminal output was leaking literal termcap format characters because the old ICS-OS termcap shim used the wrong `tgetent()` argument order and a lossy `tgoto()` implementation. The current activity is replacing that shim with a standards-based shared SDK termcap module, adding host-native regression coverage, and validating the Vim build against the real termcap API.
+
+- Changed `ics-os/sdk/include/termcap.h` to the standard termcap API: `tgetent(char *buf, const char *id)`, `TCBUFSIZ 2048`, POSIX-style `tputs()`, and `tparam()`.
+- Added `ics-os/sdk/termcap.c`:
+  - loads `TERMCAP`, `/icsos/etc/termcap`, `/etc/termcap`, and built-in `xterm`/`vt100`/`dumb` entries;
+  - normalizes termcap files by removing comments, spaces, tabs, and backslash-newline continuations;
+  - decodes `tgetstr()` values into the caller-provided output buffer and advances the caller pointer, matching Vim's `tstrbuf`/`tp` usage;
+  - implements `tgoto()` through `tparam()` so `\E[%i%d;%dH` expands to the expected cursor sequence;
+  - strips leading numeric padding in `tputs()` and maps termcap `0200` back to NUL on output.
+- Removed the old Vim-specific termcap definitions from `ics-os/contrib/vim/icsos_stub.c` and linked `$(SDK)/termcap.c` into `vim.exe`.
+- Added `ics-os/tests/termcap_unit.c` and `make test-termcap-unit`:
+  - 32 TAP checks for `tgetent`, `tgetnum`, `tgetflag`, `tgetstr`, `tgoto`, `tparam`, `tputs`, file loading, unknown terms, and null-buffer behavior.
+- Verified:
+  - `make test-termcap-unit PASS`
+  - `make -C contrib/vim` succeeds
+  - `make test-vim PASS`
+  - `make test-termtest PASS`
+  - `make test-htop PASS`
+- Current state: the shared termcap module is in place and the Vim termcap regression is green. The remaining terminal work is hardening `kernel/console/tty_vt.c` CSI/escape parsing against the ECMA-48/VT100/xterm references and rerunning the broader terminal/full-screen regressions.
+
 ### 02:45 — ICS-OS `htop` process/system monitor added and verified
 **Current problem / activity:** Implementing a lightweight native `htop` utility that exposes safe kernel process/system statistics to userland and can request termination of user processes, then validating it against the existing boot, SMP, process, terminal, and screenshot/FAT workstreams.
 

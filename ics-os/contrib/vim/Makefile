@@ -24,7 +24,7 @@ OBJDIR := $(STAGE)/obj
 # level above the SDK's default gnu89.
 VIM_CFLAGS=$(subst -std=gnu89,-std=gnu99,$(APP_CFLAGS))
 CFLAGS=$(VIM_CFLAGS) -nostdinc -I$(SDK)/include -I$(STAGE) -I$(STAGE)/proto -DHAVE_CONFIG_H
-LIBS=$(SDK)/tccsdk.c $(SDK)/posix.c $(SDK)/libtcc1.c $(SDK)/crt1.c
+LIBS=$(SDK)/tccsdk.c $(SDK)/posix.c $(SDK)/termcap.c $(SDK)/libtcc1.c $(SDK)/crt1.c
 
 # Core editor sources (the OBJ_COMMON list from vim's Makefile). Optional
 # subsystems (GUI, hardcopy, spell, sixel/kitty/cairo, sockets, terminal) are

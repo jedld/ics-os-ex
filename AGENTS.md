@@ -95,7 +95,7 @@ Useful individual targets (from `ics-os/`):
 | `test-vim` | FEAT_TINY vim ELF64 TUI; non-interactive `vim --version` prints the real banner + exits cleanly |
 | `test-dup` | Runtime `dup(2)` (`0xC5`) self-test: dup'd tty fd allocable+closable; dup'd file fd write read back through the original (`DUPT_PASS`) |
 | `test-nethack` | NetHack 3.6.7 TTY smoke test: loads `nethack.exe` from the CD, finds `termcap`, reaches the copyright banner and `Who are you?` prompt, and exits cleanly; no GPF/PF |
-| `test-termtest` | Terminal-stack self-test: canonical/raw `termios` round-trip, `TIOCGWINSZ` 25x80, monotonic clock, zero-timeout `select`/`poll`, and end-to-end DSR-6 (`CSI 6 n` → `CSI row;col R`) on both framebuffer and serial-backed ttys |
+| `test-termtest` | Terminal-stack self-test: canonical/raw `termios` round-trip, `TIOCGWINSZ` 25x80, monotonic clock, zero-timeout `select`/`poll`, end-to-end DSR-6 (`CSI 6 n` → `CSI row;col R`), relative cursor motion, edge clamping, DECSC/DECRST (`ESC 7`/`ESC 8`), huge `SU` clamping, and OSC `ST` termination with embedded CSI on both framebuffer and serial-backed ttys |
 | `test-screenshot` | In-OS `screenshot` builtin captures the active GOP/VBE framebuffer to a binary PPM file on the FAT root; host readback validates `P6`, geometry, and exact byte count |
 | `test-htop` | ICS-OS `htop` monitor: `--version`, `--selftest`, non-interactive `--frame`, and `--dump` using `sys_icsos_proc_list`/`sys_icsos_sysinfo`/`sys_icsos_kill`; asserts `HTOP_SELFTEST_PASS`, `HTOP_PASS`, `HTOP_DUMP_OK`, and no `HTOP_FAIL` |
 | `test-partition-unit` | Host-native TAP unit tests for partition-layer logic: IEEE CRC-32 vectors/chunking and ATA LBA28/LBA48 capacity decode (`tests/partition_unit.c`) |
@@ -116,6 +116,7 @@ Useful individual targets (from `ics-os/`):
 | `test-netdns-unit` | Host-native TAP for DNS query build / A-record parse (`tests/net_dns_unit.c`) |
 | `test-usbdbg-unit` | Host-native TAP for the CDC debug RPC line parser, KEYS hex, SCREEN dump, PPM size, and ICSOS_VER bind/STATUS stamps (`tests/usb_debug_unit.c`) |
 | `test-ttycanon-unit` | Host-native TAP for canonical tty read remainder (`tests/tty_canon_unit.c`) |
+| `test-termcap-unit` | Host-native TAP for SDK termcap `tgetent`/`tgetstr`/`tgoto`/`tparam`/`tputs` expansion (`tests/termcap_unit.c`) |
 | `test-pciscan-unit` | Host-native TAP for PCI slot function-count (empty slots skip fn 1-7) and Wi-Fi/network class helpers (`tests/pci_scan_unit.c`) |
 | `test-rtwfw-unit` | Host-native TAP for RTL8821C firmware header validation (`tests/rtw_fw_hdr_unit.c`) |
 | `test-bridge-console-unit` | Host-native TAP for the ESP32 debug-bridge LCD line buffer (`tests/bridge_console_unit.c`) |

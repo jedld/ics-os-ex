@@ -28,7 +28,9 @@ extern void *memmove(void *d, const void *s, unsigned int n);
 extern void *malloc(unsigned int n);
 extern void free(void *p);
 
-enum { VT_S_GROUND = 0, VT_S_ESC, VT_S_CSI, VT_S_OSC };
+enum { VT_S_GROUND = 0, VT_S_ESC, VT_S_CSI, VT_S_OSC, VT_S_OSC_ESC };
+
+#define VT_PARAM_MAX 1000000
 
 #define VT_SCREEN_SIZE (VT_COLS * VT_ROWS * 2)
 
@@ -167,21 +169,27 @@ static void vt_putchar(tty_t *t, char c, int attr)
 /* Parse "n1;n2;..." into vals; returns count. -1 on malformed input. */
 static int vt_parse_params(char *s, int *vals, int max)
 {
-   int n = 0, cur = -1, i;
-   for (i = 0; s[i] && n < max; i++) {
-      if (s[i] >= '0' && s[i] <= '9') {
-         if (cur < 0)
-            cur = 0;
-         cur = cur * 10 + (s[i] - '0');
-      } else if (s[i] == ';') {
-         vals[n++] = cur < 0 ? 0 : cur;
-         cur = -1;
-      } else {
-         return -1;
-      }
-   }
-   vals[n++] = cur < 0 ? 0 : cur;
-   return n;
+    int n = 0, cur = -1, i;
+    for (i = 0; s[i] && n < max; i++) {
+       if (s[i] >= '0' && s[i] <= '9') {
+          if (cur < 0)
+             cur = 0;
+          if (cur < VT_PARAM_MAX) {
+             cur = cur * 10 + (s[i] - '0');
+             if (cur > VT_PARAM_MAX)
+                cur = VT_PARAM_MAX;
+          }
+       } else if (s[i] == ';') {
+          if (n < max)
+             vals[n++] = cur < 0 ? 0 : cur;
+          cur = -1;
+       } else {
+          return -1;
+       }
+    }
+    if (n < max)
+       vals[n++] = cur < 0 ? 0 : cur;
+    return n;
 }
 
 static void vt_apply_sgr(tty_t *t, char *params)
@@ -400,34 +408,38 @@ static void vt_csi_dispatch(tty_t *t, char final)
       vt_cursor_sync(t);
       break;
    case 'J':
-      switch (p0) {
-      case 0:
-         vt_clear_rect(t, t->ddl->curx, t->ddl->cury, VT_COLS - 1, t->ddl->cury, v->sgr);
-         vt_clear_rect(t, 0, t->ddl->cury + 1, VT_COLS - 1, VT_ROWS - 1, v->sgr);
-         break;
-      case 1:
-         vt_clear_rect(t, 0, 0, VT_COLS - 1, t->ddl->cury - 1, v->sgr);
-         vt_clear_rect(t, 0, t->ddl->cury, t->ddl->curx, t->ddl->cury, v->sgr);
-         break;
-     default:
+       switch (p0) {
+       case 0:
+          vt_clear_rect(t, t->ddl->curx, t->ddl->cury, VT_COLS - 1, t->ddl->cury, v->sgr);
+          vt_clear_rect(t, 0, t->ddl->cury + 1, VT_COLS - 1, VT_ROWS - 1, v->sgr);
+          break;
+       case 1:
+          vt_clear_rect(t, 0, 0, VT_COLS - 1, t->ddl->cury - 1, v->sgr);
+          vt_clear_rect(t, 0, t->ddl->cury, t->ddl->curx, t->ddl->cury, v->sgr);
+          break;
+       case 2:
           vt_screen_clear(v, t->ddl, v->sgr);
           vt_refresh(t);
           break;
-      }
+       default:
+          break;
+       }
+        break;
+    case 'K':
+       switch (p0) {
+       case 0:
+          vt_clear_rect(t, t->ddl->curx, t->ddl->cury, VT_COLS - 1, t->ddl->cury, v->sgr);
+          break;
+       case 1:
+          vt_clear_rect(t, 0, t->ddl->cury, t->ddl->curx, t->ddl->cury, v->sgr);
+          break;
+       case 2:
+          vt_clear_rect(t, 0, t->ddl->cury, VT_COLS - 1, t->ddl->cury, v->sgr);
+          break;
+       default:
+          break;
+       }
        break;
-   case 'K':
-      switch (p0) {
-      case 0:
-         vt_clear_rect(t, t->ddl->curx, t->ddl->cury, VT_COLS - 1, t->ddl->cury, v->sgr);
-         break;
-      case 1:
-         vt_clear_rect(t, 0, t->ddl->cury, t->ddl->curx, t->ddl->cury, v->sgr);
-         break;
-      default:
-         vt_clear_rect(t, 0, t->ddl->cury, VT_COLS - 1, t->ddl->cury, v->sgr);
-         break;
-      }
-      break;
    case '@': {
       int x = t->ddl->curx, y = t->ddl->cury;
       unsigned char *s = vt_screen(t);
@@ -486,16 +498,22 @@ static void vt_csi_dispatch(tty_t *t, char final)
        vt_refresh(t);
        break;
     }
-   case 'S':
-      if (p0 <= 0) p0 = 1;
-      while (p0-- > 0)
-         vt_scroll_up(t, v->stb_top, v->stb_bot, v->sgr);
-      break;
-   case 'T':
-      if (p0 <= 0) p0 = 1;
-      while (p0-- > 0)
-         vt_scroll_down(t, v->stb_top, v->stb_bot, v->sgr);
-      break;
+   case 'S': {
+       int span = v->stb_bot - v->stb_top + 1;
+       if (p0 <= 0) p0 = 1;
+       if (p0 > span) p0 = span;
+       while (p0-- > 0)
+          vt_scroll_up(t, v->stb_top, v->stb_bot, v->sgr);
+       break;
+    }
+    case 'T': {
+       int span = v->stb_bot - v->stb_top + 1;
+       if (p0 <= 0) p0 = 1;
+       if (p0 > span) p0 = span;
+       while (p0-- > 0)
+          vt_scroll_down(t, v->stb_top, v->stb_bot, v->sgr);
+       break;
+    }
    case 'm':
       vt_apply_sgr(t, params);
       break;
@@ -647,24 +665,38 @@ static void vt_serial_feed(tty_t *t, int c)
 {
     vt_state_t *v = &t->vt;
 
-    switch (v->state) {
+   switch (v->state) {
     case VT_S_OSC:
-       if (c == 0x07)
-          v->state = VT_S_GROUND;
-       else if (c == 0x1B)
-          v->state = VT_S_ESC;
-       return;
+        if (c == 0x07)
+           v->state = VT_S_GROUND;
+        else if (c == 0x1B)
+           v->state = VT_S_OSC_ESC;
+        return;
+
+    case VT_S_OSC_ESC:
+        if (c != 0x1B)
+           v->state = VT_S_GROUND;
+        return;
 
     case VT_S_ESC:
-       if (c == '[') {
-          v->state = VT_S_CSI;
-          v->csi_n = 0;
-       } else if (c == ']') {
-          v->state = VT_S_OSC;
-       } else {
-          v->state = VT_S_GROUND;
-       }
-       return;
+        if (c == '[') {
+           v->state = VT_S_CSI;
+           v->csi_n = 0;
+        } else if (c == ']') {
+           v->state = VT_S_OSC;
+        } else if (c == '7') {
+           v->savx = v->serx;
+           v->savy = v->sery;
+           v->state = VT_S_GROUND;
+        } else if (c == '8') {
+           v->serx = v->savx;
+           v->sery = v->savy;
+           vt_serial_clamp(v);
+           v->state = VT_S_GROUND;
+        } else {
+           v->state = VT_S_GROUND;
+        }
+        return;
 
     case VT_S_CSI:
        if (c == 0x1B) {
@@ -712,12 +744,20 @@ static void vt_serial_feed(tty_t *t, int c)
              v->serx = (p0 <= 0 ? 1 : p0) - 1;
              break;
           case 'd':
-             v->sery = (p0 <= 0 ? 1 : p0) - 1;
-             break;
-          case 'n':
-             if (p0 == 6)
-                vt_dsr_response(t);
-             break;
+              v->sery = (p0 <= 0 ? 1 : p0) - 1;
+              break;
+           case 's':
+              v->savx = v->serx;
+              v->savy = v->sery;
+              break;
+           case 'u':
+              v->serx = v->savx;
+              v->sery = v->savy;
+              break;
+           case 'n':
+              if (p0 == 6)
+                 vt_dsr_response(t);
+              break;
           default:
              break;
           }
@@ -786,20 +826,25 @@ void vt_feed(tty_t *t, int c)
    v = &t->vt;
 
    switch (v->state) {
-   case VT_S_OSC:
-      if (c == 0x07)
-         v->state = VT_S_GROUND;
-      else if (c == 0x1B)
-         v->state = VT_S_ESC;
-      return;
+    case VT_S_OSC:
+       if (c == 0x07)
+          v->state = VT_S_GROUND;
+       else if (c == 0x1B)
+          v->state = VT_S_OSC_ESC;
+       return;
 
-   case VT_S_ESC:
-      if (c == '[') {
-         v->state = VT_S_CSI;
-         v->csi_n = 0;
-      } else if (c == ']') {
-         v->state = VT_S_OSC;
-      } else if (c == '7') {
+    case VT_S_OSC_ESC:
+       if (c != 0x1B)
+          v->state = VT_S_GROUND;
+       return;
+
+    case VT_S_ESC:
+       if (c == '[') {
+          v->state = VT_S_CSI;
+          v->csi_n = 0;
+       } else if (c == ']') {
+          v->state = VT_S_OSC;
+       } else if (c == '7') {
          v->savx = t->ddl->curx;
          v->savy = t->ddl->cury;
          v->savsgr = v->sgr;
